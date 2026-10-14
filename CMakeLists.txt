@@ -118,6 +118,12 @@ set(HEADERS
     include/wordcount.h
 )
 
+# Linux build: everything platform-specific lives in platform/linux/
+if(NOT WIN32)
+    include(platform/linux/linux.cmake)
+    return()
+endif()
+
 # Windows resource file (icon)
 set(RESOURCES
     resources/tinta.rc
