@@ -477,20 +477,41 @@ BOOL GetCursorPos(POINT* point) {
     return TRUE;
 }
 
-HWND WindowFromPoint(POINT) { return nullptr; }
+// The newest visible window under the point (windows of this process only)
+HWND WindowFromPoint(POINT point) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto it = state().windows.rbegin(); it != state().windows.rend(); ++it) {
+        HWND w = *it;
+        if (!w->destroyed && w->visible && PtInRect(&w->rect, point)) return w;
+    }
+    return nullptr;
+}
 
 BOOL PtInRect(const RECT* r, POINT p) {
     return r && p.x >= r->left && p.x < r->right && p.y >= r->top && p.y < r->bottom;
 }
 
+// The window losing capture hears about it (WM_CAPTURECHANGED, lParam = the
+// new capture window), as on Windows; drags cancel on it
 HWND SetCapture(HWND hwnd) {
-    HWND old = state().capture;
-    state().capture = hwnd;
+    HWND old;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        old = state().capture;
+        state().capture = hwnd;
+    }
+    if (old && old != hwnd) SendMessageW(old, WM_CAPTURECHANGED, 0, reinterpret_cast<LPARAM>(hwnd));
     return old;
 }
 
 BOOL ReleaseCapture() {
-    state().capture = nullptr;
+    HWND old;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        old = state().capture;
+        state().capture = nullptr;
+    }
+    if (old) SendMessageW(old, WM_CAPTURECHANGED, 0, 0);
     return TRUE;
 }
 

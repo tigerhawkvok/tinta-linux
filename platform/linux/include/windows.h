@@ -235,5 +235,7 @@ void tintaSetKeyState(int virtualKey, bool down);
 
 // Windows, GDI, files, clipboard, dialogs, shell, registry
 #include "tinta_win32.h"
+// COM, OLE and the shell (no-op while tinta_com.h is including this file)
+#include "tinta_com.h"
 
 #endif  // TINTA_LINUX_WINDOWS_H

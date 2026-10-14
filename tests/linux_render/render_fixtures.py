@@ -27,19 +27,33 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 THEMES = ["Paper", "Sakura", "Arctic", "Meadow", "Dusk", "Midnight", "Dracula", "Forest", "Ember", "Abyss"]
 
 
-def settings_ini(theme):
+def custom_theme_names(themes_ini):
+    names = []
+    if themes_ini:
+        for line in open(themes_ini, encoding="utf-8"):
+            if line.strip().lower().startswith("name="):
+                names.append(line.split("=", 1)[1].strip())
+    return names
+
+
+# Custom themes (themes.ini) follow the built-ins in index order
+def settings_ini(theme, themes_ini=""):
+    names = THEMES + custom_theme_names(themes_ini)
     lines = ["checkUpdates=0", "hasAskedFileAssociation=1", "followSystemTheme=0", "openInTabs=1"]
-    lines.append(f"themeIndex={THEMES.index(theme) if theme else 0}")
+    lines.append(f"themeIndex={names.index(theme) if theme else 0}")
     return "\n".join(lines) + "\n"
 
 
-def render(tinta, doc, out_png, size, scale, theme, settle_ms, trace=False, repaint=0, env_extra=None):
+def render(tinta, doc, out_png, size, scale, theme, settle_ms, trace=False, repaint=0, env_extra=None,
+           themes_ini=""):
     home = os.path.join(os.path.dirname(out_png), ".home", os.path.splitext(os.path.basename(out_png))[0])
     shutil.rmtree(home, ignore_errors=True)
     config = os.path.join(home, "config", "Tinta")
     os.makedirs(config)
     with open(os.path.join(config, "settings.ini"), "w") as f:
-        f.write(settings_ini(theme))
+        f.write(settings_ini(theme, themes_ini))
+    if themes_ini:
+        shutil.copyfile(themes_ini, os.path.join(config, "themes.ini"))
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = os.path.join(home, "config")
     env["XDG_CACHE_HOME"] = os.path.join(home, "cache")
@@ -67,6 +81,7 @@ def main():
     parser.add_argument("--trace", action="store_true", help="log image decodes, print all stderr")
     parser.add_argument("--repaint", type=int, default=0, help="time N repaints after settling")
     parser.add_argument("--env", action="append", default=[], help="NAME=VALUE for Tinta")
+    parser.add_argument("--themes-ini", default="", help="custom themes; --theme may name one")
     args = parser.parse_args()
 
     tinta = os.path.join(os.path.abspath(args.build), "tinta")
@@ -79,14 +94,15 @@ def main():
     failures = 0
     for doc in docs:
         name = os.path.splitext(os.path.basename(doc))[0]
-        suffix = f"-{args.theme}" if args.theme else ""
+        suffix = f"-{args.theme.replace(' ', '_')}" if args.theme else ""
         suffix += f"-{args.size}" + (f"@{args.scale}x" if args.scale != "1" else "")
         out_png = os.path.join(out_dir, f"{name}{suffix}.png")
         if os.path.exists(out_png):
             os.remove(out_png)
         code, wall, stderr = render(tinta, os.path.abspath(doc), out_png, args.size, args.scale, args.theme,
                                     args.settle_ms, args.trace, args.repaint,
-                                    dict(e.split("=", 1) for e in args.env))
+                                    dict(e.split("=", 1) for e in args.env), os.path.abspath(args.themes_ini)
+                                    if args.themes_ini else "")
         ok = code == 0 and os.path.exists(out_png)
         failures += not ok
         settle = next((l for l in stderr.splitlines() if l.startswith("render-png: settled")), "")

@@ -54,6 +54,12 @@ Upstream ships about 30 commits a month. If the port rewrites the ~20k lines
 of rendering code against a new abstraction, it is out of date within weeks,
 and every later upstream feature has to be ported by hand.
 
+> **2026-10-14: hard fork.** Nothing goes upstream, so staying close to
+> upstream is no longer a goal (§8, §10.2). The compat layer stays, because it
+> works and keeps the port small, but shared code is now changed freely
+> wherever that is the cleaner fix. The diff budget below is retired; read the
+> rest of this section as the history of how the layer came about.
+
 So the port keeps the shared code byte-identical to upstream wherever
 possible:
 
@@ -402,14 +408,14 @@ What this supersedes:
 
 ## 8. Upstream relationship
 
-- Track `oipoistar/tinta` for now, and keep the option to break away later.
-  Merge upstream (no rebase) into the local branch; the Linux build turns any
-  new Win32/D2D call into a compile error, and the shim grows to cover it.
+- **Hard fork (2026-10-14).** This is never submitted upstream. Breaking
+  changes to shared code are fine when they serve the fork. Upstream commits
+  are optional cherry-picks, not something to merge on a schedule.
 - All work stays local: commits on local branches, no pushes, no PRs. The
   branch `linux-port-plan` went to `origin` once, before that was decided,
   and was deleted there on 2026-10-13.
-- Shared-code fixes such as the Mermaid work also fix Windows. Offering them
-  upstream is an outward-facing step and Philip's call.
+- Shared-code fixes such as the Mermaid work also fix Windows, for this
+  fork's own Windows build.
 
 ## 9. Risks, ranked
 
@@ -446,8 +452,9 @@ What this supersedes:
 1. **"Inline markdown" means Mermaid fences rendered in place, as md-viewer
    does**, not an inline editing mode. This became §6; the live-preview phase
    was dropped.
-2. **Track upstream** with the compat layer, and keep the option to break
-   away.
+2. ~~Track upstream with the compat layer, and keep the option to break
+   away.~~ Superseded 2026-10-14: **hard fork**. Shared code changes freely;
+   no upstream PRs, ever.
 3. **macOS later.** GTK4 or a CoreText backend behind the same headers; not
    scheduled.
 4. **Local only.** No pushes, no PRs.

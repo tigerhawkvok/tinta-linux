@@ -898,8 +898,39 @@ public:
         bool insideX = pango_layout_line_x_to_index(pl, static_cast<int>((x - line.x) * PANGO_SCALE), &index, &trailing);
         insideX = insideX && x >= line.x && x <= line.x + line.widthWithWhitespace;
         UINT32 position = charOf(index);
-        // Pango puts a point past the end of the line on its last cluster,
-        // trailing; DirectWrite does the same
+        // Trailing by geometry, as DirectWrite decides it: the nearer edge of
+        // the hit cluster. Pango refuses a trailing hit on a wrapped row's
+        // last character, whose trailing edge is also the next row's start.
+        {
+            int lead = 0, trail = 0;
+            pango_layout_line_index_to_x(pl, index, FALSE, &lead);
+            pango_layout_line_index_to_x(pl, index, TRUE, &trail);
+            if (lead != trail) {
+                int px = static_cast<int>((x - line.x) * PANGO_SCALE);
+                trailing = std::abs(px - trail) <= std::abs(px - lead) ? 1 : 0;
+            }
+        }
+        // Past a soft-wrapped row's visible glyphs: its trailing whitespace,
+        // measured by natural advances. Beyond the row, DirectWrite hits the
+        // last character's trailing edge (Pango would step back before the
+        // whitespace); Tinta's wrap-side caret logic relies on it.
+        if (!line.wsAdvance.empty() && x >= line.x + line.visibleEnd) {
+            float cursor = line.x + line.visibleEnd;
+            position = line.start + line.length - 1;
+            trailing = 1;
+            for (size_t k = 0; k < line.wsAdvance.size(); k++) {
+                float advance = line.wsAdvance[k];
+                if (x < cursor + advance) {
+                    position = line.wsStart + static_cast<UINT32>(k);
+                    trailing = x >= cursor + advance / 2 ? 1 : 0;
+                    break;
+                }
+                cursor += advance;
+            }
+        } else if (x >= line.x + line.widthWithWhitespace && line.newline == 0 && line.length > 0) {
+            position = line.start + line.length - 1;
+            trailing = 1;
+        }
         *isTrailingHit = trailing > 0 ? TRUE : FALSE;
         *isInside = insideX && insideY ? TRUE : FALSE;
         fillHitMetrics(position, line, metrics);
@@ -911,6 +942,13 @@ public:
         ensure();
         position = std::min<UINT32>(position, static_cast<UINT32>(text_.size()));
         const Line& line = lineOf(position);
+        if (line.inWrapSpace(position)) {
+            *x = line.x + line.visibleEnd + line.wrapSpaceX(position) +
+                 (trailing ? line.wsAdvance[position - line.wsStart] : 0.0f);
+            *y = yOffset_ + line.top;
+            fillHitMetrics(position, line, metrics);
+            return S_OK;
+        }
         PangoLayoutLine* pl = pango_layout_get_line_readonly(layout_, line.pangoIndex);
         int byte = byteOf_[position];
         int lineEnd = byteOf_[line.start + line.length];
@@ -950,6 +988,25 @@ public:
             }
             UINT32 a = std::max(position, lineStart), b = std::min(end, lineEnd);
             if (a >= b) continue;
+            // Whitespace ending a soft-wrapped row: one box at its natural
+            // width, after the boxes for the row's visible part
+            DWRITE_HIT_TEST_METRICS wrapSpace{};
+            bool hasWrapSpace = !line.wsAdvance.empty() && b > line.wsStart;
+            if (hasWrapSpace) {
+                UINT32 wa = std::max(a, line.wsStart);
+                wrapSpace.textPosition = wa;
+                wrapSpace.length = b - wa;
+                wrapSpace.left = originX + line.x + line.visibleEnd + line.wrapSpaceX(wa);
+                wrapSpace.top = originY + yOffset_ + line.top;
+                wrapSpace.width = line.wrapSpaceX(b) - line.wrapSpaceX(wa);
+                wrapSpace.height = line.height;
+                wrapSpace.isText = TRUE;
+                b = wa;
+            }
+            if (a >= b) {
+                out.push_back(wrapSpace);
+                continue;
+            }
             PangoLayoutLine* pl = pango_layout_get_line_readonly(layout_, line.pangoIndex);
             int* ranges = nullptr;
             int rangeCount = 0;
@@ -980,6 +1037,7 @@ public:
                 out.push_back(m);
             }
             g_free(ranges);
+            if (hasWrapSpace) out.push_back(wrapSpace);
         }
         *actual = static_cast<UINT32>(out.size());
         if (!metrics || maxCount < out.size()) return E_NOT_SUFFICIENT_BUFFER_COMPAT;
@@ -1076,7 +1134,37 @@ private:
         float width;                // without trailing whitespace
         float widthWithWhitespace;
         BOOL trimmed;
+        // Whitespace ending a soft-wrapped row: Pango gives it no width,
+        // DirectWrite its full advance (carets and selections at wraps use it)
+        UINT32 wsStart = 0;
+        float visibleEnd = 0.0f;  // where the row's visible glyphs end
+        std::vector<float> wsAdvance;
+        bool inWrapSpace(UINT32 position) const {
+            return !wsAdvance.empty() && position >= wsStart && position < start + length;
+        }
+        // x offset (from visibleEnd) of a position in that whitespace
+        float wrapSpaceX(UINT32 position) const {
+            float x = 0.0f;
+            for (UINT32 c = wsStart; c < position && c - wsStart < wsAdvance.size(); c++) x += wsAdvance[c - wsStart];
+            return x;
+        }
     };
+
+    // A character's advance shaped alone in its run's font
+    float naturalAdvance(PangoLayoutLine* pl, UINT32 c) const {
+        int byte = byteOf_[c], next = byteOf_[c + 1];
+        for (GSList* node = pl->runs; node; node = node->next) {
+            auto* run = static_cast<PangoGlyphItem*>(node->data);
+            if (byte >= run->item->offset && byte < run->item->offset + run->item->length) {
+                PangoGlyphString* glyphs = pango_glyph_string_new();
+                pango_shape(utf8_.data() + byte, next - byte, &run->item->analysis, glyphs);
+                float width = static_cast<float>(pango_glyph_string_get_width(glyphs)) / PANGO_SCALE;
+                pango_glyph_string_free(glyphs);
+                return width;
+            }
+        }
+        return 0.0f;
+    }
 
     void changed() override { dirty_ = true; }
 
@@ -1122,7 +1210,9 @@ private:
             }
             cursor += cluster.length;
         }
-        if (clusterStart < text_.size()) {
+        if (line.inWrapSpace(clusterStart)) {
+            clusterX = line.visibleEnd + line.wrapSpaceX(clusterStart);
+        } else if (clusterStart < text_.size()) {
             PangoLayoutLine* pl = pango_layout_get_line_readonly(layout_, line.pangoIndex);
             int x = 0;
             pango_layout_line_index_to_x(pl, byteOf_[clusterStart], FALSE, &x);
@@ -1250,6 +1340,19 @@ private:
             }
             line.trimmed = pango_layout_is_ellipsized(layout_) ? TRUE : FALSE;
 
+            if (i + 1 < count && nl == 0 && ws > 0) {
+                line.wsStart = end - ws;
+                int xStart = 0;
+                pango_layout_line_index_to_x(pl, byteOf_[line.wsStart], FALSE, &xStart);
+                line.visibleEnd = static_cast<float>(xStart) / PANGO_SCALE;
+                float total = 0.0f;
+                for (UINT32 c = line.wsStart; c < end; c++) {
+                    line.wsAdvance.push_back(naturalAdvance(pl, c));
+                    total += line.wsAdvance.back();
+                }
+                line.widthWithWhitespace = std::max(line.widthWithWhitespace, line.visibleEnd + total);
+            }
+
             // Alignment within maxWidth, ignoring trailing whitespace as DirectWrite does
             float free = maxWidth_ < 1.0e6f ? maxWidth_ - line.width : 0.0f;
             switch (format_.textAlignment) {
@@ -1290,6 +1393,9 @@ private:
             }
         } while (pango_layout_iter_next_run(iter));
         pango_layout_iter_free(iter);
+        for (const Line& line : lines_) {
+            for (size_t k = 0; k < line.wsAdvance.size(); k++) advance[line.wsStart + k] = line.wsAdvance[k];
+        }
 
         size_t n = text_.size();
         size_t start = 0;

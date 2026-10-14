@@ -166,4 +166,8 @@ void CoUninitialize();
 // Creates compat objects by class id (the WIC imaging factory)
 HRESULT CoCreateInstance(REFCLSID clsid, IUnknown* outer, DWORD context, REFIID riid, void** object);
 
+// windows.h brings in OLE and the shell, as on Windows; they need IUnknown,
+// so they come once it exists
+#include "tinta_shell.h"
+
 #endif  // TINTA_LINUX_COM_H
