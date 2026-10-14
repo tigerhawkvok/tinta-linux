@@ -370,6 +370,8 @@ public:
         return S_OK;
     }
     const std::string& family() const { return family_; }
+    // Chosen by a fallback's system (fontconfig) step rather than a mapping
+    bool systemChoice = false;
 
 private:
     std::string family_;
@@ -514,16 +516,26 @@ public:
         UINT32 localeLength = 0;
         source->GetLocaleName(position, &localeLength, &localeName);
         std::wstring locale = localeName ? localeName : L"en-us";
-        std::wstring first = pick(static_cast<UINT32>(text[0]), base, locale);
+        Choice first = pick(static_cast<UINT32>(text[0]), base, locale);
         UINT32 n = 1;
         while (n < text.size() && pick(static_cast<UINT32>(text[n]), base, locale) == first) n++;
         *mappedLength = n;
-        if (!first.empty()) *mappedFont = new Font(toUtf8(first), weight, style);
+        if (!first.family.empty()) {
+            auto* font = new Font(toUtf8(first.family), weight, style);
+            font->systemChoice = first.system;
+            *mappedFont = font;
+        }
         return S_OK;
     }
 
-    std::wstring pick(UINT32 c, const std::wstring& base, const std::wstring& locale) const {
-        if (!base.empty() && familyHasChar(base, c)) return base;
+    struct Choice {
+        std::wstring family;
+        bool system = false;  // fontconfig's pick: layouts leave it to Pango
+        bool operator==(const Choice& other) const { return family == other.family && system == other.system; }
+    };
+
+    Choice pick(UINT32 c, const std::wstring& base, const std::wstring& locale) const {
+        if (!base.empty() && familyHasChar(base, c)) return {base};
         for (const Mapping& mapping : mappings) {
             bool inRange = false;
             for (const auto& range : mapping.ranges) {
@@ -534,12 +546,13 @@ public:
             }
             if (!inRange) continue;
             for (const std::wstring& family : mapping.families) {
-                if (familyHasChar(family, c)) return family;
+                if (familyHasChar(family, c)) return {family};
             }
         }
         // Controls (tabs, line breaks) have no glyph: they stay with the base
-        if (c < 0x20) return base;
-        return system ? systemFamilyFor(base, locale, c) : std::wstring();
+        if (c < 0x20) return {base};
+        if (!system) return {};
+        return {systemFamilyFor(base, locale, c), true};
     }
 
     std::vector<Mapping> mappings;
@@ -1536,8 +1549,12 @@ private:
                                         format_.stretch, &mapped, &font, &scale);
                 mapped = std::clamp<UINT32>(mapped, 1, end - pos);
                 std::wstring family = font ? familyNameOf(font) : std::wstring();
+                // A system choice stays unpinned: Pango's own fallback then
+                // draws it exactly as in a layout without a custom fallback
+                auto* own = dynamic_cast<Font*>(font);
+                bool system = own && own->systemChoice;
                 if (font) font->Release();
-                if (!family.empty() && family != base) {
+                if (!family.empty() && family != base && !system) {
                     PangoAttribute* attr = pango_attr_family_new(resolveFamily(family).c_str());
                     attr->start_index = static_cast<guint>(byteOf_[pos]);
                     attr->end_index = static_cast<guint>(byteOf_[pos + mapped]);

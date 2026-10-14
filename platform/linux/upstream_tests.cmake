@@ -102,9 +102,6 @@ add_test(NAME i18n COMMAND i18n_tests)
 tinta_upstream_test(config_path_tests tests/config_path_tests.cpp)
 add_test(NAME config_paths COMMAND config_path_tests)
 
-# Still failing on Linux; shown as "Disabled" rather than hidden.
-# ui_font_language: symbols, Arabic and Hebrew in interface text (open).
-set_tests_properties(ui_font_language PROPERTIES DISABLED TRUE)
 
 tinta_upstream_test(inline_code_baseline_tests tests/inline_code_baseline_tests.cpp)
 target_compile_definitions(inline_code_baseline_tests PRIVATE
