@@ -119,13 +119,15 @@ if(BUILD_TESTING)
     # The whole app headless: an absolute path argument opens the document
     # (it is not taken for a /switch) and the window paints and saves
     set(TINTA_SMOKE_HOME ${CMAKE_BINARY_DIR}/linux-render/.ctest-home)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/linux-render)
     add_test(NAME linux_headless_render
         COMMAND tinta ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/markdown-regression-control.md
             --render-png=${CMAKE_BINARY_DIR}/linux-render/ctest-control.png --size=900x700 --settle-ms=100)
     set_tests_properties(linux_headless_render PROPERTIES
         ENVIRONMENT "XDG_CONFIG_HOME=${TINTA_SMOKE_HOME}/config;XDG_CACHE_HOME=${TINTA_SMOKE_HOME}/cache;XDG_DATA_HOME=${TINTA_SMOKE_HOME}/data"
         PASS_REGULAR_EXPRESSION "render-png: window \"[^\"]*markdown-regression-control\\.md"
-        FAIL_REGULAR_EXPRESSION "no painted window|\\[timeout\\]")
+        # A pass regex overrides the exit code, so a failed PNG write must fail here
+        FAIL_REGULAR_EXPRESSION "no painted window|\\[timeout\\]|render-png: [^\n]*\\.png: ")
 
     # Tinta's own PDF export through the print path (pages are released
     # before the print control closes, which once aborted in cairo-pdf)
