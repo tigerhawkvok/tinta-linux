@@ -450,6 +450,41 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     std::vector<StyledRun> runs;
     flattenInline(app, elements, rootStyle, lineHeight, runs);
 
+    // First-line baseline and height of a format's layouts. Runs are
+    // top-aligned at the line, so a run in another face (inline code) sits
+    // on the paragraph's baseline only when shifted by the difference (#262).
+    struct FaceLine {
+        IDWriteTextFormat* format;
+        float baseline, height;
+    };
+    std::vector<FaceLine> faceLines;
+    auto faceLine = [&](IDWriteTextFormat* format) -> const FaceLine& {
+        for (const auto& known : faceLines) {
+            if (known.format == format) return known;
+        }
+        FaceLine line{format, format->GetFontSize() * 0.8f, format->GetFontSize() * 1.2f};
+        IDWriteTextLayout* probe = nullptr;
+        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(L"Ag", 2, format, 1000, 1000, &probe))) {
+            DWRITE_LINE_METRICS metrics{};
+            UINT32 count = 1;
+            if (SUCCEEDED(probe->GetLineMetrics(&metrics, 1, &count))) {
+                line.baseline = metrics.baseline;
+                line.height = metrics.height;
+            }
+            probe->Release();
+        }
+        faceLines.push_back(line);
+        return faceLines.back();
+    };
+    auto baselineOf = [&](IDWriteTextFormat* format) { return faceLine(format).baseline; };
+    // A code chip hugs its glyphs' line box, padded by a fifth of the code
+    // size, and stays inside the text line so cells never clip it (#262)
+    auto codeChip = [&](float left, float right, float lineTop, float codeTop, IDWriteTextFormat* format) {
+        const float pad = format->GetFontSize() * 0.2f;
+        return D2D1::RectF(left, std::max(lineTop, codeTop - pad), right,
+                           std::min(lineTop + normalLineHeight, codeTop + faceLine(format).height + pad));
+    };
+
     // Reserve a common baseline and enough vertical room before retaining
     // any runs. Uniform spacing within this paragraph keeps wrapping and
     // selection consistent even when a tall inline matrix occurs mid-line.
@@ -467,14 +502,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         float size = format->GetFontSize();
         mathBoxes[i] = mathParse(app, toWide(run.elem->text), size, false);
         if (!mathBoxes[i]) continue;
-        float baseline = size * 0.8f;
-        IDWriteTextLayout* probe = nullptr;
-        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(L"Ag", 2, format, 1000, 1000, &probe))) {
-            DWRITE_LINE_METRICS metrics{};
-            UINT32 count = 1;
-            if (SUCCEEDED(probe->GetLineMetrics(&metrics, 1, &count))) baseline = metrics.baseline;
-            probe->Release();
-        }
+        float baseline = baselineOf(format);
         mathBaselines[i] = baseline;
         mathExpandLine(mathBoxes[i], baseline + run.style.drawYOffset, normalLineHeight, mathTextOffset, mathBelow);
     }
@@ -514,6 +542,8 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 LayoutInfo info = createLayout(app, text, format, lineHeight, app.codeTypography);
                 float textWidth = info.width;
 
+                // On the surrounding text's baseline (#262)
+                const float codeBaselineShift = baselineOf(baseFormat) - baselineOf(format);
                 // Keep fitting code spans atomic. Oversized ones share the
                 // Unicode/cluster-aware wrapping path below, including during
                 // table row measurement, so their chips cannot cover the next
@@ -521,7 +551,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 if (textWidth + kCodeSpanPadding > maxWidth) {
                     if (info.layout) info.layout->Release();
                     wrappedCode = true;
-                    drawYOffset = mathTextOffset + (normalLineHeight - format->GetFontSize() * 1.2f) / 2.0f;
+                    drawYOffset = mathTextOffset + codeBaselineShift;
                     break;
                 }
 
@@ -530,14 +560,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     y += lineHeight;
                 }
 
-                app.layoutRects.push_back({D2D1::RectF(x - 2, y + mathTextOffset,
-                                                      x + textWidth + kCodeSpanPadding,
-                                                      y + mathTextOffset + normalLineHeight),
+                D2D1_POINT_2F pos = D2D1::Point2F(x, y + mathTextOffset + codeBaselineShift);
+                app.layoutRects.push_back({codeChip(x - 2, x + textWidth + kCodeSpanPadding,
+                                                    y + mathTextOffset, pos.y, format),
                                            app.theme.codeBackground});
-
-                float codeFontHeight = format->GetFontSize() * 1.2f;
-                float verticalOffset = mathTextOffset + (normalLineHeight - codeFontHeight) / 2.0f;
-                D2D1_POINT_2F pos = D2D1::Point2F(x, y + verticalOffset);
                 D2D1_RECT_F bounds = D2D1::RectF(x, y, x + textWidth, y + lineHeight);
                 addTextRun(app, std::move(info), pos, bounds, color,
                            codeDocStart, text.length(), true);
@@ -785,10 +811,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             }
             float segWidth = widthOf(segStart, segEnd);
             if (wrappedCode) {
-                app.layoutRects.push_back({
-                    D2D1::RectF(segX - 2, y + mathTextOffset, segX + segWidth + kCodeSpanPadding,
-                                y + mathTextOffset + normalLineHeight),
-                    app.theme.codeBackground});
+                app.layoutRects.push_back({codeChip(segX - 2, segX + segWidth + kCodeSpanPadding, y + mathTextOffset,
+                                                    y + drawYOffset, format),
+                                           app.theme.codeBackground});
             } else if (hasBg) {
                 app.layoutRects.push_back({
                     D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,

@@ -109,3 +109,8 @@ set_tests_properties(copy_file_path frontmatter config_paths PROPERTIES DISABLED
 # input_tests suites still failing on Linux, being worked through
 set_tests_properties(ui_font_language image_cache_and_decode table_and_modifier_input docked_preview_and_hints
     PROPERTIES DISABLED TRUE)
+
+tinta_upstream_test(inline_code_baseline_tests tests/inline_code_baseline_tests.cpp)
+target_compile_definitions(inline_code_baseline_tests PRIVATE
+    TINTA_INLINE_CODE_FIXTURE="${TINTA_FIXTURES}/inline-code-baseline-262.md")
+add_test(NAME inline_code_baseline COMMAND inline_code_baseline_tests)
