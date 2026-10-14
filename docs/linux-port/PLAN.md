@@ -422,7 +422,10 @@ What this supersedes:
 1. **Text metrics.** Pango/FreeType and DirectWrite differ in ascent/descent,
    line gap, uniform line spacing and trailing-whitespace width. Layout code
    measures rather than assumes, which helps; tests with absolute pixel
-   values will need tolerances. Caught in phase 1.
+   values will need tolerances. Caught in phase 1: wrap-point whitespace and
+   trailing hits now follow DirectWrite, and Selawik replaces Noto Sans as
+   the Segoe UI stand-in (§10.10), after which upstream's layout suites pass
+   without tolerances.
 2. **Re-entrancy in the nested-loop shims** (clipboard reads, modal
    dialogs). If it bites, convert those call sites to callbacks, which adds a
    few islands.
@@ -466,3 +469,10 @@ What this supersedes:
 7. **Binary size is not a constraint.** Anything under ~100 MB is invisible
    on disk, so profiles favour speed.
 8. **Phase 1 approved.**
+9. **Hard fork** (2026-10-14; see 2 and §8).
+10. **Selawik ships with Tinta** (2026-10-14): Microsoft's OFL,
+    Segoe-UI-metric font, in `third_party/fonts/selawik`, registered as an
+    application font and first in place of Segoe UI. Tinta's layouts are
+    tuned for Segoe UI; with Noto Sans in its place, a table cell at 650 px
+    wrapped text that fits on Windows. It has no italic (synthesised) and no
+    kerning. The OFL notice belongs in phase 6's notices.

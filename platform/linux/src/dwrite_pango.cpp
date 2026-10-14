@@ -9,7 +9,9 @@
 #include "compat_internal.h"
 
 #include <pango/pangocairo.h>
+#include <fontconfig/fontconfig.h>
 #include <pango/pangofc-fontmap.h>
+#include <unistd.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -62,8 +64,34 @@ std::string nativePath(const wchar_t* path) {
 }
 
 // ---- Fonts -------------------------------------------------------------------------
+// Fonts Tinta ships (Selawik for Segoe UI): added to fontconfig as
+// application fonts before the first font map exists. Looked for in
+// $TINTA_FONT_DIR, beside an installed binary, then in the source tree.
+void registerBundledFonts() {
+    std::vector<std::string> dirs;
+    if (const char* env = std::getenv("TINTA_FONT_DIR")) dirs.push_back(env);
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n > 0) {
+        std::string dir(exe, static_cast<size_t>(n));
+        dir = dir.substr(0, dir.find_last_of('/'));
+        dirs.push_back(dir + "/../share/tinta/fonts");
+        dirs.push_back(dir + "/fonts");
+    }
+#ifdef TINTA_SOURCE_FONT_DIR
+    dirs.push_back(TINTA_SOURCE_FONT_DIR);
+#endif
+    for (const std::string& dir : dirs) {
+        if (g_file_test(dir.c_str(), G_FILE_TEST_IS_DIR) &&
+            FcConfigAppFontAddDir(nullptr, reinterpret_cast<const FcChar8*>(dir.c_str()))) {
+            return;
+        }
+    }
+}
+
 PangoContext* pangoContext() {
     static PangoContext* context = [] {
+        registerBundledFonts();
         PangoFontMap* map = pango_cairo_font_map_new();
         PangoContext* ctx = pango_font_map_create_context(map);
         g_object_unref(map);
@@ -97,10 +125,12 @@ struct Alias {
 // Windows families Tinta names in themes and code, and what stands in for
 // them on Linux. The original name stays first, so an installed copy wins.
 const Alias kAliases[] = {
-    {"segoe ui", "Inter,Noto Sans,Cantarell,Ubuntu,DejaVu Sans,sans-serif"},
-    {"segoe ui light", "Inter Light,Noto Sans Light,Noto Sans,DejaVu Sans,sans-serif"},
-    {"segoe ui semibold", "Inter,Noto Sans,DejaVu Sans,sans-serif"},
-    {"segoe ui variable", "Inter,Noto Sans,Cantarell,DejaVu Sans,sans-serif"},
+    // Selawik ships with Tinta (third_party/fonts): Segoe UI's metrics
+    {"segoe ui", "Selawik,Inter,Noto Sans,Cantarell,Ubuntu,DejaVu Sans,sans-serif"},
+    {"segoe ui light", "Selawik Light,Inter Light,Noto Sans Light,Noto Sans,DejaVu Sans,sans-serif"},
+    {"segoe ui semilight", "Selawik Semilight,Inter Light,Noto Sans Light,Noto Sans,DejaVu Sans,sans-serif"},
+    {"segoe ui semibold", "Selawik Semibold,Inter,Noto Sans,DejaVu Sans,sans-serif"},
+    {"segoe ui variable", "Selawik,Inter,Noto Sans,Cantarell,DejaVu Sans,sans-serif"},
     {"segoe ui emoji", "Noto Color Emoji,Twemoji,emoji"},
     {"segoe ui symbol", "Noto Sans Symbols,Noto Sans Symbols2,DejaVu Sans,sans-serif"},
     {"consolas", "Cascadia Code,JetBrains Mono,Fira Code,DejaVu Sans Mono,Noto Sans Mono,monospace"},

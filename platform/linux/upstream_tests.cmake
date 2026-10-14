@@ -103,11 +103,8 @@ tinta_upstream_test(config_path_tests tests/config_path_tests.cpp)
 add_test(NAME config_paths COMMAND config_path_tests)
 
 # Still failing on Linux; shown as "Disabled" rather than hidden.
-# table_and_modifier_input: at 650 px a table cell fits "Zcdef" in Segoe UI
-# but not in its wider Noto Sans stand-in, so the text wraps and the drag
-# selection ends early (font metrics, not a compat bug; PLAN.md §9).
 # ui_font_language: symbols, Arabic and Hebrew in interface text (open).
-set_tests_properties(table_and_modifier_input ui_font_language PROPERTIES DISABLED TRUE)
+set_tests_properties(ui_font_language PROPERTIES DISABLED TRUE)
 
 tinta_upstream_test(inline_code_baseline_tests tests/inline_code_baseline_tests.cpp)
 target_compile_definitions(inline_code_baseline_tests PRIVATE

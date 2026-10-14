@@ -260,6 +260,23 @@ int main() {
     check(exists, "Segoe UI has a stand-in");
     check(fonts->GetFontFamilyCount() > 5, "families enumerate");
 
+    // The bundled Selawik loads and is what Segoe UI text is measured in
+    BOOL selawik = FALSE;
+    fonts->FindFamilyName(L"Selawik", &index, &selawik);
+    check(selawik, "bundled Selawik is registered");
+    auto widthIn = [&](const wchar_t* family) {
+        IDWriteTextFormat* f = nullptr;
+        factory->CreateTextFormat(family, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                  DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"en-us", &f);
+        IDWriteTextLayout* l = layoutOf(factory, f, L"Zcdef WB202609171624520001");
+        DWRITE_TEXT_METRICS tm{};
+        l->GetMetrics(&tm);
+        l->Release();
+        f->Release();
+        return tm.width;
+    };
+    check(near(widthIn(L"Segoe UI"), widthIn(L"Selawik"), 0.01f), "Segoe UI text is set in Selawik");
+
     // Custom fallback (Tinta's CJK orders, #155 #254): the order decides
     // which region's face draws a unified ideograph. 直 differs between
     // Japanese and Simplified Chinese forms.

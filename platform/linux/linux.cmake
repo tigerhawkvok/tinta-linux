@@ -13,6 +13,7 @@ pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
 pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo cairo-pdf cairo-png)
 pkg_check_modules(PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 pkg_check_modules(RSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
+pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 # Remote images (URLDownloadToCacheFileW); without it they show as links
 pkg_check_modules(CURL IMPORTED_TARGET libcurl)
 
@@ -34,7 +35,12 @@ add_library(tinta_compat STATIC
 target_include_directories(tinta_compat PUBLIC ${TINTA_LINUX_DIR}/include)
 target_compile_definitions(tinta_compat PUBLIC UNICODE _UNICODE NOMINMAX)
 target_link_libraries(tinta_compat PUBLIC PkgConfig::GLIB PkgConfig::PANGOCAIRO PkgConfig::CAIRO
-    PkgConfig::PIXBUF PkgConfig::RSVG)
+    PkgConfig::PIXBUF PkgConfig::RSVG PkgConfig::FONTCONFIG)
+# Bundled fonts (Selawik for Segoe UI): found beside an installed binary in
+# share/tinta/fonts, or in the source tree when run from a build
+target_compile_definitions(tinta_compat PRIVATE
+    TINTA_SOURCE_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts")
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/ DESTINATION share/tinta/fonts)
 if(CURL_FOUND)
     target_link_libraries(tinta_compat PUBLIC PkgConfig::CURL)
     target_compile_definitions(tinta_compat PRIVATE TINTA_HAVE_CURL)
