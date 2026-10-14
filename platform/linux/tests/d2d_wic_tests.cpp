@@ -273,6 +273,8 @@ void testGeometryAndPdf(ID2D1Factory1* factory) {
     context->CreateCommandList(&page);
     context->SetTarget(page);
     context->BeginDraw();
+    D2D1_COLOR_F white = D2D1::ColorF(1, 1, 1);
+    context->Clear(&white);  // as print.cpp starts every page
     ID2D1SolidColorBrush* brush = nullptr;
     D2D1_COLOR_F black = D2D1::ColorF(0, 0, 0);
     context->CreateSolidColorBrush(&black, nullptr, &brush);
@@ -295,6 +297,9 @@ void testGeometryAndPdf(ID2D1Factory1* factory) {
     check(job && SUCCEEDED(device->CreatePrintControl(nullptr, job, nullptr, &control)), "print control");
     if (control) {
         check(SUCCEEDED(control->AddPage(page, D2D1::SizeF(816, 1056), nullptr, nullptr, nullptr)), "add page");
+        // print.cpp releases each page before closing: the control must keep it
+        page->Release();
+        page = nullptr;
         check(SUCCEEDED(control->Close()), "close print control");
         std::vector<unsigned char> bytes;
         tinta::memoryStreamBytes(pdf, bytes);
@@ -311,7 +316,7 @@ void testGeometryAndPdf(ID2D1Factory1* factory) {
     if (targets) targets->Release();
     pdf->Release();
     brush->Release();
-    page->Release();
+    if (page) page->Release();
     context->Release();
     window->Release();
 }

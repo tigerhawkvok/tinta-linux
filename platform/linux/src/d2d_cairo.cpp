@@ -976,6 +976,9 @@ public:
         cairo_paint(cr_);
         cairo_restore(cr_);
         cairo_show_page(cr_);
+        // cairo-pdf writes recording sources when the document finishes and
+        // does not keep them alive itself; callers release pages before Close
+        pages_.push_back(cairo_surface_reference(own->surface()));
         return cairo_status(cr_) == CAIRO_STATUS_SUCCESS ? S_OK : E_FAIL;
     }
     HRESULT Close() override {
@@ -986,6 +989,8 @@ public:
         cairo_status_t status = cairo_surface_status(pdf_);
         cairo_surface_destroy(pdf_);
         pdf_ = nullptr;
+        for (cairo_surface_t* page : pages_) cairo_surface_destroy(page);
+        pages_.clear();
         return status == CAIRO_STATUS_SUCCESS && !failed_ ? S_OK : E_FAIL;
     }
 
@@ -1003,6 +1008,7 @@ private:
     IStream* output_;
     cairo_surface_t* pdf_ = nullptr;
     cairo_t* cr_ = nullptr;
+    std::vector<cairo_surface_t*> pages_;
     bool failed_ = false;
 };
 

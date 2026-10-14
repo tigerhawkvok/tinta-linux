@@ -44,9 +44,17 @@ def settings_ini(theme, themes_ini=""):
     return "\n".join(lines) + "\n"
 
 
-def render(tinta, doc, out_png, size, scale, theme, settle_ms, trace=False, repaint=0, env_extra=None,
-           themes_ini=""):
-    home = os.path.join(os.path.dirname(out_png), ".home", os.path.splitext(os.path.basename(out_png))[0])
+def export_pdf(tinta, doc, out_pdf, theme, themes_ini=""):
+    """Tinta's own --exportpdf path; returns (exit code, wall ms, stderr)."""
+    home = os.path.join(os.path.dirname(out_pdf), ".home", os.path.basename(out_pdf))
+    env = isolated_env(home, theme, themes_ini)
+    start = time.monotonic()
+    proc = subprocess.run([tinta, doc, "--exportpdf", out_pdf], env=env, cwd=home, capture_output=True, text=True,
+                          timeout=120)
+    return proc.returncode, (time.monotonic() - start) * 1000, proc.stderr.strip()
+
+
+def isolated_env(home, theme, themes_ini):
     shutil.rmtree(home, ignore_errors=True)
     config = os.path.join(home, "config", "Tinta")
     os.makedirs(config)
@@ -58,6 +66,13 @@ def render(tinta, doc, out_png, size, scale, theme, settle_ms, trace=False, repa
     env["XDG_CONFIG_HOME"] = os.path.join(home, "config")
     env["XDG_CACHE_HOME"] = os.path.join(home, "cache")
     env["XDG_DATA_HOME"] = os.path.join(home, "data")
+    return env
+
+
+def render(tinta, doc, out_png, size, scale, theme, settle_ms, trace=False, repaint=0, env_extra=None,
+           themes_ini=""):
+    home = os.path.join(os.path.dirname(out_png), ".home", os.path.splitext(os.path.basename(out_png))[0])
+    env = isolated_env(home, theme, themes_ini)
     if trace:
         env["TINTA_TRACE_WIC"] = "1"
     env.update(env_extra or {})
@@ -82,6 +97,7 @@ def main():
     parser.add_argument("--repaint", type=int, default=0, help="time N repaints after settling")
     parser.add_argument("--env", action="append", default=[], help="NAME=VALUE for Tinta")
     parser.add_argument("--themes-ini", default="", help="custom themes; --theme may name one")
+    parser.add_argument("--pdf", action="store_true", help="also export each document with --exportpdf")
     args = parser.parse_args()
 
     tinta = os.path.join(os.path.abspath(args.build), "tinta")
@@ -115,6 +131,17 @@ def main():
               f"{settle.replace('render-png: ', '')}, {size} bytes")
         for line in other if args.trace else other[:5]:
             print(f"     {line}")
+        if args.pdf:
+            out_pdf = os.path.join(out_dir, f"{name}{suffix}.pdf")
+            if os.path.exists(out_pdf):
+                os.remove(out_pdf)
+            code, wall, stderr = export_pdf(tinta, os.path.abspath(doc), out_pdf, args.theme,
+                                            os.path.abspath(args.themes_ini) if args.themes_ini else "")
+            head = open(out_pdf, "rb").read(5) if os.path.exists(out_pdf) else b""
+            pdf_ok = code == 0 and head == b"%PDF-"
+            failures += not pdf_ok
+            size = os.path.getsize(out_pdf) if os.path.exists(out_pdf) else 0
+            print(f"{'ok  ' if pdf_ok else 'FAIL'} {name}.pdf: exit {code}, wall {wall:.0f} ms, {size} bytes")
     print(f"{len(docs) - failures}/{len(docs)} rendered into {out_dir}")
     return 1 if failures else 0
 

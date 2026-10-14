@@ -1,6 +1,6 @@
 # Tinta on Linux: port plan
 
-Status: decisions settled 2026-10-13 (§10). Phase 0, the native Mermaid
+Status: decisions settled 2026-10-13 (§10); hard fork since 2026-10-14. Phases 0 and 1, the native Mermaid
 preamble fix and merman step MM1 are done. Basis: tinta `c58981a` (3.8.0; identical to upstream
 `oipoistar/tinta` master), md-viewer `45cb36a` (0.3.0 + edit toggle).
 
@@ -208,7 +208,14 @@ basis for estimating the rest.
 - CI is deferred while all work stays local; the release workflow is
   untouched.
 
-**Phase 1: headless rendering (most of the shim).** Build `gfx_cairo`,
+**Phase 1: headless rendering. Done (2026-10-14); record in
+`tests/linux-headless-validation.md`.** All 49 fixtures render to PNG and
+PDF headless; 42/42 tests pass, including every upstream layout and input
+suite with no tolerances (after Selawik, §10.10). The Windows reference
+renders were not made: there is no Windows machine in the loop. The
+original plan follows.
+
+Build `gfx_cairo`,
 `text_pango` and `imaging`, wire up the existing `--exportpdf`/`--printpages`
 CLI paths, and add `--render-png out.png --width N --theme T`. Link md4c
 statically: FetchContent currently builds it as `libmd4c.so` on Linux.
