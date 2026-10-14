@@ -129,7 +129,7 @@ int main() {
             const wchar_t* body;
             const wchar_t* code;
         };
-        for (Faces faces : {Faces{nullptr, L"Consolas"}, Faces{nullptr, L"Cascadia Code"},
+        for (Faces faces : {Faces{nullptr, L"Monaspace Argon"}, Faces{nullptr, L"Consolas"}, Faces{nullptr, L"Cascadia Code"},
                             Faces{nullptr, L"Courier New"}, Faces{nullptr, L"Lucida Console"},
                             Faces{L"Noto Sans", L"MonoLisa"}}) {
             const wchar_t* codeFont = faces.code;

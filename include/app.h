@@ -85,6 +85,10 @@ struct StartupMetrics {
 // Syntax highlighting token types
 enum class SyntaxTokenType { Plain, Keyword, String, Comment, Number, Function, TypeName, Operator, ControlFlow };
 
+// The default code face: OFL-licensed, so the Linux build ships it
+// (third_party/fonts); Windows uses it when installed, else Consolas
+inline constexpr const wchar_t* kDefaultCodeFont = L"Monaspace Argon";
+
 // Theme colors
 struct D2DTheme {
     const wchar_t* name;
@@ -397,6 +401,9 @@ struct App {
     IDWriteTextFormat* supSubFormat = nullptr;  // document font for ^sup^/~sub~
     IDWriteTextFormat* headingFormat = nullptr;
     IDWriteTextFormat* codeFormat = nullptr;
+    // kDefaultCodeFont, or Consolas where it is not installed; for interface
+    // mono text (editor gutter, rail hints). Set by updateTextFormats.
+    const wchar_t* uiCodeFont = L"Consolas";
     IDWriteTextFormat* boldFormat = nullptr;
     IDWriteTextFormat* italicFormat = nullptr;
     // Nested inline spans: **bold *italic***, **`code`**, *`code`*

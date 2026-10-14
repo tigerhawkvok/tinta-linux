@@ -107,3 +107,7 @@ tinta_upstream_test(inline_code_baseline_tests tests/inline_code_baseline_tests.
 target_compile_definitions(inline_code_baseline_tests PRIVATE
     TINTA_INLINE_CODE_FIXTURE="${TINTA_FIXTURES}/inline-code-baseline-262.md")
 add_test(NAME inline_code_baseline COMMAND inline_code_baseline_tests)
+
+# The default code face (Monaspace Argon) and its fallback
+tinta_upstream_test(code_font_tests tests/code_font_tests.cpp)
+add_test(NAME code_font COMMAND code_font_tests)

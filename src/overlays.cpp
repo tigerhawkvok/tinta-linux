@@ -3873,7 +3873,7 @@ void renderThemeEditor(App& app) {
         app.dwriteFactory->CreateTextFormat(fam, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 13.5f),
             L"en-us", &b);
-        app.dwriteFactory->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        app.dwriteFactory->CreateTextFormat(app.uiCodeFont, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 12.5f),
             L"en-us", &m);
         float sx = spec.left + dpi(app, 18.0f);

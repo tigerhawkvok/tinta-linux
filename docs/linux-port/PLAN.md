@@ -483,3 +483,11 @@ What this supersedes:
     tuned for Segoe UI; with Noto Sans in its place, a table cell at 650 px
     wrapped text that fits on Windows. It has no italic (synthesised) and no
     kerning. The OFL notice belongs in phase 6's notices.
+11. **Monaspace Argon is the default code face** (2026-10-14, Philip's
+    pick; his own MonoLisa is not redistributable). OFL, shipped in
+    `third_party/fonts/monaspace-argon` (Regular, Italic, Bold, BoldItalic of
+    v1.400). It replaces Consolas in seven built-in themes, the editor
+    gutter and the edit rail; Arctic, Midnight and Abyss keep their Cascadia
+    faces, which reach Argon on Linux through the stand-in stack. Windows has
+    no bundled-font loader yet, so there the default resolves to Consolas
+    unless Argon is installed.

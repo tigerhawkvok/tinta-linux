@@ -81,6 +81,25 @@ bool initD2D(App& app) {
     return true;
 }
 
+// The family when installed, else the default code face, else Consolas, so
+// code never lands in a proportional fallback face. Off Windows the default
+// ships with Tinta and always resolves.
+const wchar_t* installedCodeFont(App& app, const wchar_t* family) {
+    auto installed = [&](const wchar_t* name) {
+        if (!name || !*name || !app.dwriteFactory) return false;
+        IDWriteFontCollection* fonts = nullptr;
+        if (FAILED(app.dwriteFactory->GetSystemFontCollection(&fonts, FALSE)) || !fonts) return false;
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        fonts->FindFamilyName(name, &index, &exists);
+        fonts->Release();
+        return exists != FALSE;
+    };
+    if (installed(family)) return family;
+    if (installed(kDefaultCodeFont)) return kDefaultCodeFont;
+    return L"Consolas";
+}
+
 void applyTheme(App& app, int themeIndex) {
     if (themeIndex < 0 || themeIndex >= themeCount()) return;
 
@@ -91,7 +110,7 @@ void applyTheme(App& app, int themeIndex) {
     // the cached layout runs, so a relayout is still needed.
     bool sameFonts = app.textFormat &&
         wcscmp(app.theme.fontFamily, newTheme.fontFamily) == 0 &&
-        wcscmp(app.theme.codeFontFamily, newTheme.codeFontFamily) == 0;
+        wcscmp(app.theme.codeFontFamily, installedCodeFont(app, newTheme.codeFontFamily)) == 0;
 
     app.currentThemeIndex = themeIndex;
     app.theme = newTheme;
@@ -342,6 +361,10 @@ void updateTextFormats(App& app) {
     float codeSize = 14.0f * scale;
 
     const wchar_t* fontFamily = app.theme.fontFamily;
+    // Exports and every code format read the theme's code font: settle it
+    // on an installed face once, here
+    app.theme.codeFontFamily = installedCodeFont(app, app.theme.codeFontFamily);
+    app.uiCodeFont = installedCodeFont(app, kDefaultCodeFont);
     const wchar_t* codeFont = app.theme.codeFontFamily;
 
     app.dwriteFactory->CreateTextFormat(fontFamily, nullptr,
@@ -561,7 +584,7 @@ void updateOverlayFormats(App& app) {
 
     // Slim line-number gutter (design t11): small mono digits,
     // right-aligned against the gutter's inner edge
-    app.dwriteFactory->CreateTextFormat(L"Consolas", nullptr,
+    app.dwriteFactory->CreateTextFormat(app.uiCodeFont, nullptr,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, 9.5f * editorScale, L"en-us",
         &app.editorGutterFormat);

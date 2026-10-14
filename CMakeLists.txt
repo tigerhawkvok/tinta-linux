@@ -418,6 +418,13 @@ if(BUILD_TESTING)
         TINTA_INLINE_CODE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-baseline-262.md")
     add_test(NAME inline_code_baseline COMMAND inline_code_baseline_tests)
 
+    # The default code face (Monaspace Argon) and its Consolas fallback
+    add_executable(code_font_tests tests/code_font_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(code_font_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(code_font_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(code_font_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>)
+    add_test(NAME code_font COMMAND code_font_tests)
+
     add_executable(i18n_tests
         tests/i18n_tests.cpp
         src/i18n.cpp

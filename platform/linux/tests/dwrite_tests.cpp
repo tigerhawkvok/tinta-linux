@@ -277,6 +277,12 @@ int main() {
     };
     check(near(widthIn(L"Segoe UI"), widthIn(L"Selawik"), 0.01f), "Segoe UI text is set in Selawik");
 
+    // ...and Monaspace Argon, the default code face, which Consolas maps to
+    BOOL argon = FALSE;
+    fonts->FindFamilyName(L"Monaspace Argon", &index, &argon);
+    check(argon, "bundled Monaspace Argon is registered");
+    check(near(widthIn(L"Consolas"), widthIn(L"Monaspace Argon"), 0.01f), "Consolas text is set in Monaspace Argon");
+
     // Custom fallback (Tinta's CJK orders, #155 #254): the order decides
     // which region's face draws a unified ideograph. 直 differs between
     // Japanese and Simplified Chinese forms.

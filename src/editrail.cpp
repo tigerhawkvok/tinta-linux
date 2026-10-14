@@ -37,6 +37,7 @@ static IDWriteTextLayout* railLayout(App& app, const std::wstring& text,
                                      const wchar_t* family = L"Segoe UI",
                                      DWRITE_FONT_STYLE style =
                                          DWRITE_FONT_STYLE_NORMAL) {
+    if (!family) family = app.uiCodeFont;
     IDWriteTextFormat* fmt = nullptr;
     app.dwriteFactory->CreateTextFormat(
         family, nullptr, weight, style, DWRITE_FONT_STRETCH_NORMAL,
@@ -98,7 +99,7 @@ static const RailBtn kTextBtns[] = {
     {3, L"S", 13.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
      L"Segoe UI", true, "rail.strike", L""},
     {4, L"</>", 10.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-     L"Consolas", false, "rail.code", L""},
+     nullptr, false, "rail.code", L""},  // nullptr: the code font
     {5, L"\U0001F517", 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.link", L"Ctrl+K"},
 };
@@ -538,7 +539,7 @@ void renderEditCtxMenu(App& app) {
         if (it.icon[0]) {
             railGlyph(app, it.icon, it.id == 113 ? 9.5f : 12.0f,
                       DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                      it.id == 113 ? L"Consolas" : L"Segoe UI",
+                      it.id == 113 ? app.uiCodeFont : L"Segoe UI",
                       D2D1::RectF(r.left + dpi(app, 6.0f), r.top,
                                   r.left + dpi(app, 28.0f), r.bottom),
                       railA(accent, alpha));
@@ -557,7 +558,7 @@ void renderEditCtxMenu(App& app) {
         if (it.hint[0]) {
             IDWriteTextLayout* hl = railLayout(app, it.hint, 11.0f,
                                                DWRITE_FONT_WEIGHT_NORMAL,
-                                               L"Consolas");
+                                               app.uiCodeFont);
             if (hl) {
                 DWRITE_TEXT_METRICS m{};
                 hl->GetMetrics(&m);
@@ -641,7 +642,7 @@ void renderEditCtxMenu(App& app) {
             }
             IDWriteTextLayout* hint = railLayout(app, kEDiag[i].hint, 10.5f,
                                                  DWRITE_FONT_WEIGHT_NORMAL,
-                                                 L"Consolas");
+                                                 app.uiCodeFont);
             if (hint) {
                 DWRITE_TEXT_METRICS m{};
                 hint->GetMetrics(&m);
@@ -706,7 +707,7 @@ void renderEditCtxMenu(App& app) {
             IDWriteTextLayout* hint = railLayout(app, pandocFormatExt(i),
                                                  10.5f,
                                                  DWRITE_FONT_WEIGHT_NORMAL,
-                                                 L"Consolas");
+                                                 app.uiCodeFont);
             if (hint) {
                 DWRITE_TEXT_METRICS m{};
                 hint->GetMetrics(&m);
