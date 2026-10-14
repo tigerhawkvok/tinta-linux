@@ -69,6 +69,13 @@ It also flags **12 diagrams native draws and merman rejects**:
 So the viewer must fall back from merman to the native renderer before the
 code block (PLAN.md §6.2).
 
+Three more realistic fixtures fail in the wrapper only. They are Mermaid's
+`info` diagram, which prints the Mermaid version, and merman renders them,
+but its root `<svg>` has no `viewBox` and no height (`width="100%"`,
+`style="max-width:400px"`), so there is no reliable size to lay out. They
+fall back as before. merman alone renders 1,895 of 1,908; through the
+wrapper, 1,892.
+
 ## Size and speed
 
 - merman linked into `merman_engine_tests`, stripped: 13.9 MB.
