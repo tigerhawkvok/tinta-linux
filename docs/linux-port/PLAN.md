@@ -1,7 +1,7 @@
 # Tinta on Linux: port plan
 
-Status: decisions settled 2026-10-13 (§10). Phase 0 and the first Mermaid
-fix are done. Basis: tinta `c58981a` (3.8.0; identical to upstream
+Status: decisions settled 2026-10-13 (§10). Phase 0, the native Mermaid
+preamble fix and merman step MM1 are done. Basis: tinta `c58981a` (3.8.0; identical to upstream
 `oipoistar/tinta` master), md-viewer `45cb36a` (0.3.0 + edit toggle).
 
 Goal: Tinta's UX (tabs, unified editor, annotations, native Mermaid and math,
@@ -25,7 +25,9 @@ should stay close to Tinta's.
 | md-viewer | Rust/egui; `main.rs` 7.4k lines + vendored `egui_commonmark` and `epaint`; ~35 MB binary (README) | `wc -l`, README |
 | md-viewer Mermaid | rendered by merman 0.3.0, a Rust port checked against Mermaid's own fixtures (merman HEAD tracks Mermaid 12.1) | `Cargo.lock`, merman README |
 | Tinta Mermaid coverage, before | 272 of 548 examples in Mermaid's syntax docs render; 892 of 1,908 realistic merman fixtures. The biggest single cause: a leading `---` frontmatter block made `detectKind` return `None` | `tests/mermaid_corpus/` |
-| Tinta Mermaid coverage, now | 336 / 548 docs examples; 1,228 / 1,908 realistic fixtures; no regressions | same, after `7c4ed53` |
+| Tinta Mermaid coverage, after M1 | 336 / 548 docs examples; 1,228 / 1,908 realistic fixtures; no regressions | same, after `7c4ed53` |
+| merman coverage | 548 / 548 docs examples; 1,892 / 1,908 realistic fixtures | `merman_corpus_probe`, §6.1 |
+| merman cost | +13.9–17.6 MB stripped depending on profile; Rust 1.95 in the build | §6.1 |
 | Mermaid upstream churn | 3 commits in 3 months touch `mermaid.cpp`/`mermaid_ext.*` | `git log` |
 | GTK 4.22 startup | `gtk_init` 42 ms. Time to first painted frame: 112 ms with the `cairo` renderer, 130 ms with `ngl`, 300+ ms with the default `vulkan` | spike under Xvfb with software GL, 3–5 runs each; **real-GPU numbers unmeasured** |
 | Pango throughput | `CHANGELOG.md` (43 KB): 750 layouts (Tinta-style element measure + per-line segments), 42.6k clusters, 21 ms warm / 36 ms cold (28 µs per layout) | spike `seg.c`, Pango 1.58 |
@@ -98,24 +100,12 @@ abstraction.
   8 ms, move the screen path to `GtkSnapshot`/GSK render nodes (GPU glyph
   cache) behind the same shim. Export stays on Cairo.
 
-### 2.4 Mermaid: fix Tinta's native parsers, don't embed merman
+### 2.4 Mermaid: merman replaces the native parsers
 
-Tinta draws Mermaid itself, with theme colours, selectable text and vector
-export. It falls back to a code block when its parser rejects a diagram, and
-that fallback is the gap against md-viewer. Closing it in the native parsers:
-
-- is platform-free shared code. It can proceed on Linux now, it fixes
-  Windows too, and upstream rarely touches those files (3 commits in 3
-  months), so merges stay cheap;
-- is measurable against the same corpora merman is checked with
-  (`tests/mermaid_corpus/`), with a regression gate per change.
-
-Embedding merman through its C bindings would add a Rust toolchain to the
-build and an SVG rasterization path that loses theme integration and text
-selection. md-viewer's whole binary is ~35 MB; merman's share is unmeasured.
-It stays a reserve option only for families Tinta has never drawn (zenuml,
-wardley, venn and the other Mermaid 11/12 betas), and only if those turn out
-to matter.
+Decided 2026-10-13 after measuring both. merman renders every Mermaid docs
+example; the native parsers render 61% even after fixes. The costs are build
+and size: Rust in the build, and 14–18 MB added to the binary. Design and
+numbers: §6.
 
 ## 3. Architecture
 
@@ -261,36 +251,128 @@ Cairo PNG, pandoc launched with `g_spawn`.
 metainfo, hicolor icons from `tinta.ico`, and a shared-mime-info entry for
 `.mmd` (no standard type exists). `--register` maps to `xdg-mime`.
 
-**Mermaid track (§6), alongside the phases.** It is pure code, so it needs
-nothing beyond phase 0, except drawing the frontmatter title, which waits for
-phase 1.
+**Mermaid track (§6), alongside the phases.** MM1 and MM2 need nothing
+beyond phase 0. MM3 (the viewer hookup) waits for phase 1, and MM5 for a
+Windows machine.
 
 **Later: macOS.** GTK4 runs there, so the same backend would work, with a
 non-native feel. A CoreText/CoreGraphics backend behind the same compat
 headers is the native option. Not scheduled.
 
-## 6. Mermaid compatibility
+## 6. Mermaid: merman replaces the native parsers
 
-Bar to meet: a fence md-viewer (merman) renders also renders in Tinta. Each
-step below is measured with `tests/mermaid_corpus/`, must show no
-regressions in `compare_runs.py`, and ships with `mermaid_tests` cases plus a
-mixed fixture (AGENTS.md).
+Decided 2026-10-13. A fence md-viewer renders should render in Tinta, and
+[merman](https://github.com/Latias94/merman), the Rust Mermaid port md-viewer
+uses, gets there directly. The measurements below shaped the design, not the
+decision.
 
-| Step | What | Status | Measured effect |
-|---|---|---|---|
-| M1 | Leading YAML frontmatter, multi-line `%%{ }%%` directives, `flowchart-elk` | **done** (`7c4ed53`) | docs 272 → 336 / 548; realistic fixtures 892 → 1,228 / 1,908 |
-| M2 | Flowchart: `n@{ shape: ..., label: ... }` (Mermaid 11.3 shapes) | next | 154 realistic fixtures fail on this alone |
-| M3 | Flowchart edges: `A & B --> C`, `<-->`, `~~~`, `--->` lengths, `>text]` nodes, `accTitle`/`accDescr` | | 67 realistic, 16 docs examples |
-| M4 | Flowchart Markdown-string labels (`` "`**bold**`" ``) and quoted-label edge cases | | 23 realistic |
-| M5 | gitGraph `TB`/`BT`, state composites and multi-line notes, ER statements, class namespaces, requirement statements, xychart axes, gantt `dateFormat`s | | 77 + 42 + 14 + 10 + 18 + 26 + 12 realistic |
-| M6 | Draw the frontmatter `title` above the diagram | needs phase 1 to verify visually | correctness, not counts |
-| M7 | HTML export: compare the fence language case-insensitively, as the viewer does | needs phase 1 to build `export_html.cpp` on Linux | small |
+### 6.1 Measured (Linux; merman 0.9.0 at `3a4b8c3`, Rust 1.95)
 
-The counts overlap: one diagram can hit several gaps, so they are a ranking,
-not a forecast. The remaining families Tinta doesn't draw at all (zenuml,
-treeView, ishikawa, cynefin, venn, wardley, usecase, eventmodeling, swimlane,
-agentflow, railroad) account for 136 of the 548 docs examples. They are new
-work per family, not parser fixes: decide which matter before starting any.
+| | Tinta native (after M1) | merman |
+|---|---|---|
+| Mermaid docs examples (548) | 336 | **548** |
+| Realistic merman fixtures (1,908) | 1,228 | **1,892** through the wrapper (1,895 raw). 6 need the `math` capability (not built); 7 are docs fragments containing a literal `...`, which Mermaid also rejects; 3 are `info` diagrams with no `viewBox` |
+| Native draws, merman rejects | n/a | 12 of 3,796: 6 math labels, 3 lenient syntax, 2 mindmap stress cases, 1 shape Mermaid lacks |
+| Composite-state diagram with notes (a real README) | code fallback | renders |
+| SVG render time, realistic fixtures | n/a | p50 2.3 ms, p95 8 ms, max 68 ms |
+| Engine creation | n/a | 2–3 ms |
+| Added size, stripped static link | n/a | 14–24 MB depending on profile (table below) |
+| Of the 14.1 MB `z` build | n/a | 8.7 MB code, 2.7 MB unwind tables (kept: a panic must not abort Tinta), 1.2 MB data |
+| Build | C++ only | adds Rust 1.95 via rustup (1.4 GB toolchain); ~70 s cold build of merman |
+
+Cargo profile against size and SVG time. SVG-only unless noted; times are
+over the 1,908 realistic fixtures:
+
+| Profile | Added size (stripped) | p50 | p95 | max |
+|---|---|---|---|---|
+| `release` default (opt 3), with PNG | 23.7 MB | 2.3 ms | 8.0 ms | 68 ms |
+| opt 2, fat LTO | 17.6 MB | 2.4 ms | 8.6 ms | 79 ms |
+| **opt `s`, fat LTO** (chosen default, `TINTA_MERMAN_OPT_LEVEL`) | **15.4 MB** | 3.2 ms | 11.5 ms | 125 ms |
+| opt `z`, fat LTO | 14.1 MB | 5.1 ms | 20.7 ms | 235 ms |
+| opt `z`, fat LTO, with PNG (the Windows set) | 16.7 MB | n/a | n/a | n/a |
+
+Rendering costs for one large diagram (2,091 × 1,947 px):
+
+| Path | 1× | 2× |
+|---|---|---|
+| SVG through librsvg, merman's drop shadows on | 1,000 ms | 2,200 ms |
+| SVG through librsvg, shadows off | **10 ms** | **37 ms** |
+| merman's own PNG (resvg), shadows off | 98 ms | 277 ms |
+
+### 6.2 Design
+
+- **Build.** CMake builds the `merman-ffi` static library from a pinned merman
+  checkout (FetchContent at `3a4b8c3`), through Corrosion or a cargo custom
+  command.
+  - Features: `all-diagrams,svg,layout-cytoscape`, plus `png` on Windows.
+  - No `layout-elk` (EPL-2.0) and no `math` (bundles OFL fonts) for now.
+  - Profile: `opt-level=z`, fat LTO, `panic=unwind`.
+- **Switch.** A CMake option `TINTA_MERMAN`, ON by default in this fork.
+  - OFF builds upstream's native renderer exactly as today. That keeps a build
+    with no Rust and keeps upstream merges cheap.
+  - When ON, the native `mermaid*.cpp` stay linked as the fallback. The viewer
+    and export call sites get `#if` islands (§4).
+- **Shared wrapper** `merman_engine.{h,cpp}`, platform-free:
+  - one lazily created engine;
+  - `renderSvg(source, theme)` returns the SVG, its size (from the `viewBox`:
+    Mermaid writes `width="100%"`) and label boxes;
+  - a failure falls back to the **native renderer**, then to the code block
+    captioned with merman's message. The corpus showed 12 diagrams native
+    draws and merman rejects (6 of them math labels), so native stays linked
+    as a safety net: nothing that renders today stops rendering.
+- **Options.**
+  - `svg.pipeline = resvg-safe`, so there is no `foreignObject`.
+  - Drop shadows off via `site_config.themeCSS`: 100× faster in librsvg, and
+    Tinta's diagrams are flat anyway.
+  - `presentation.theme` roles, series palette, font family and size come from
+    the active Tinta theme. `themes.cpp` already resolves diagram roles.
+  - A diagram's own frontmatter or `%%{init}%%` still overrides these, as in
+    Mermaid.
+- **Text measurement.** A host callback: Pango on Linux, DirectWrite on
+  Windows. merman's default metrics are font-agnostic, and labels visibly
+  touch their box edges with them. merman's docs give the same advice.
+- **Display, Linux.** librsvg onto Cairo.
+  - Rasterize once per diagram per zoom × scale, then blit on each paint.
+  - Print and PDF draw the SVG as vectors.
+- **Display, Windows.** Direct2D's SVG renderer ignores `<text>`, `<marker>`
+  and `<style>` (Microsoft's "SVG Support" page), so it can't draw merman
+  output.
+  - merman's PNG (resvg) becomes a D2D bitmap, rendered off the UI thread
+    like the async image path.
+  - The size comes from the SVG first, so layout doesn't jump when the bitmap
+    lands.
+- **Search and selection.** Native flowchart labels are in `docText` today
+  (`render.cpp:1595`), so Ctrl+F finds them. Each `<text>` box in the SVG
+  becomes a text rect with a `docStart`, so search and selection keep
+  working over the image.
+- **Exports.**
+  - HTML: inline SVG with the `parity` pipeline, which browsers render
+    natively.
+  - DOCX: PNG at 2×.
+  - PDF and print: vector on Linux, a high-resolution bitmap on Windows.
+  - Copy as image: PNG at 2×.
+- **Math labels.** The `math` feature would recover the 6 math-label
+  diagrams natively. Its size is unmeasured, and it adds OFL-1.1 KaTeX font
+  notices. Until then they take the native fallback.
+- **Licences.** merman's `rust-render-base` scope is MIT, ISC, BSD-3,
+  Apache-2.0 and DOMPurify's Apache-2.0-or-MPL-2.0. Ship a
+  `THIRD_PARTY_NOTICES` file.
+
+### 6.3 Steps
+
+| Step | What | Needs |
+|---|---|---|
+| MM1 | CMake + merman build + `merman_engine` wrapper + tests; corpus harness gains a merman mode as the regression gate | **done** (`2a8ad90`, `tests/mermaid-merman-validation.md`) |
+| MM2 | Pango text-measurement callback | nothing; Pango works headless |
+| MM3 | Hook into `layoutCodeBlock`, HTML and DOCX export behind `TINTA_MERMAN`, with merman → native → code fallback | phase 1 (Cairo shim) to see it on Linux |
+| MM4 | Search and selection rects from the SVG labels | MM3 |
+| MM5 | Windows: MSVC build of merman, DirectWrite measurement, async PNG | a Windows machine |
+
+What this supersedes:
+
+- M2–M5, the native parser fixes, are dropped.
+- M1 (`7c4ed53`) and `tests/mermaid_corpus/` stay. They serve the
+  `TINTA_MERMAN=OFF` build and give the before/after numbers.
 
 ## 7. Validation (AGENTS.md on Linux)
 
@@ -341,7 +423,10 @@ work per family, not parser fixes: decide which matter before starting any.
 6. **Startup**: 112–130 ms to first frame measured headless, against
    Windows Tinta's advertised <100 ms. GTK init alone is 42 ms. Measure on
    real hardware in phase 2 before optimizing.
-7. **Pango cost per layout** (28 µs warm). Fine for incremental layout of
+7. **merman in the build.** Rust 1.95 via rustup on every build machine;
+   ~70 s cold build; 14–18 MB in the binary against Tinta's ~2.5 MB. Pinned
+   by commit. `TINTA_MERMAN=OFF` builds without it.
+8. **Pango cost per layout** (28 µs warm). Fine for incremental layout of
    large documents (43 KB in 21 ms); revisit only if a fixture shows layout
    above budget.
 
@@ -355,3 +440,6 @@ work per family, not parser fixes: decide which matter before starting any.
 3. **macOS later.** GTK4 or a CoreText backend behind the same headers; not
    scheduled.
 4. **Local only.** No pushes, no PRs.
+5. **merman replaces the native Mermaid parsers.** Native stays linked as
+   the fallback for the 12 corpus diagrams merman rejects; `TINTA_MERMAN=OFF`
+   keeps an upstream-identical build.
