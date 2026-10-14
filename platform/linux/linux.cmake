@@ -9,6 +9,10 @@ set(TINTA_LINUX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platform/linux)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
+pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
+pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo cairo-pdf cairo-png)
+pkg_check_modules(PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
+pkg_check_modules(RSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
 
 # Shared code relies on MSVC's transitive standard includes
 add_compile_options(
@@ -18,10 +22,12 @@ add_compile_options(
 add_library(tinta_compat STATIC
     ${TINTA_LINUX_DIR}/src/win32_base.cpp
     ${TINTA_LINUX_DIR}/src/win32_input.cpp
+    ${TINTA_LINUX_DIR}/src/dwrite_pango.cpp
 )
 target_include_directories(tinta_compat PUBLIC ${TINTA_LINUX_DIR}/include)
 target_compile_definitions(tinta_compat PUBLIC UNICODE _UNICODE NOMINMAX)
-target_link_libraries(tinta_compat PUBLIC PkgConfig::GLIB)
+target_link_libraries(tinta_compat PUBLIC PkgConfig::GLIB PkgConfig::PANGOCAIRO PkgConfig::CAIRO
+    PkgConfig::PIXBUF PkgConfig::RSVG)
 
 set(TINTA_MERMAID_SOURCES
     src/mermaid.cpp
@@ -74,6 +80,11 @@ if(TINTA_MERMAN)
 endif()
 
 if(BUILD_TESTING)
+    # Behaviour of the compat layer itself
+    add_executable(compat_dwrite_tests ${TINTA_LINUX_DIR}/tests/dwrite_tests.cpp)
+    target_link_libraries(compat_dwrite_tests PRIVATE tinta_compat)
+    add_test(NAME compat_dwrite COMMAND compat_dwrite_tests)
+
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     target_link_libraries(keymap_tests PRIVATE tinta_compat)
