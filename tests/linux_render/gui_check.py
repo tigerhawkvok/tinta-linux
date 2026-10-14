@@ -250,10 +250,12 @@ def run(args):
         # Wayland socket, which is the user's live session
         env["GDK_BACKEND"] = "x11"
         env.setdefault("GSK_RENDERER", "cairo")  # Vulkan is software under Xvfb
+        env["GDK_SCALE"] = str(args.scale)  # X11 takes whole-number scales
         return env
 
     reference = os.path.join(out, "headless.png")
-    subprocess.run([args.tinta, args.doc, f"--render-png={reference}", f"--size={width}x{height}"],
+    subprocess.run([args.tinta, args.doc, f"--render-png={reference}", f"--size={width}x{height}",
+                    f"--scale={args.scale}"],
                    env=env_for("headless"), cwd=out, capture_output=True, timeout=120)
 
     x = X()
@@ -314,7 +316,27 @@ def run(args):
     report("clipboard", bool(text) and args.marker in text,
            f"{len(text)} chars, marker {'found' if args.marker in text else 'missing'}" if text
            else "no CLIPBOARD owner answered")
+    whole = len(text or "")
 
+    # Client-area mouse: a drag selects part of the document, which Ctrl+C
+    # then copies instead of everything
+    left, top = geometry[1], geometry[2]
+    x.move(left + 60, top + 160)
+    time.sleep(0.05)
+    x.tst.XTestFakeButtonEvent(x.d, 1, 1, 0)
+    x.sync()
+    for step in range(1, 11):
+        x.move(left + 60 + step * 40, top + 160 + step * 12)
+        time.sleep(0.02)
+    x.tst.XTestFakeButtonEvent(x.d, 1, 0, 0)
+    x.sync()
+    time.sleep(0.2)
+    x.key("Control_L", "c")
+    time.sleep(0.3)
+    part = x.clipboard_text() or ""
+    report("select", 0 < len(part) < whole, f"drag copied {len(part)} of {whole} chars")
+
+    before = settle(x, geometry, os.path.join(out, "4-before-resize.png"))
     small = (geometry[0], geometry[1], geometry[2], 700, 500)
     x.resize(geometry[0], 700, 500)
     time.sleep(0.5)
@@ -322,11 +344,14 @@ def run(args):
     if now:
         small = now[0]
     resized = settle(x, small, os.path.join(out, "4-resize.png"))
-    # The frame must follow: the bottom-right corner is drawn, not left empty
+    # The frame must follow: drawn to the bottom-right corner, and laid out
+    # again (not the old frame cropped, as without WM_SIZE)
     corner = resized.crop((resized.size[0] - 24, resized.size[1] - 24, resized.size[0], resized.size[1]))
     lit = corner.size[0] * corner.size[1] - corner.convert("L").histogram()[0]  # not black
-    report("resize", small[3:] == (700, 500) and lit > 24 * 24 * 0.9,
-           f"window {small[3]}x{small[4]}, {lit}/{24 * 24} corner pixels drawn")
+    relaid = changed_fraction(resized, before.crop((0, 0) + resized.size))
+    report("resize", small[3:] == (700, 500) and lit > 24 * 24 * 0.9 and relaid > 0.01,
+           f"window {small[3]}x{small[4]}, {lit}/{24 * 24} corner pixels drawn, "
+           f"{relaid * 100:.1f}% differs from the old frame cropped")
 
     # Tinta's caption buttons sit at the top right; close is the last
     x.move(small[1] + small[3] - 60, small[2] + 15)
@@ -347,7 +372,8 @@ def main():
     parser.add_argument("tinta")
     parser.add_argument("doc")
     parser.add_argument("--out", default="build/gui-check")
-    parser.add_argument("--size", default="1000x700")
+    parser.add_argument("--size", default="1000x700", help="window size in device pixels")
+    parser.add_argument("--scale", type=int, default=1, help="GDK_SCALE (HiDPI)")
     parser.add_argument("--marker", default="tinta-gtk-7Q4")
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -362,7 +388,7 @@ def main():
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("DISPLAY", None)
         cmd = [xvfb, "-a", "-s", "-screen 0 1600x1200x24", sys.executable, os.path.abspath(__file__),
-               args.tinta, args.doc, "--out", args.out, "--size", args.size, "--marker", args.marker, "--inner"]
+               args.tinta, args.doc, "--out", args.out, "--size", args.size, "--scale", str(args.scale), "--marker", args.marker, "--inner"]
         return subprocess.run(cmd, env=env).returncode
     results = run(args)
     print(f"{sum(results)}/{len(results)} checks passed")

@@ -239,6 +239,19 @@ dominates (a userspace setting; no driver changes).
 *Exit:* `input_tests` and the viewer-side `run_*_tests.cmake` suites run on
 Linux; the README's viewer feature list is checked by hand on GNOME/Wayland
 and X11, and the results are recorded.
+*Status (2026-10-14):* the minimum is in (`platform/linux/src/gtk_window.cpp`):
+- window, present and input
+- custom caption, `DefWindowProc` moves and resizes
+- HiDPI through `WM_DPICHANGED`
+- text clipboard, GtkFileDialog and GtkAlertDialog
+
+`tests/linux_render/gui_check.py` checks it on Xvfb (ctest `linux_gtk_window`);
+see `tests/linux-gtk-window-validation.md`. Not yet done:
+- drag-and-drop in
+- rich clipboard formats
+- dark-mode follow
+- URL launch and reveal checks
+- the hand-checked GNOME/Wayland pass
 
 **Phase 3: editor and IME.** `GtkIMContext`, paste (text and screenshot
 bitmaps), save and save-as dialogs, drafts, multi-caret. Alt+click and
@@ -264,6 +277,20 @@ Cairo PNG, pandoc launched with `g_spawn`.
 `-git`/`-bin`, and a `.deb` via CPack. Install the `.desktop` file, AppStream
 metainfo, hicolor icons from `tinta.ico`, and a shared-mime-info entry for
 `.mmd` (no standard type exists). `--register` maps to `xdg-mime`.
+*Status (2026-10-14):* the AppImage came first, ahead of phases 3–5, as the
+first usable package (Philip's priority). AppImage over Flatpak and Snap
+because:
+- it is one file to download and run, like the portable `tinta.exe`
+- it needs no runtime, store or daemon
+- it builds locally with no CI
+- Flatpak (Flathub review) and Snap (snapd) both need infrastructure
+  this fork does not have yet
+
+`platform/linux/appimage/build-appimage.sh BUILD OUT` builds
+`Tinta-x86_64.AppImage` from a system-library tree with pinned linuxdeploy
+and its GTK plugin. The `.desktop` file and hicolor icons are in. Still to
+do: AppStream metainfo, the `.mmd` MIME entry, and the Flatpak, AUR and
+`.deb` packages.
 
 **Mermaid track (§6), alongside the phases.** MM1 and MM2 need nothing
 beyond phase 0. MM3 (the viewer hookup) waits for phase 1, and MM5 for a
