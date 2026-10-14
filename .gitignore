@@ -31,3 +31,4 @@ CLAUDE.md
 
 # Website (separate repo)
 web/
+__pycache__/

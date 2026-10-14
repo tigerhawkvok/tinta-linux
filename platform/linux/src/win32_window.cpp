@@ -1,11 +1,10 @@
 // Win32 windows, messages, timers, capture, cursors, clipboard, GDI, IME and
-// dialogs for the Linux compat layer. Phase 1 is headless: windows are
-// records with a size, the message queue and timers are real (worker threads
-// post results to it), and everything visual is inert. The GTK window layer
-// takes over the window functions in phase 2.
-#include "compat_internal.h"
+// dialogs for the Linux compat layer. The message queue and timers are real
+// (worker threads post results to it). Headless runs keep windows as records
+// with a size; interactive runs back each window with GTK (gtk_window.cpp),
+// which feeds input into the queue and presents what WM_PAINT renders.
+#include "window_internal.h"
 
-#include <commdlg.h>
 #include <ole2.h>
 #include <imm.h>
 #include <shellapi.h>
@@ -20,21 +19,6 @@
 #include <mutex>
 #include <string>
 #include <vector>
-
-struct HWND__ {
-    std::wstring className;
-    std::wstring title;
-    WNDPROC proc = nullptr;
-    RECT rect{0, 0, 1000, 800};  // screen coordinates
-    LONG style = 0;
-    LONG exStyle = 0;
-    LONG_PTR userData = 0;
-    bool visible = false;
-    bool zoomed = false;
-    bool iconic = false;
-    bool destroyed = false;
-    bool dirty = false;  // needs WM_PAINT (InvalidateRect until BeginPaint)
-};
 
 namespace {
 
@@ -207,8 +191,98 @@ int runCapture() {
 
 }  // namespace
 
+namespace tinta {
+
+void postFromUi(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    state().queue.push_back(MSG{hwnd, msg, wParam, lParam, 0, {0, 0}});
+}
+
+// A window target finished a frame: show it (EndDraw)
+void presentWindow(HWND hwnd) {
+    if (gtk::active()) gtk::invalidate(hwnd);
+}
+
+}  // namespace tinta
+
 // ---- Windows ------------------------------------------------------------------------------
-LRESULT DefWindowProcW(HWND, UINT, WPARAM, LPARAM) { return 0; }
+namespace {
+
+// The resize border DefWindowProc reports inside the client area: Tinta's
+// frame has no non-client border on Linux
+LRESULT borderHitTest(HWND hwnd, POINT pt) {
+    RECT client;
+    GetClientRect(hwnd, &client);
+    if (!PtInRect(&client, pt)) return HTNOWHERE;
+    if (!tinta::gtk::active() || !(hwnd->style & WS_THICKFRAME) || IsZoomed(hwnd)) return HTCLIENT;
+    int border = static_cast<int>(6.0 * GetDpiForWindow(hwnd) / 96.0 + 0.5);
+    bool left = pt.x < border, right = pt.x >= client.right - border;
+    bool top = pt.y < border, bottom = pt.y >= client.bottom - border;
+    if (top && left) return HTTOPLEFT;
+    if (top && right) return HTTOPRIGHT;
+    if (bottom && left) return HTBOTTOMLEFT;
+    if (bottom && right) return HTBOTTOMRIGHT;
+    if (left) return HTLEFT;
+    if (right) return HTRIGHT;
+    if (bottom) return HTBOTTOM;
+    return HTCLIENT;  // the top edge is Tinta's own (WM_NCHITTEST)
+}
+
+LPCWSTR cursorForHit(UINT hit) {
+    switch (hit) {
+        case HTLEFT:
+        case HTRIGHT: return MAKEINTRESOURCEW(32644);  // IDC_SIZEWE
+        case HTTOP:
+        case HTBOTTOM: return MAKEINTRESOURCEW(32645);  // IDC_SIZENS
+        case HTTOPLEFT:
+        case HTBOTTOMRIGHT: return MAKEINTRESOURCEW(32642);  // IDC_SIZENWSE
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT: return MAKEINTRESOURCEW(32643);  // IDC_SIZENESW
+        default: return IDC_ARROW;
+    }
+}
+
+}  // namespace
+
+// What Windows does for messages the window procedure leaves alone
+LRESULT DefWindowProcW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (!hwnd) return 0;
+    switch (msg) {
+        case WM_NCHITTEST: {
+            POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ScreenToClient(hwnd, &pt);
+            return borderHitTest(hwnd, pt);
+        }
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, cursorForHit(LOWORD(lParam))));
+            return TRUE;
+        case WM_NCLBUTTONDOWN:
+            if (wParam == HTCAPTION) tinta::gtk::beginMove(hwnd);
+            else if (wParam >= HTLEFT && wParam <= HTBOTTOMRIGHT) tinta::gtk::beginResize(hwnd, static_cast<int>(wParam));
+            return 0;
+        case WM_NCLBUTTONDBLCLK:
+            if (wParam == HTCAPTION) tinta::gtk::toggleMaximize(hwnd);
+            return 0;
+        case WM_RBUTTONUP: {
+            POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ClientToScreen(hwnd, &pt);
+            return SendMessageW(hwnd, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(pt.x, pt.y));
+        }
+        case WM_SYSCOMMAND:
+            switch (wParam & 0xFFF0) {
+                case SC_MINIMIZE: ShowWindow(hwnd, SW_MINIMIZE); break;
+                case SC_MAXIMIZE: ShowWindow(hwnd, SW_SHOWMAXIMIZED); break;
+                case SC_RESTORE: ShowWindow(hwnd, SW_RESTORE); break;
+                case SC_CLOSE: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+                default: break;
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        default: return 0;
+    }
+}
 
 ATOM RegisterClassExW(const WNDCLASSEXW* wc) {
     if (!wc || !wc->lpszClassName) return 0;
@@ -232,21 +306,31 @@ HWND CreateWindowExW(DWORD exStyle, LPCWSTR className, LPCWSTR windowName, DWORD
     if (tinta::headless().height > 0) height = tinta::headless().height;
     window->rect = {x, y, x + width, y + height};
     window->visible = (style & WS_VISIBLE) != 0;
-    std::lock_guard<std::mutex> lock(state().mutex);
-    auto cls = state().classes.find(window->className);
-    if (cls != state().classes.end()) window->proc = cls->second;
-    state().windows.push_back(window);
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        auto cls = state().classes.find(window->className);
+        if (cls != state().classes.end()) window->proc = cls->second;
+        state().windows.push_back(window);
+    }
+    // Only Tinta's own windows are shown; helpers (the tab drag ghost) stay records
+    if (tinta::gtk::active() && window->className == L"Tinta") tinta::gtk::createWindow(window);
     return window;
 }
 
+// As on Windows, the window hears WM_DESTROY while it still exists
 BOOL DestroyWindow(HWND hwnd) {
-    if (!hwnd) return FALSE;
-    std::lock_guard<std::mutex> lock(state().mutex);
-    hwnd->destroyed = true;
-    hwnd->visible = false;
-    state().timers.erase(std::remove_if(state().timers.begin(), state().timers.end(),
-                                        [hwnd](const Timer& t) { return t.hwnd == hwnd; }),
-                         state().timers.end());
+    if (!hwnd || hwnd->destroyed) return FALSE;
+    SendMessageW(hwnd, WM_DESTROY, 0, 0);
+    SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        hwnd->destroyed = true;
+        hwnd->visible = false;
+        state().timers.erase(std::remove_if(state().timers.begin(), state().timers.end(),
+                                            [hwnd](const Timer& t) { return t.hwnd == hwnd; }),
+                             state().timers.end());
+    }
+    tinta::gtk::destroyWindow(hwnd);
     return TRUE;
 }
 
@@ -259,6 +343,7 @@ BOOL ShowWindow(HWND hwnd, int cmd) {
     hwnd->iconic = cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED;
     if (cmd == SW_RESTORE) hwnd->zoomed = hwnd->iconic = false;
     if (hwnd->visible && !was) InvalidateRect(hwnd, nullptr, FALSE);
+    tinta::gtk::showWindow(hwnd, cmd);
     return was;
 }
 
@@ -276,6 +361,8 @@ BOOL InvalidateRect(HWND hwnd, const RECT*, BOOL) {
         for (HWND w : state().windows) w->dirty = true;
     }
     state().wake.notify_all();
+    // The loop paints it (WM_PAINT once idle); EndDraw then presents
+    if (tinta::gtk::active()) tinta::gtk::wake();
     return TRUE;
 }
 
@@ -296,6 +383,10 @@ BOOL EndPaint(HWND, const PAINTSTRUCT*) { return TRUE; }
 
 BOOL SetWindowPos(HWND hwnd, HWND, int x, int y, int cx, int cy, UINT flags) {
     if (!hwnd) return FALSE;
+    if (hwnd->native) {  // GTK owns placement and size (WM_SIZE reports it)
+        if (flags & SWP_SHOWWINDOW) ShowWindow(hwnd, SW_SHOW);
+        return TRUE;
+    }
     RECT& r = hwnd->rect;
     if (!(flags & SWP_NOMOVE)) {
         LONG w = r.right - r.left, h = r.bottom - r.top;
@@ -324,6 +415,7 @@ BOOL GetClientRect(HWND hwnd, RECT* rect) {
 BOOL SetWindowTextW(HWND hwnd, LPCWSTR text) {
     if (!hwnd) return FALSE;
     hwnd->title = text ? text : L"";
+    tinta::gtk::setTitle(hwnd);
     return TRUE;
 }
 
@@ -337,7 +429,7 @@ BOOL GetWindowPlacement(HWND hwnd, WINDOWPLACEMENT* placement) {
 
 BOOL SetWindowPlacement(HWND hwnd, const WINDOWPLACEMENT* placement) {
     if (!hwnd || !placement) return FALSE;
-    hwnd->rect = placement->rcNormalPosition;
+    if (!hwnd->native) hwnd->rect = placement->rcNormalPosition;
     hwnd->zoomed = placement->showCmd == SW_SHOWMAXIMIZED;
     return TRUE;
 }
@@ -370,8 +462,8 @@ LONG_PTR SetWindowLongPtrW(HWND hwnd, int index, LONG_PTR value) {
     return old;
 }
 
-BOOL IsZoomed(HWND hwnd) { return hwnd && hwnd->zoomed; }
-BOOL IsIconic(HWND hwnd) { return hwnd && hwnd->iconic; }
+BOOL IsZoomed(HWND hwnd) { return hwnd && (hwnd->native ? tinta::gtk::isMaximized(hwnd) : hwnd->zoomed); }
+BOOL IsIconic(HWND hwnd) { return hwnd && (hwnd->native ? tinta::gtk::isMinimized(hwnd) : hwnd->iconic); }
 BOOL IsWindowVisible(HWND hwnd) { return hwnd && hwnd->visible; }
 BOOL IsWindow(HWND hwnd) { return hwnd && !hwnd->destroyed; }
 
@@ -471,9 +563,11 @@ BOOL ClientToScreen(HWND hwnd, POINT* p) {
     return TRUE;
 }
 
+// With GTK, the last pointer position over a window (Wayland has no global
+// coordinates; client and screen coordinates coincide here)
 BOOL GetCursorPos(POINT* point) {
     if (!point) return FALSE;
-    *point = {0, 0};
+    *point = tinta::gtk::active() ? tinta::gtk::cursorPos() : POINT{0, 0};
     return TRUE;
 }
 
@@ -523,6 +617,7 @@ HCURSOR LoadCursorW(HINSTANCE, LPCWSTR name) { return reinterpret_cast<HCURSOR>(
 HCURSOR SetCursor(HCURSOR cursor) {
     HCURSOR old = state().cursor;
     state().cursor = cursor;
+    if (cursor != old && tinta::gtk::active()) tinta::gtk::setCursor(reinterpret_cast<LPCWSTR>(cursor));
     return old;
 }
 
@@ -564,6 +659,7 @@ BOOL PostMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     std::lock_guard<std::mutex> lock(s.mutex);
     s.queue.push_back(MSG{hwnd, msg, wParam, lParam, 0, {0, 0}});
     s.wake.notify_all();
+    if (tinta::gtk::active()) tinta::gtk::wake();  // any thread
     return TRUE;
 }
 
@@ -595,6 +691,26 @@ BOOL GetMessageW(MSG* msg, HWND hwnd, UINT min, UINT max) {
         captured = true;
         PostQuitMessage(runCapture());
     }
+    // Interactive: GTK's main loop runs while the queue is empty, and its
+    // input handlers fill the queue
+    while (tinta::gtk::active()) {
+        int timeoutMs = -1;
+        {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            Clock::time_point next = fireTimers(s);
+            if (takeMessage(s, msg, hwnd, min, max, true)) return msg->message != WM_QUIT;
+            if (!s.quit && takePaint(s, msg, hwnd, min, max)) return TRUE;
+            if (s.quit) {
+                *msg = MSG{nullptr, WM_QUIT, static_cast<WPARAM>(s.quitCode), 0, 0, {0, 0}};
+                return FALSE;
+            }
+            if (next != Clock::time_point::max()) {
+                auto wait = std::chrono::ceil<std::chrono::milliseconds>(next - Clock::now()).count();
+                timeoutMs = static_cast<int>(std::max<long long>(0, wait));
+            }
+        }
+        tinta::gtk::waitForEvents(timeoutMs);
+    }
     std::unique_lock<std::mutex> lock(s.mutex);
     while (true) {
         Clock::time_point next = fireTimers(s);
@@ -609,7 +725,16 @@ BOOL GetMessageW(MSG* msg, HWND hwnd, UINT min, UINT max) {
     }
 }
 
-BOOL TranslateMessage(const MSG*) { return FALSE; }
+// A key with text gets its WM_CHAR next, ahead of later input
+BOOL TranslateMessage(const MSG* msg) {
+    std::vector<wchar_t> chars;
+    if (!msg || !tinta::gtk::active() || !tinta::gtk::charForKey(*msg, chars)) return FALSE;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto it = chars.rbegin(); it != chars.rend(); ++it) {
+        state().queue.push_front(MSG{msg->hwnd, WM_CHAR, static_cast<WPARAM>(*it), msg->lParam & 0xFFFFFFFF, 0, {0, 0}});
+    }
+    return TRUE;
+}
 
 LRESULT DispatchMessageW(const MSG* msg) {
     if (!msg || !msg->hwnd || !msg->hwnd->proc) return 0;
@@ -634,7 +759,10 @@ int GetSystemMetricsForDpi(int index, UINT) {
     }
 }
 
-UINT GetDpiForWindow(HWND) { return tinta::headless().dpi; }
+UINT GetDpiForWindow(HWND hwnd) {
+    if (hwnd && hwnd->native) return static_cast<UINT>(96.0 * tinta::gtk::scale(hwnd) + 0.5);
+    return tinta::headless().dpi;
+}
 BOOL SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT) { return TRUE; }
 
 HMONITOR MonitorFromWindow(HWND, DWORD) { return reinterpret_cast<HMONITOR>(1); }
@@ -656,7 +784,8 @@ BOOL DestroyMenu(HMENU) { return TRUE; }
 BOOL TrackPopupMenu(HMENU, UINT, int, int, int, HWND, const RECT*) { return FALSE; }
 
 // Headless: report on stderr and take the safe answer (no, cancel)
-int MessageBoxW(HWND, LPCWSTR text, LPCWSTR caption, UINT type) {
+int MessageBoxW(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type) {
+    if (tinta::gtk::active()) return tinta::gtk::messageBox(owner, text, caption, type);
     std::fprintf(stderr, "[%ls] %ls\n", caption ? caption : L"Tinta", text ? text : L"");
     switch (type & 0xF) {
         case MB_YESNO: return IDNO;
@@ -702,14 +831,60 @@ int MulDiv(int number, int numerator, int denominator) {
     return static_cast<int>((product + half) / denominator);
 }
 
-// ---- Clipboard: in-process until the window layer bridges GdkClipboard ----------------------
+// ---- Clipboard: in-process formats; with GTK, text also crosses to the desktop ---------------
+namespace {
+bool g_clipboardChanged = false;  // set since OpenClipboard: CloseClipboard publishes
+}  // namespace
+
 BOOL OpenClipboard(HWND hwnd) {
     std::lock_guard<std::mutex> lock(state().mutex);
     state().clipboardOpener = hwnd;
+    g_clipboardChanged = false;
     return TRUE;
 }
 
-BOOL CloseClipboard() { return TRUE; }
+BOOL CloseClipboard() {
+    if (!tinta::gtk::active()) return TRUE;
+    std::wstring text;
+    bool publish = false;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        auto it = state().clipboard.find(CF_UNICODETEXT);
+        publish = g_clipboardChanged && it != state().clipboard.end();
+        if (publish) {
+            if (auto* chars = static_cast<const wchar_t*>(GlobalLock(it->second))) {
+                text.assign(chars, wcsnlen(chars, GlobalSize(it->second) / sizeof(wchar_t)));
+                GlobalUnlock(it->second);
+            }
+        }
+        g_clipboardChanged = false;
+    }
+    if (publish) tinta::gtk::publishClipboardText(text);
+    return TRUE;
+}
+
+namespace {
+
+// Text another application put on the clipboard, as CF_UNICODETEXT (the
+// clipboard keeps the handle, as on Windows)
+HANDLE desktopClipboardText() {
+    std::wstring text;
+    if (!tinta::gtk::readClipboardText(text)) return nullptr;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+    if (auto* to = static_cast<wchar_t*>(GlobalLock(memory))) {
+        wmemcpy(to, text.c_str(), text.size() + 1);
+        GlobalUnlock(memory);
+    }
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto& slot = state().clipboard[CF_UNICODETEXT];
+    if (slot) GlobalFree(slot);
+    slot = memory;
+    return memory;
+}
+
+bool desktopOwnsClipboard() { return tinta::gtk::active() && !tinta::gtk::clipboardIsLocal(); }
+
+}  // namespace
 
 // As on Windows, emptying makes the opener the owner
 BOOL EmptyClipboard() {
@@ -803,16 +978,19 @@ HANDLE SetClipboardData(UINT format, HANDLE memory) {
     auto& slot = state().clipboard[format];
     if (slot && slot != memory) GlobalFree(slot);
     slot = memory;
+    g_clipboardChanged = true;
     return memory;
 }
 
 HANDLE GetClipboardData(UINT format) {
+    if (desktopOwnsClipboard()) return format == CF_UNICODETEXT ? desktopClipboardText() : nullptr;
     std::lock_guard<std::mutex> lock(state().mutex);
     auto it = state().clipboard.find(format);
     return it == state().clipboard.end() ? nullptr : it->second;
 }
 
 BOOL IsClipboardFormatAvailable(UINT format) {
+    if (desktopOwnsClipboard()) return format == CF_UNICODETEXT && tinta::gtk::clipboardHasText();
     std::lock_guard<std::mutex> lock(state().mutex);
     return state().clipboard.count(format) ? TRUE : FALSE;
 }
@@ -838,7 +1016,7 @@ BOOL ImmSetCompositionWindow(HIMC, COMPOSITIONFORM*) { return TRUE; }
 BOOL ImmSetCandidateWindow(HIMC, CANDIDATEFORM*) { return TRUE; }
 LONG ImmGetCompositionStringW(HIMC, DWORD, void*, DWORD) { return 0; }
 
-// ---- Common dialogs: cancelled until the window layer provides portal dialogs ------------------
-BOOL GetOpenFileNameW(OPENFILENAMEW*) { return FALSE; }
-BOOL GetSaveFileNameW(OPENFILENAMEW*) { return FALSE; }
+// ---- Common dialogs: GtkFileDialog (portals where available); headless runs cancel ------------
+BOOL GetOpenFileNameW(OPENFILENAMEW* ofn) { return tinta::gtk::active() && tinta::gtk::fileDialog(ofn, false); }
+BOOL GetSaveFileNameW(OPENFILENAMEW* ofn) { return tinta::gtk::active() && tinta::gtk::fileDialog(ofn, true); }
 BOOL PrintDlgW(PRINTDLGW*) { return FALSE; }

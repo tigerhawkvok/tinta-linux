@@ -30,6 +30,10 @@ FetchContent_Declare(
     GIT_TAG 729e6b8b320caa96328968ab27d7db2235e4fb47  # release-0.5.2, pinned by commit
     GIT_SHALLOW TRUE
 )
+# md4c defaults to a shared library off Windows; Tinta links it in
+if(NOT WIN32)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "md4c is linked statically" FORCE)
+endif()
 FetchContent_MakeAvailable(md4c)
 
 # Source files

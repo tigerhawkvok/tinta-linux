@@ -57,6 +57,8 @@ bool readWicSource(IWICBitmapSource* source, PixelBuffer& out);
 cairo_surface_t* targetSurface(ID2D1RenderTarget* target);
 // The surface of the window's current HwndRenderTarget, or null
 cairo_surface_t* windowSurface(HWND hwnd);
+// A window target finished a frame (EndDraw): the window layer shows it
+void presentWindow(HWND hwnd);
 
 // Headless runs (main_linux.cpp): no display; `renderPng` captures the
 // window once its startup work has settled, then quits

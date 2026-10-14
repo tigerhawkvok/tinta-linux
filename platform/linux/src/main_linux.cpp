@@ -9,7 +9,11 @@
 //   --scale=N           display scale (DPI 96 x N), e.g. 1.5 or 2
 //   --settle-ms=N       quiet time before the capture (default 400)
 //   --repaint=N         then time N full repaints (median and max frame)
-#include "compat_internal.h"
+//
+// Without --render-png (or an export / print-pages / register run, which
+// never needs a window) Tinta opens a GTK window; with no display it says
+// so and exits.
+#include "window_internal.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +23,16 @@
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show);
 
 namespace {
+
+// WinMain's own runs that finish before any window shows
+bool windowless(const char* arg) {
+    static const char* const names[] = {"--printpages", "--exporthtml", "--exportdocx", "--exportpdf",
+                                        "--register",   "/register"};
+    for (const char* name : names) {
+        if (std::strcmp(arg, name) == 0) return true;
+    }
+    return false;
+}
 
 bool valueOf(const char* arg, const char* name, std::string& out) {
     size_t n = std::strlen(name);
@@ -31,9 +45,12 @@ bool valueOf(const char* arg, const char* name, std::string& out) {
 
 int main(int argc, char** argv) {
     tinta::HeadlessOptions& options = tinta::headless();
+    bool interactive = true;
     for (int i = 1; i < argc; i++) {
         std::string value;
+        if (windowless(argv[i])) interactive = false;
         if (valueOf(argv[i], "--render-png", value)) {
+            interactive = false;
             options.renderPng = value;
         } else if (valueOf(argv[i], "--size", value)) {
             if (std::sscanf(value.c_str(), "%dx%d", &options.width, &options.height) != 2) {
@@ -52,6 +69,10 @@ int main(int argc, char** argv) {
         } else if (valueOf(argv[i], "--repaint", value)) {
             options.repaints = std::atoi(value.c_str());
         }
+    }
+    if (interactive && !tinta::gtk::start()) {
+        std::fprintf(stderr, "tinta: no display (set WAYLAND_DISPLAY or DISPLAY, or use --render-png=)\n");
+        return 1;
     }
     return WinMain(nullptr, nullptr, nullptr, SW_SHOWNORMAL);
 }

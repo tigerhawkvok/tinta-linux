@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Tinta
+GenericName=Markdown Viewer
+Comment=Fast Markdown and Mermaid viewer and editor
+Exec=tinta %f
+Icon=tinta
+Terminal=false
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;md;mermaid;viewer;editor;
+StartupWMClass=tinta

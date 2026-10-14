@@ -792,6 +792,7 @@ public:
         applyClips();
         if (cr_) cairo_surface_flush(cairo_get_target(cr_));
         if (auto* bitmap = dynamic_cast<Bitmap*>(targetImage_)) bitmap->invalidateLevels();
+        if (hwnd_) presentWindow(hwnd_);
         return S_OK;
     }
     HRESULT Flush(D2D1_TAG*, D2D1_TAG*) override {
