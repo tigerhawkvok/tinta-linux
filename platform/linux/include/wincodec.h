@@ -6,6 +6,8 @@
 
 #include "tinta_com.h"
 
+#include <string>
+
 typedef GUID WICPixelFormatGUID;
 typedef const GUID& REFWICPixelFormatGUID;
 typedef UINT32 WICColor;
@@ -126,6 +128,17 @@ struct IWICStream : IStream {
     virtual HRESULT InitializeFromIStream(IStream* stream) = 0;
     virtual HRESULT InitializeFromFilename(LPCWSTR fileName, DWORD desiredAccess) = 0;
     virtual HRESULT InitializeFromMemory(BYTE* buffer, DWORD bufferSize) = 0;
+    // A std::filesystem::path::c_str() (UTF-8 here)
+    HRESULT InitializeFromFilename(const char* fileName, DWORD desiredAccess) {
+        std::wstring wide;
+        int n = fileName ? MultiByteToWideChar(CP_UTF8, 0, fileName, -1, nullptr, 0) : 0;
+        if (n > 0) {
+            wide.resize(static_cast<size_t>(n));
+            MultiByteToWideChar(CP_UTF8, 0, fileName, -1, wide.data(), n);
+            wide.resize(static_cast<size_t>(n - 1));
+        }
+        return InitializeFromFilename(wide.c_str(), desiredAccess);
+    }
 };
 
 struct IWICImagingFactory : IUnknown {

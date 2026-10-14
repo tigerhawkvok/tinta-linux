@@ -292,6 +292,9 @@ TINTA_UUID(IDWriteFontFallbackBuilder, 0x0d570013)
 TINTA_UUID(IDWriteFactory, 0x0d570014)
 TINTA_UUID(IDWriteFactory1, 0x0d570015)
 TINTA_UUID(IDWriteFactory2, 0x0d570016)
+TINTA_UUID(IDWriteFontFace, 0x0d570017)
+TINTA_UUID(IDWriteTextRenderer, 0x0d570018)
+TINTA_UUID(IDWritePixelSnapping, 0x0d570019)
 
 struct IDWriteLocalizedStrings : IUnknown {
     virtual UINT32 GetCount() { return 0; }
@@ -334,6 +337,9 @@ struct IDWriteFontCollection : IUnknown {
     virtual HRESULT FindFamilyName(const WCHAR* familyName, UINT32* index, BOOL* exists) {
         (void)familyName; *index = 0; *exists = FALSE; return E_NOTIMPL;
     }
+    virtual HRESULT GetFontFromFontFace(IDWriteFontFace* fontFace, IDWriteFont** font) {
+        (void)fontFace; *font = nullptr; return E_NOTIMPL;
+    }
 };
 
 struct IDWriteInlineObject : IUnknown {
@@ -360,7 +366,77 @@ struct IDWriteTypography : IUnknown {
     virtual HRESULT GetFontFeature(UINT32 index, DWRITE_FONT_FEATURE* fontFeature) = 0;
 };
 
-struct IDWriteFontFallback : IUnknown {};
+struct IDWriteTextAnalysisSource;
+
+struct IDWriteFontFallback : IUnknown {
+    virtual HRESULT MapCharacters(IDWriteTextAnalysisSource* analysisSource, UINT32 textPosition, UINT32 textLength,
+                                  IDWriteFontCollection* baseFontCollection, const WCHAR* baseFamilyName,
+                                  DWRITE_FONT_WEIGHT baseWeight, DWRITE_FONT_STYLE baseStyle,
+                                  DWRITE_FONT_STRETCH baseStretch, UINT32* mappedLength, IDWriteFont** mappedFont,
+                                  FLOAT* scale) = 0;
+};
+
+// ---- Glyph runs and text renderers (IDWriteTextLayout::Draw) ---------------------------
+struct DWRITE_MATRIX {
+    FLOAT m11, m12, m21, m22, dx, dy;
+};
+struct DWRITE_GLYPH_OFFSET {
+    FLOAT advanceOffset;
+    FLOAT ascenderOffset;
+};
+struct IDWriteFontFace : IUnknown {
+    virtual void GetMetrics(DWRITE_FONT_METRICS* metrics) { std::memset(metrics, 0, sizeof *metrics); }
+    virtual UINT16 GetGlyphCount() { return 0; }
+};
+struct DWRITE_GLYPH_RUN {
+    IDWriteFontFace* fontFace;
+    FLOAT fontEmSize;
+    UINT32 glyphCount;
+    const UINT16* glyphIndices;
+    const FLOAT* glyphAdvances;
+    const DWRITE_GLYPH_OFFSET* glyphOffsets;
+    BOOL isSideways;
+    UINT32 bidiLevel;
+};
+struct DWRITE_GLYPH_RUN_DESCRIPTION {
+    const WCHAR* localeName;
+    const WCHAR* string;
+    UINT32 stringLength;
+    const UINT16* clusterMap;
+    UINT32 textPosition;
+};
+struct DWRITE_UNDERLINE {
+    FLOAT width, thickness, offset, runHeight;
+    DWRITE_READING_DIRECTION readingDirection;
+    DWRITE_FLOW_DIRECTION flowDirection;
+    const WCHAR* localeName;
+    DWRITE_MEASURING_MODE measuringMode;
+};
+struct DWRITE_STRIKETHROUGH {
+    FLOAT width, thickness, offset;
+    DWRITE_READING_DIRECTION readingDirection;
+    DWRITE_FLOW_DIRECTION flowDirection;
+    const WCHAR* localeName;
+    DWRITE_MEASURING_MODE measuringMode;
+};
+struct IDWritePixelSnapping : IUnknown {
+    virtual HRESULT IsPixelSnappingDisabled(void* clientDrawingContext, BOOL* isDisabled) = 0;
+    virtual HRESULT GetCurrentTransform(void* clientDrawingContext, DWRITE_MATRIX* transform) = 0;
+    virtual HRESULT GetPixelsPerDip(void* clientDrawingContext, FLOAT* pixelsPerDip) = 0;
+};
+struct IDWriteTextRenderer : IDWritePixelSnapping {
+    virtual HRESULT DrawGlyphRun(void* clientDrawingContext, FLOAT baselineOriginX, FLOAT baselineOriginY,
+                                 DWRITE_MEASURING_MODE measuringMode, const DWRITE_GLYPH_RUN* glyphRun,
+                                 const DWRITE_GLYPH_RUN_DESCRIPTION* glyphRunDescription,
+                                 IUnknown* clientDrawingEffect) = 0;
+    virtual HRESULT DrawUnderline(void* clientDrawingContext, FLOAT baselineOriginX, FLOAT baselineOriginY,
+                                  const DWRITE_UNDERLINE* underline, IUnknown* clientDrawingEffect) = 0;
+    virtual HRESULT DrawStrikethrough(void* clientDrawingContext, FLOAT baselineOriginX, FLOAT baselineOriginY,
+                                      const DWRITE_STRIKETHROUGH* strikethrough, IUnknown* clientDrawingEffect) = 0;
+    virtual HRESULT DrawInlineObject(void* clientDrawingContext, FLOAT originX, FLOAT originY,
+                                     IDWriteInlineObject* inlineObject, BOOL isSideways, BOOL isRightToLeft,
+                                     IUnknown* clientDrawingEffect) = 0;
+};
 
 struct IDWriteFontFallbackBuilder : IUnknown {
     virtual HRESULT AddMapping(const DWRITE_UNICODE_RANGE* ranges, UINT32 rangesCount,
@@ -441,6 +517,9 @@ struct IDWriteTextLayout : IDWriteTextFormat {
     virtual HRESULT HitTestTextRange(UINT32 textPosition, UINT32 textLength, FLOAT originX, FLOAT originY,
                                      DWRITE_HIT_TEST_METRICS* hitTestMetrics, UINT32 maxHitTestMetricsCount,
                                      UINT32* actualHitTestMetricsCount) = 0;
+    virtual HRESULT Draw(void* clientDrawingContext, IDWriteTextRenderer* renderer, FLOAT originX, FLOAT originY) {
+        (void)clientDrawingContext; (void)renderer; (void)originX; (void)originY; return E_NOTIMPL;
+    }
 };
 
 struct IDWriteTextLayout1 : IDWriteTextLayout {

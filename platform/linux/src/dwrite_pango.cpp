@@ -10,6 +10,7 @@
 
 #include <pango/pangocairo.h>
 #include <pango/pangofc-fontmap.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <cmath>
@@ -206,32 +207,92 @@ public:
     }
 };
 
-// fontconfig already falls back per character; mappings are accepted and the
-// result is a marker object
-class FontFallback final : public TintaComObject<IDWriteFontFallback> {
-public:
-    using Primary = IDWriteFontFallback;
-    HRESULT QueryInterface(REFIID riid, void** object) override {
-        return tinta_query<IDWriteFontFallback>(this, riid, object);
+// ---- Font coverage -----------------------------------------------------------------
+// The installed faces a family name stands for: itself, then its stand-in
+// stack; generic names (sans-serif, ...) are not faces and never count
+std::vector<std::string> familyCandidates(const std::wstring& family) {
+    std::vector<std::string> out;
+    std::string stack = resolveFamily(family);
+    size_t start = 0;
+    while (start <= stack.size()) {
+        size_t comma = stack.find(',', start);
+        std::string member = lower(stack.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+        if (!member.empty() && member != "sans-serif" && member != "serif" && member != "monospace" &&
+            member != "emoji" && member != "sans" && member != "mono") {
+            out.push_back(member);
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
     }
+    return out;
+}
+
+// The face a family name loads (its first installed candidate), cached;
+// null when none of its candidates is installed
+struct LoadedFace {
+    PangoFont* font = nullptr;
+    std::string family;  // the face's own family name
 };
 
-class FontFallbackBuilder final : public TintaComObject<IDWriteFontFallbackBuilder> {
-public:
-    using Primary = IDWriteFontFallbackBuilder;
-    HRESULT QueryInterface(REFIID riid, void** object) override {
-        return tinta_query<IDWriteFontFallbackBuilder>(this, riid, object);
+const LoadedFace& faceFor(const std::wstring& family) {
+    static std::mutex mutex;
+    static std::unordered_map<std::wstring, LoadedFace> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = cache.find(family);
+    if (it != cache.end()) return it->second;
+    LoadedFace face;
+    std::vector<std::string> candidates = familyCandidates(family);
+    if (!candidates.empty()) {
+        PangoFontDescription* desc = pango_font_description_new();
+        pango_font_description_set_family(desc, resolveFamily(family).c_str());
+        pango_font_description_set_absolute_size(desc, 16 * PANGO_SCALE);
+        PangoFont* font = pango_font_map_load_font(pango_context_get_font_map(pangoContext()), pangoContext(), desc);
+        pango_font_description_free(desc);
+        if (font) {
+            PangoFontDescription* loaded = pango_font_describe(font);
+            const char* name = pango_font_description_get_family(loaded);
+            std::string loadedFamily = name ? name : "";
+            pango_font_description_free(loaded);
+            if (std::find(candidates.begin(), candidates.end(), lower(loadedFamily)) != candidates.end()) {
+                face.font = font;
+                face.family = loadedFamily;
+            } else {
+                g_object_unref(font);
+            }
+        }
     }
-    HRESULT AddMapping(const DWRITE_UNICODE_RANGE*, UINT32, const WCHAR**, UINT32, IDWriteFontCollection*,
-                       const WCHAR*, const WCHAR*, FLOAT) override {
-        return S_OK;
+    return cache.emplace(family, face).first->second;
+}
+
+// Whether the family itself (not a fallback face) draws `codepoint`
+bool familyHasChar(const std::wstring& family, UINT32 codepoint) {
+    const LoadedFace& face = faceFor(family);
+    return face.font && pango_font_has_char(face.font, codepoint);
+}
+
+// What fontconfig falls back to for `codepoint` from `family`
+std::wstring systemFamilyFor(const std::wstring& family, const std::wstring& locale, UINT32 codepoint) {
+    PangoFontDescription* desc = pango_font_description_new();
+    pango_font_description_set_family(desc, resolveFamily(family).c_str());
+    pango_font_description_set_absolute_size(desc, 16 * PANGO_SCALE);
+    std::string tag = toUtf8(locale);
+    PangoFontset* fontset = pango_font_map_load_fontset(pango_context_get_font_map(pangoContext()), pangoContext(),
+                                                        desc, pango_language_from_string(tag.c_str()));
+    pango_font_description_free(desc);
+    std::wstring out;
+    if (fontset) {
+        PangoFont* font = pango_fontset_get_font(fontset, codepoint);
+        if (font && pango_font_has_char(font, codepoint)) {
+            PangoFontDescription* loaded = pango_font_describe(font);
+            const char* name = pango_font_description_get_family(loaded);
+            if (name) out = toWide(std::string(name));
+            pango_font_description_free(loaded);
+        }
+        if (font) g_object_unref(font);
+        g_object_unref(fontset);
     }
-    HRESULT AddMappings(IDWriteFontFallback*) override { return S_OK; }
-    HRESULT CreateFontFallback(IDWriteFontFallback** fallback) override {
-        *fallback = new FontFallback();
-        return S_OK;
-    }
-};
+    return out;
+}
 
 // ---- Font collection -------------------------------------------------------------
 class LocalizedStrings final : public TintaComObject<IDWriteLocalizedStrings> {
@@ -270,28 +331,34 @@ public:
     HRESULT QueryInterface(REFIID riid, void** object) override {
         return tinta_query<IDWriteFont>(this, riid, object);
     }
+    HRESULT GetFontFamily(IDWriteFontFamily** family) override;
     DWRITE_FONT_WEIGHT GetWeight() override { return weight_; }
     DWRITE_FONT_STYLE GetStyle() override { return style_; }
+    // The family's own face must cover it: a fallback face does not count
     HRESULT HasCharacter(UINT32 codepoint, BOOL* exists) override {
-        *exists = FALSE;
-        PangoFontDescription* desc = pango_font_description_from_string(family_.c_str());
-        pango_font_description_set_absolute_size(desc, 16 * PANGO_SCALE);
-        PangoFont* font = pango_font_map_load_font(pango_context_get_font_map(pangoContext()), pangoContext(), desc);
-        pango_font_description_free(desc);
-        if (!font) return S_OK;
-        // The exact family must cover it: a fallback face does not count
-        PangoFontDescription* loaded = pango_font_describe(font);
-        std::string loadedFamily = lower(pango_font_description_get_family(loaded) ? pango_font_description_get_family(loaded) : "");
-        pango_font_description_free(loaded);
-        if (loadedFamily == lower(family_)) *exists = pango_font_has_char(font, codepoint) ? TRUE : FALSE;
-        g_object_unref(font);
+        *exists = familyHasChar(toWide(family_), codepoint) ? TRUE : FALSE;
         return S_OK;
     }
+    const std::string& family() const { return family_; }
 
 private:
     std::string family_;
     DWRITE_FONT_WEIGHT weight_;
     DWRITE_FONT_STYLE style_;
+};
+
+// The face a glyph run is drawn in: the DirectWrite family it answers to
+class FontFace final : public TintaComObject<IDWriteFontFace> {
+public:
+    using Primary = IDWriteFontFace;
+    FontFace(std::string family, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style)
+        : family(std::move(family)), weight(weight), style(style) {}
+    HRESULT QueryInterface(REFIID riid, void** object) override {
+        return tinta_query<IDWriteFontFace>(this, riid, object);
+    }
+    std::string family;
+    DWRITE_FONT_WEIGHT weight;
+    DWRITE_FONT_STYLE style;
 };
 
 class FontFamily final : public TintaComObject<IDWriteFontFamily> {
@@ -314,6 +381,11 @@ public:
 private:
     std::string name_;
 };
+
+HRESULT Font::GetFontFamily(IDWriteFontFamily** family) {
+    *family = new FontFamily(family_);
+    return S_OK;
+}
 
 // Installed Pango families, plus the Windows names kAliases stands in for
 class FontCollection final : public TintaComObject<IDWriteFontCollection> {
@@ -368,9 +440,171 @@ public:
         }
         return S_OK;
     }
+    HRESULT GetFontFromFontFace(IDWriteFontFace* face, IDWriteFont** font) override {
+        auto* own = dynamic_cast<FontFace*>(face);
+        if (!own || !font) return E_INVALIDARG;
+        *font = new Font(own->family, own->weight, own->style);
+        return S_OK;
+    }
 
 private:
     std::vector<std::string> names_;
+};
+
+// ---- Font fallback ------------------------------------------------------------------
+// DirectWrite's custom fallback on fontconfig coverage. A character keeps
+// the base family when that family's own face draws it; otherwise the
+// first mapping whose ranges hold it picks its first family that does (so
+// Tinta's CJK orders decide kanji vs hanzi faces, #155 #254); otherwise a
+// chained system fallback asks fontconfig.
+class FontFallback final : public TintaComObject<IDWriteFontFallback> {
+public:
+    using Primary = IDWriteFontFallback;
+    struct Mapping {
+        std::vector<DWRITE_UNICODE_RANGE> ranges;
+        std::vector<std::wstring> families;
+    };
+
+    HRESULT QueryInterface(REFIID riid, void** object) override {
+        return tinta_query<IDWriteFontFallback>(this, riid, object);
+    }
+
+    HRESULT MapCharacters(IDWriteTextAnalysisSource* source, UINT32 position, UINT32 length, IDWriteFontCollection*,
+                          const WCHAR* baseFamily, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
+                          DWRITE_FONT_STRETCH, UINT32* mappedLength, IDWriteFont** mappedFont,
+                          FLOAT* scale) override {
+        if (!source || !mappedLength || !mappedFont) return E_INVALIDARG;
+        *mappedLength = 0;
+        *mappedFont = nullptr;
+        if (scale) *scale = 1.0f;
+        std::wstring text = textOf(source, position, length);
+        if (text.empty()) return S_OK;
+        std::wstring base = baseFamily ? baseFamily : L"";
+        const WCHAR* localeName = nullptr;
+        UINT32 localeLength = 0;
+        source->GetLocaleName(position, &localeLength, &localeName);
+        std::wstring locale = localeName ? localeName : L"en-us";
+        std::wstring first = pick(static_cast<UINT32>(text[0]), base, locale);
+        UINT32 n = 1;
+        while (n < text.size() && pick(static_cast<UINT32>(text[n]), base, locale) == first) n++;
+        *mappedLength = n;
+        if (!first.empty()) *mappedFont = new Font(toUtf8(first), weight, style);
+        return S_OK;
+    }
+
+    std::wstring pick(UINT32 c, const std::wstring& base, const std::wstring& locale) const {
+        if (!base.empty() && familyHasChar(base, c)) return base;
+        for (const Mapping& mapping : mappings) {
+            bool inRange = false;
+            for (const auto& range : mapping.ranges) {
+                if (c >= range.first && c <= range.last) {
+                    inRange = true;
+                    break;
+                }
+            }
+            if (!inRange) continue;
+            for (const std::wstring& family : mapping.families) {
+                if (familyHasChar(family, c)) return family;
+            }
+        }
+        // Controls (tabs, line breaks) have no glyph: they stay with the base
+        if (c < 0x20) return base;
+        return system ? systemFamilyFor(base, locale, c) : std::wstring();
+    }
+
+    std::vector<Mapping> mappings;
+    bool system = false;
+
+private:
+    static std::wstring textOf(IDWriteTextAnalysisSource* source, UINT32 position, UINT32 length) {
+        std::wstring out;
+        while (out.size() < length) {
+            const WCHAR* chunk = nullptr;
+            UINT32 available = 0;
+            if (FAILED(source->GetTextAtPosition(position + static_cast<UINT32>(out.size()), &chunk, &available)) ||
+                !chunk || available == 0) {
+                break;
+            }
+            out.append(chunk, std::min<size_t>(available, length - out.size()));
+        }
+        return out;
+    }
+};
+
+class FontFallbackBuilder final : public TintaComObject<IDWriteFontFallbackBuilder> {
+public:
+    using Primary = IDWriteFontFallbackBuilder;
+    HRESULT QueryInterface(REFIID riid, void** object) override {
+        return tinta_query<IDWriteFontFallbackBuilder>(this, riid, object);
+    }
+    HRESULT AddMapping(const DWRITE_UNICODE_RANGE* ranges, UINT32 rangeCount, const WCHAR** families,
+                       UINT32 familyCount, IDWriteFontCollection*, const WCHAR*, const WCHAR*, FLOAT) override {
+        if (!ranges || !families) return E_INVALIDARG;
+        FontFallback::Mapping mapping;
+        mapping.ranges.assign(ranges, ranges + rangeCount);
+        for (UINT32 i = 0; i < familyCount; i++) {
+            if (families[i]) mapping.families.push_back(families[i]);
+        }
+        mappings_.push_back(std::move(mapping));
+        return S_OK;
+    }
+    HRESULT AddMappings(IDWriteFontFallback* fallback) override {
+        auto* own = dynamic_cast<FontFallback*>(fallback);
+        if (!own) return E_INVALIDARG;
+        mappings_.insert(mappings_.end(), own->mappings.begin(), own->mappings.end());
+        system = system || own->system;
+        return S_OK;
+    }
+    HRESULT CreateFontFallback(IDWriteFontFallback** fallback) override {
+        auto* created = new FontFallback();
+        created->mappings = mappings_;
+        created->system = system;
+        *fallback = created;
+        return S_OK;
+    }
+
+private:
+    std::vector<FontFallback::Mapping> mappings_;
+    bool system = false;
+};
+
+// The layout's text, as a fallback reads it
+class AnalysisSource final : public IDWriteTextAnalysisSource {
+public:
+    AnalysisSource(const std::wstring& text, const std::wstring& locale) : text_(text), locale_(locale) {}
+    HRESULT QueryInterface(REFIID, void** object) override {
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG AddRef() override { return 1; }
+    ULONG Release() override { return 1; }
+    HRESULT GetTextAtPosition(UINT32 position, const WCHAR** text, UINT32* length) override {
+        *text = position < text_.size() ? text_.c_str() + position : nullptr;
+        *length = position < text_.size() ? static_cast<UINT32>(text_.size() - position) : 0;
+        return S_OK;
+    }
+    HRESULT GetTextBeforePosition(UINT32 position, const WCHAR** text, UINT32* length) override {
+        *text = position > 0 && position <= text_.size() ? text_.c_str() : nullptr;
+        *length = position <= text_.size() ? position : 0;
+        return S_OK;
+    }
+    DWRITE_READING_DIRECTION GetParagraphReadingDirection() override {
+        return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT;
+    }
+    HRESULT GetLocaleName(UINT32 position, UINT32* length, const WCHAR** locale) override {
+        *length = position < text_.size() ? static_cast<UINT32>(text_.size() - position) : 0;
+        *locale = locale_.c_str();
+        return S_OK;
+    }
+    HRESULT GetNumberSubstitution(UINT32, UINT32* length, IDWriteNumberSubstitution** substitution) override {
+        *length = 0;
+        *substitution = nullptr;
+        return S_OK;
+    }
+
+private:
+    const std::wstring& text_;
+    const std::wstring& locale_;
 };
 
 // ---- Text format state ---------------------------------------------------------------
@@ -391,6 +625,7 @@ struct FormatState {
     FLOAT lineSpacing = 0.0f;
     FLOAT baseline = 0.0f;
     FLOAT tabStop = 0.0f;  // 0: Pango's default
+    Microsoft::WRL::ComPtr<IDWriteFontFallback> fallback;  // layouts inherit it
 
     PangoFontDescription* describe() const {
         PangoFontDescription* desc = pango_font_description_new();
@@ -476,9 +711,13 @@ public:
     HRESULT QueryInterface(REFIID riid, void** object) override {
         return tinta_query<IDWriteTextFormat1, IDWriteTextFormat>(this, riid, object);
     }
-    HRESULT SetFontFallback(IDWriteFontFallback*) override { return S_OK; }
+    HRESULT SetFontFallback(IDWriteFontFallback* fallback) override {
+        format_.fallback = fallback;
+        return S_OK;
+    }
     HRESULT GetFontFallback(IDWriteFontFallback** fallback) override {
-        *fallback = nullptr;
+        *fallback = format_.fallback.Get();
+        if (*fallback) (*fallback)->AddRef();
         return S_OK;
     }
 };
@@ -518,6 +757,10 @@ public:
     HRESULT SetMaxWidth(FLOAT width) override { maxWidth_ = width; changed(); return S_OK; }
     HRESULT SetMaxHeight(FLOAT height) override { maxHeight_ = height; changed(); return S_OK; }
     HRESULT SetFontFamilyName(const WCHAR* name, DWRITE_TEXT_RANGE range) override {
+        UINT32 start = std::min<UINT32>(range.startPosition, static_cast<UINT32>(text_.size()));
+        UINT32 end = static_cast<UINT32>(
+            std::min<UINT64>(static_cast<UINT64>(range.startPosition) + range.length, text_.size()));
+        familyRanges_.push_back({start, end, name ? name : L""});
         return addAttr(range, pango_attr_family_new(resolveFamily(name ? name : L"").c_str()));
     }
     HRESULT SetFontWeight(DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_RANGE range) override {
@@ -553,9 +796,14 @@ public:
     HRESULT SetCharacterSpacing(FLOAT leading, FLOAT trailing, FLOAT, DWRITE_TEXT_RANGE range) override {
         return addAttr(range, pango_attr_letter_spacing_new(static_cast<int>((leading + trailing) * PANGO_SCALE)));
     }
-    HRESULT SetFontFallback(IDWriteFontFallback*) override { return S_OK; }
+    HRESULT SetFontFallback(IDWriteFontFallback* fallback) override {
+        format_.fallback = fallback;
+        changed();
+        return S_OK;
+    }
     HRESULT GetFontFallback(IDWriteFontFallback** fallback) override {
-        *fallback = nullptr;
+        *fallback = format_.fallback.Get();
+        if (*fallback) (*fallback)->AddRef();
         return S_OK;
     }
     FLOAT GetMaxWidth() override { return maxWidth_; }
@@ -751,6 +999,67 @@ public:
     float boxWidth() const override { return maxWidth_; }
     float boxHeight() const override { return maxHeight_; }
 
+    // Glyph runs to a custom renderer. Each run names the face it uses: the
+    // DirectWrite family asked for there when the face stands in for it
+    // (Noto Sans CJK JP for Yu Gothic UI), else the face's own family.
+    HRESULT Draw(void* context, IDWriteTextRenderer* renderer, FLOAT originX, FLOAT originY) override {
+        if (!renderer) return E_INVALIDARG;
+        ensure();
+        for (const Line& line : lines_) {
+            PangoLayoutLine* pl = pango_layout_get_line_readonly(layout_, line.pangoIndex);
+            float x = originX + line.x;
+            float baselineY = originY + yOffset_ + line.top + line.baseline;
+            for (GSList* node = pl->runs; node; node = node->next) {
+                auto* run = static_cast<PangoGlyphItem*>(node->data);
+                PangoGlyphString* glyphs = run->glyphs;
+                float width = static_cast<float>(pango_glyph_string_get_width(glyphs)) / PANGO_SCALE;
+                if (glyphs->num_glyphs == 0) {
+                    x += width;
+                    continue;
+                }
+                PangoFontDescription* desc = pango_font_describe_with_absolute_size(run->item->analysis.font);
+                const char* name = pango_font_description_get_family(desc);
+                std::string actual = name ? name : "";
+                float emSize = static_cast<float>(pango_font_description_get_size(desc)) / PANGO_SCALE;
+                auto weight = static_cast<DWRITE_FONT_WEIGHT>(pango_font_description_get_weight(desc));
+                PangoStyle pstyle = pango_font_description_get_style(desc);
+                pango_font_description_free(desc);
+
+                UINT32 start = charOf(run->item->offset);
+                UINT32 end = charOf(run->item->offset + run->item->length);
+                const std::wstring& requested = familyAt(start);
+                std::vector<std::string> standIns = familyCandidates(requested);
+                bool answers = lower(actual) == lower(toUtf8(requested)) ||
+                               std::find(standIns.begin(), standIns.end(), lower(actual)) != standIns.end();
+                auto* face = new FontFace(answers ? toUtf8(requested) : actual, weight,
+                                          pstyle == PANGO_STYLE_ITALIC ? DWRITE_FONT_STYLE_ITALIC
+                                          : pstyle == PANGO_STYLE_OBLIQUE ? DWRITE_FONT_STYLE_OBLIQUE
+                                                                          : DWRITE_FONT_STYLE_NORMAL);
+                std::vector<UINT16> indices;
+                std::vector<FLOAT> advances;
+                std::vector<DWRITE_GLYPH_OFFSET> offsets;
+                for (int i = 0; i < glyphs->num_glyphs; i++) {
+                    const PangoGlyphInfo& info = glyphs->glyphs[i];
+                    indices.push_back(static_cast<UINT16>(info.glyph & 0xFFFF));
+                    advances.push_back(static_cast<FLOAT>(info.geometry.width) / PANGO_SCALE);
+                    offsets.push_back({static_cast<FLOAT>(info.geometry.x_offset) / PANGO_SCALE,
+                                       -static_cast<FLOAT>(info.geometry.y_offset) / PANGO_SCALE});
+                }
+                std::wstring runText = text_.substr(start, end - start);
+                DWRITE_GLYPH_RUN glyphRun{face,          emSize,         static_cast<UINT32>(indices.size()),
+                                          indices.data(), advances.data(), offsets.data(),
+                                          FALSE,          static_cast<UINT32>(run->item->analysis.level)};
+                DWRITE_GLYPH_RUN_DESCRIPTION description{format_.locale.c_str(), runText.c_str(),
+                                                         static_cast<UINT32>(runText.size()), nullptr, start};
+                renderer->DrawGlyphRun(context, x, baselineY, DWRITE_MEASURING_MODE_NATURAL, &glyphRun, &description,
+                                       nullptr);
+                face->Release();
+                x += width;
+            }
+        }
+        return S_OK;
+    }
+
 private:
     static constexpr HRESULT E_NOT_SUFFICIENT_BUFFER_COMPAT = static_cast<HRESULT>(0x8007007A);
 
@@ -847,6 +1156,7 @@ private:
         std::string locale = toUtf8(format_.locale);
         pango_attr_list_insert(list, pango_attr_language_new(pango_language_from_string(locale.c_str())));
         for (PangoAttribute* attr : attrs_) pango_attr_list_insert(list, pango_attribute_copy(attr));
+        applyFallback(list);
         pango_layout_set_attributes(layout_, list);
         pango_attr_list_unref(list);
 
@@ -1012,12 +1322,96 @@ private:
     FLOAT maxWidth_;
     FLOAT maxHeight_;
     std::vector<PangoAttribute*> attrs_;
+    // DirectWrite family names by character range: SetFontFamilyName calls,
+    // then what the fallback mapped (Draw reports these names)
+    struct FamilyRange {
+        UINT32 start, end;
+        std::wstring family;
+    };
+    std::vector<FamilyRange> familyRanges_;
+    std::vector<FamilyRange> fallbackRanges_;
     PangoLayout* layout_ = nullptr;
     bool dirty_ = true;
     std::vector<Line> lines_;
     std::vector<DWRITE_CLUSTER_METRICS> clusters_;
     float totalHeight_ = 0.0f;
     float yOffset_ = 0.0f;
+
+    // The family the text asks for at `position` before fallback
+    const std::wstring& baseFamilyAt(UINT32 position) const {
+        for (auto it = familyRanges_.rbegin(); it != familyRanges_.rend(); ++it) {
+            if (position >= it->start && position < it->end) return it->family;
+        }
+        return format_.family;
+    }
+    // ...and after it
+    const std::wstring& familyAt(UINT32 position) const {
+        for (auto it = fallbackRanges_.rbegin(); it != fallbackRanges_.rend(); ++it) {
+            if (position >= it->start && position < it->end) return it->family;
+        }
+        return baseFamilyAt(position);
+    }
+
+    static std::wstring familyNameOf(IDWriteFont* font) {
+        if (auto* own = dynamic_cast<Font*>(font)) return toWide(own->family());
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+        Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+        UINT32 length = 0;
+        if (FAILED(font->GetFontFamily(&family)) || !family || FAILED(family->GetFamilyNames(&names)) || !names ||
+            FAILED(names->GetStringLength(0, &length))) {
+            return L"";
+        }
+        std::wstring name(length + 1, L'\0');
+        names->GetString(0, name.data(), length + 1);
+        name.resize(length);
+        return name;
+    }
+
+    // Runs the format's or layout's fallback over the text and pins every
+    // stretch it maps away from the base family to the mapped one. ASCII
+    // always stays in the base family, so pure-ASCII text skips this.
+    void applyFallback(PangoAttrList* list) {
+        fallbackRanges_.clear();
+        IDWriteFontFallback* fallback = format_.fallback.Get();
+        if (!fallback) return;
+        if (std::all_of(text_.begin(), text_.end(), [](wchar_t c) { return c < 0x80; })) return;
+        // Stretches with one base family
+        std::vector<UINT32> cuts{0, static_cast<UINT32>(text_.size())};
+        for (const FamilyRange& range : familyRanges_) {
+            cuts.push_back(range.start);
+            cuts.push_back(range.end);
+        }
+        std::sort(cuts.begin(), cuts.end());
+        cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+        AnalysisSource source(text_, format_.locale);
+        for (size_t s = 0; s + 1 < cuts.size(); s++) {
+            UINT32 pos = cuts[s], end = cuts[s + 1];
+            if (pos >= end) continue;
+            const std::wstring base = baseFamilyAt(pos);
+            while (pos < end) {
+                if (text_[pos] < 0x80) {
+                    pos++;
+                    continue;
+                }
+                UINT32 mapped = 0;
+                IDWriteFont* font = nullptr;
+                FLOAT scale = 1.0f;
+                fallback->MapCharacters(&source, pos, end - pos, nullptr, base.c_str(), format_.weight, format_.style,
+                                        format_.stretch, &mapped, &font, &scale);
+                mapped = std::clamp<UINT32>(mapped, 1, end - pos);
+                std::wstring family = font ? familyNameOf(font) : std::wstring();
+                if (font) font->Release();
+                if (!family.empty() && family != base) {
+                    PangoAttribute* attr = pango_attr_family_new(resolveFamily(family).c_str());
+                    attr->start_index = static_cast<guint>(byteOf_[pos]);
+                    attr->end_index = static_cast<guint>(byteOf_[pos + mapped]);
+                    pango_attr_list_insert(list, attr);
+                    fallbackRanges_.push_back({pos, pos + mapped, family});
+                }
+                pos += mapped;
+            }
+        }
+    }
 };
 
 FormatState stateOf(IDWriteTextFormat* format) {
@@ -1138,7 +1532,9 @@ public:
         return S_OK;
     }
     HRESULT GetSystemFontFallback(IDWriteFontFallback** fallback) override {
-        *fallback = new FontFallback();
+        auto* system = new FontFallback();
+        system->system = true;  // fontconfig's per-character fallback
+        *fallback = system;
         return S_OK;
     }
     HRESULT CreateFontFallbackBuilder(IDWriteFontFallbackBuilder** builder) override {

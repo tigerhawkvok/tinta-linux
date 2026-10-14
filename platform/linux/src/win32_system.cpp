@@ -307,8 +307,14 @@ BOOL CloseHandle(HANDLE handle) {
 }
 
 // ---- Files ---------------------------------------------------------------------------------------
-HANDLE CreateFileW(LPCWSTR path, DWORD access, DWORD, SECURITY_ATTRIBUTES*, DWORD disposition, DWORD, HANDLE) {
-    std::string p = native(path);
+HANDLE CreateFileW(LPCWSTR path, DWORD access, DWORD share, SECURITY_ATTRIBUTES* security, DWORD disposition,
+                   DWORD flags, HANDLE templateFile) {
+    return CreateFileW(native(path).c_str(), access, share, security, disposition, flags, templateFile);
+}
+
+// Share modes are not enforced: Linux has no mandatory locks
+HANDLE CreateFileW(const char* path, DWORD access, DWORD, SECURITY_ATTRIBUTES*, DWORD disposition, DWORD, HANDLE) {
+    std::string p = path ? path : "";
     int flags = O_CLOEXEC;
     bool read = (access & GENERIC_READ) != 0, write = (access & GENERIC_WRITE) != 0;
     flags |= write ? (read ? O_RDWR : O_WRONLY) : O_RDONLY;
@@ -468,6 +474,42 @@ BOOL FindNextFileW(HANDLE handle, WIN32_FIND_DATAW* data) {
 }
 
 BOOL FindClose(HANDLE handle) { return CloseHandle(handle); }
+
+BOOL RemoveDirectoryW(LPCWSTR path) {
+    if (rmdir(native(path).c_str()) != 0) {
+        failWithErrno();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL MoveFileW(LPCWSTR from, LPCWSTR to) { return MoveFileExW(from, to, 0); }
+
+BOOL SetFileTime(HANDLE file, const FILETIME*, const FILETIME* access, const FILETIME* write) {
+    auto* h = dynamic_cast<FileHandle*>(handleOf(file));
+    if (!h) return FALSE;
+    auto toTimespec = [](const FILETIME* ft) {
+        struct timespec ts {};
+        if (!ft) {
+            ts.tv_nsec = UTIME_OMIT;
+            return ts;
+        }
+        constexpr ULONGLONG kEpochDelta = 11644473600ULL;
+        ULONGLONG ticks = (static_cast<ULONGLONG>(ft->dwHighDateTime) << 32) | ft->dwLowDateTime;
+        ts.tv_sec = static_cast<time_t>(ticks / 10000000ULL - kEpochDelta);
+        ts.tv_nsec = static_cast<long>((ticks % 10000000ULL) * 100);
+        return ts;
+    };
+    struct timespec times[2] = {toTimespec(access), toTimespec(write)};
+    if (futimens(h->fd, times) != 0) {
+        failWithErrno();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// Crash dialogs do not exist here
+UINT SetErrorMode(UINT) { return 0; }
 
 DWORD GetFullPathNameW(LPCWSTR path, DWORD size, LPWSTR buffer, LPWSTR* filePart) {
     if (!path) return 0;

@@ -97,6 +97,8 @@ if(TINTA_MERMAN)
 endif()
 
 if(BUILD_TESTING)
+    include(${TINTA_LINUX_DIR}/upstream_tests.cmake)
+
     # Behaviour of the compat layer itself
     add_executable(compat_dwrite_tests ${TINTA_LINUX_DIR}/tests/dwrite_tests.cpp)
     target_link_libraries(compat_dwrite_tests PRIVATE tinta_compat)

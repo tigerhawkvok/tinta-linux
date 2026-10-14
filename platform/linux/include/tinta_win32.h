@@ -682,4 +682,98 @@ int GetDateFormatEx(LPCWSTR locale, DWORD flags, const SYSTEMTIME* date, LPCWSTR
 #define IS_LOW_SURROGATE(wch) (((wch) >= 0xDC00) && ((wch) <= 0xDFFF))
 #define IS_SURROGATE_PAIR(hs, ls) (IS_HIGH_SURROGATE(hs) && IS_LOW_SURROGATE(ls))
 
+// ---- Used by upstream's native tests (tests/*.cpp) ------------------------------------
+struct WNDCLASSW {
+    UINT style;
+    WNDPROC lpfnWndProc;
+    int cbClsExtra;
+    int cbWndExtra;
+    HINSTANCE hInstance;
+    HICON hIcon;
+    HCURSOR hCursor;
+    HBRUSH hbrBackground;
+    LPCWSTR lpszMenuName;
+    LPCWSTR lpszClassName;
+};
+ATOM RegisterClassW(const WNDCLASSW* windowClass);
+BOOL UnregisterClassW(LPCWSTR className, HINSTANCE instance);
+int GetWindowTextW(HWND hwnd, LPWSTR text, int maxCount);
+BOOL GetKeyboardState(BYTE* keyState);
+BOOL SetKeyboardState(const BYTE* keyState);
+#ifndef VK_F13
+#define VK_F13 0x7C
+#define VK_F14 0x7D
+#define VK_F15 0x7E
+#define VK_F16 0x7F
+#define VK_F17 0x80
+#define VK_F18 0x81
+#define VK_F19 0x82
+#define VK_F20 0x83
+#define VK_F21 0x84
+#define VK_F22 0x85
+#define VK_F23 0x86
+#define VK_F24 0x87
+#endif
+
+#define SEM_FAILCRITICALERRORS 0x0001
+#define SEM_NOGPFAULTERRORBOX 0x0002
+UINT SetErrorMode(UINT mode);
+
+#define QS_KEY 0x0001
+#define QS_MOUSEMOVE 0x0002
+#define QS_MOUSEBUTTON 0x0004
+#define QS_POSTMESSAGE 0x0008
+#define QS_TIMER 0x0010
+#define QS_PAINT 0x0020
+#define QS_SENDMESSAGE 0x0040
+#define QS_ALLINPUT 0x04FF
+// Waits for one of `handles` or, with a wake mask, for a posted message
+// (returns WAIT_OBJECT_0 + count)
+DWORD MsgWaitForMultipleObjects(DWORD count, const HANDLE* handles, BOOL waitAll, DWORD milliseconds,
+                                DWORD wakeMask);
+
+#pragma pack(push, 2)
+struct BITMAPFILEHEADER {
+    WORD bfType;
+    DWORD bfSize;
+    WORD bfReserved1;
+    WORD bfReserved2;
+    DWORD bfOffBits;
+};
+#pragma pack(pop)
+
+BOOL RemoveDirectoryW(LPCWSTR path);
+BOOL MoveFileW(LPCWSTR from, LPCWSTR to);
+BOOL SetFileTime(HANDLE file, const FILETIME* creation, const FILETIME* access, const FILETIME* write);
+// std::filesystem::path::c_str() is a UTF-8 char string here; Windows code
+// hands it to CreateFileW as a wide one
+HANDLE CreateFileW(const char* path, DWORD access, DWORD share, SECURITY_ATTRIBUTES* security, DWORD disposition,
+                   DWORD flags, HANDLE templateFile);
+
+inline LONG InterlockedIncrement(volatile LONG* value) { return __atomic_add_fetch(value, 1, __ATOMIC_SEQ_CST); }
+inline LONG InterlockedDecrement(volatile LONG* value) { return __atomic_sub_fetch(value, 1, __ATOMIC_SEQ_CST); }
+
+// Clipboard formats that only exist as GDI/metafile handles: never present here
+typedef WORD CLIPFORMAT;
+typedef void* HMETAFILE;
+typedef void* HENHMETAFILE;
+#define CF_METAFILEPICT 3
+#define CF_PALETTE 9
+#define CF_ENHMETAFILE 14
+#define CF_OWNERDISPLAY 0x0080
+#define CF_DSPTEXT 0x0081
+#define CF_DSPBITMAP 0x0082
+#define CF_DSPMETAFILEPICT 0x0083
+#define CF_DSPENHMETAFILE 0x008E
+struct METAFILEPICT {
+    LONG mm;
+    LONG xExt;
+    LONG yExt;
+    HMETAFILE hMF;
+};
+BOOL DeleteMetaFile(HMETAFILE metafile);
+BOOL DeleteEnhMetaFile(HENHMETAFILE metafile);
+UINT EnumClipboardFormats(UINT format);
+HWND GetClipboardOwner();
+
 #endif  // TINTA_LINUX_WIN32_H

@@ -6,6 +6,7 @@
 #include "compat_internal.h"
 
 #include <commdlg.h>
+#include <ole2.h>
 #include <imm.h>
 #include <shellapi.h>
 
@@ -60,6 +61,8 @@ struct State {
     int paintCount = 0;  // BeginPaint calls, all windows
     int quitCode = 0;
     std::map<UINT, HGLOBAL> clipboard;
+    HWND clipboardOpener = nullptr;
+    HWND clipboardOwner = nullptr;
     std::map<std::wstring, UINT> clipboardFormats;
     UINT nextClipboardFormat = 0xC000;
 };
@@ -400,6 +403,52 @@ HWND FindWindowExW(HWND, HWND after, LPCWSTR className, LPCWSTR windowName) {
     return nullptr;
 }
 
+ATOM RegisterClassW(const WNDCLASSW* wc) {
+    if (!wc) return 0;
+    WNDCLASSEXW ex{};
+    ex.cbSize = sizeof ex;
+    ex.style = wc->style;
+    ex.lpfnWndProc = wc->lpfnWndProc;
+    ex.hInstance = wc->hInstance;
+    ex.hCursor = wc->hCursor;
+    ex.lpszClassName = wc->lpszClassName;
+    return RegisterClassExW(&ex);
+}
+
+BOOL UnregisterClassW(LPCWSTR className, HINSTANCE) {
+    if (!className) return FALSE;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    return state().classes.erase(className) ? TRUE : FALSE;
+}
+
+int GetWindowTextW(HWND hwnd, LPWSTR text, int maxCount) {
+    if (!hwnd || !text || maxCount <= 0) return 0;
+    int n = std::min(static_cast<int>(hwnd->title.size()), maxCount - 1);
+    wmemcpy(text, hwnd->title.c_str(), n);
+    text[n] = 0;
+    return n;
+}
+
+DWORD MsgWaitForMultipleObjects(DWORD count, const HANDLE* handles, BOOL, DWORD milliseconds, DWORD wakeMask) {
+    State& s = state();
+    auto deadline = Clock::now() + std::chrono::milliseconds(milliseconds == INFINITE ? 0 : milliseconds);
+    while (true) {
+        for (DWORD i = 0; i < count; i++) {
+            if (WaitForSingleObject(handles[i], 0) == WAIT_OBJECT_0) return WAIT_OBJECT_0 + i;
+        }
+        {
+            std::unique_lock<std::mutex> lock(s.mutex);
+            fireTimers(s);
+            bool posted = !s.queue.empty();
+            bool paint = (wakeMask & QS_PAINT) &&
+                         std::any_of(s.windows.begin(), s.windows.end(), [](HWND w) { return w->dirty; });
+            if (wakeMask && (posted || paint)) return WAIT_OBJECT_0 + count;
+            if (milliseconds != INFINITE && Clock::now() >= deadline) return WAIT_TIMEOUT;
+            s.wake.wait_for(lock, std::chrono::milliseconds(2));
+        }
+    }
+}
+
 int GetClassNameW(HWND hwnd, LPWSTR name, int maxCount) {
     if (!hwnd || !name || maxCount <= 0) return 0;
     int n = std::min(static_cast<int>(hwnd->className.size()), maxCount - 1);
@@ -633,15 +682,100 @@ int MulDiv(int number, int numerator, int denominator) {
 }
 
 // ---- Clipboard: in-process until the window layer bridges GdkClipboard ----------------------
-BOOL OpenClipboard(HWND) { return TRUE; }
+BOOL OpenClipboard(HWND hwnd) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    state().clipboardOpener = hwnd;
+    return TRUE;
+}
+
 BOOL CloseClipboard() { return TRUE; }
 
+// As on Windows, emptying makes the opener the owner
 BOOL EmptyClipboard() {
     std::lock_guard<std::mutex> lock(state().mutex);
     for (auto& entry : state().clipboard) GlobalFree(entry.second);
     state().clipboard.clear();
+    state().clipboardOwner = state().clipboardOpener;
     return TRUE;
 }
+
+HWND GetClipboardOwner() {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    return state().clipboardOwner;
+}
+
+// Formats in ascending order; 0 ends the enumeration
+UINT EnumClipboardFormats(UINT format) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto it = state().clipboard.upper_bound(format);
+    return it == state().clipboard.end() ? 0 : it->first;
+}
+
+HANDLE OleDuplicateData(HANDLE source, CLIPFORMAT, UINT) {
+    SIZE_T size = GlobalSize(source);
+    HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, size);
+    void* from = GlobalLock(source);
+    void* to = GlobalLock(copy);
+    if (from && to && size) std::memcpy(to, from, size);
+    if (from) GlobalUnlock(source);
+    if (to) GlobalUnlock(copy);
+    return copy;
+}
+
+BOOL DeleteMetaFile(HMETAFILE) { return TRUE; }
+BOOL DeleteEnhMetaFile(HENHMETAFILE) { return TRUE; }
+
+namespace {
+
+// OleGetClipboard's snapshot: every format's bytes at the time of the call
+class ClipboardSnapshot final : public TintaComObject<IDataObject> {
+public:
+    using Primary = IDataObject;
+    HRESULT QueryInterface(REFIID riid, void** object) override {
+        return tinta_query<IDataObject>(this, riid, object);
+    }
+    std::vector<std::pair<UINT, std::vector<unsigned char>>> formats;
+};
+
+}  // namespace
+
+HRESULT OleInitialize(void*) { return S_OK; }
+void OleUninitialize() {}
+
+HRESULT OleGetClipboard(IDataObject** dataObject) {
+    if (!dataObject) return E_POINTER;
+    auto* snapshot = new ClipboardSnapshot();
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto& [format, memory] : state().clipboard) {
+        SIZE_T size = GlobalSize(memory);
+        auto* bytes = static_cast<unsigned char*>(GlobalLock(memory));
+        snapshot->formats.push_back({format, std::vector<unsigned char>(bytes, bytes + (bytes ? size : 0))});
+        if (bytes) GlobalUnlock(memory);
+    }
+    *dataObject = snapshot;
+    return S_OK;
+}
+
+HRESULT OleSetClipboard(IDataObject* dataObject) {
+    auto* snapshot = dynamic_cast<ClipboardSnapshot*>(dataObject);
+    if (dataObject && !snapshot) return E_NOTIMPL;  // only snapshots of this clipboard
+    OpenClipboard(nullptr);
+    EmptyClipboard();
+    if (snapshot) {
+        for (const auto& [format, bytes] : snapshot->formats) {
+            HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+            if (void* to = GlobalLock(memory)) {
+                if (!bytes.empty()) std::memcpy(to, bytes.data(), bytes.size());
+                GlobalUnlock(memory);
+            }
+            SetClipboardData(format, memory);
+        }
+    }
+    CloseClipboard();
+    return S_OK;
+}
+
+HRESULT OleFlushClipboard() { return S_OK; }
 
 HANDLE SetClipboardData(UINT format, HANDLE memory) {
     std::lock_guard<std::mutex> lock(state().mutex);

@@ -18,6 +18,81 @@ void check(bool condition, const std::string& message) {
 
 bool near(float a, float b, float tolerance = 0.5f) { return std::fabs(a - b) <= tolerance; }
 
+// Records each glyph run's family (as IDWriteFontCollection names it) and glyphs
+class RunRecorder : public IDWriteTextRenderer {
+public:
+    explicit RunRecorder(IDWriteFontCollection* fonts) : fonts_(fonts) {}
+    struct Run {
+        std::wstring family;
+        std::vector<UINT16> glyphs;
+    };
+    std::vector<Run> runs;
+    HRESULT QueryInterface(REFIID, void** out) override {
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG AddRef() override { return 1; }
+    ULONG Release() override { return 1; }
+    HRESULT IsPixelSnappingDisabled(void*, BOOL* disabled) override {
+        *disabled = FALSE;
+        return S_OK;
+    }
+    HRESULT GetCurrentTransform(void*, DWRITE_MATRIX* m) override {
+        *m = {1, 0, 0, 1, 0, 0};
+        return S_OK;
+    }
+    HRESULT GetPixelsPerDip(void*, FLOAT* p) override {
+        *p = 1;
+        return S_OK;
+    }
+    HRESULT DrawGlyphRun(void*, FLOAT, FLOAT, DWRITE_MEASURING_MODE, const DWRITE_GLYPH_RUN* run,
+                         const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
+        Run out;
+        IDWriteFont* font = nullptr;
+        IDWriteFontFamily* family = nullptr;
+        IDWriteLocalizedStrings* names = nullptr;
+        if (SUCCEEDED(fonts_->GetFontFromFontFace(run->fontFace, &font)) && SUCCEEDED(font->GetFontFamily(&family)) &&
+            SUCCEEDED(family->GetFamilyNames(&names))) {
+            UINT32 length = 0;
+            names->GetStringLength(0, &length);
+            out.family.resize(length + 1);
+            names->GetString(0, out.family.data(), length + 1);
+            out.family.resize(length);
+        }
+        if (names) names->Release();
+        if (family) family->Release();
+        if (font) font->Release();
+        out.glyphs.assign(run->glyphIndices, run->glyphIndices + run->glyphCount);
+        runs.push_back(out);
+        return S_OK;
+    }
+    HRESULT DrawUnderline(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
+    HRESULT DrawStrikethrough(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
+    HRESULT DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override {
+        return S_OK;
+    }
+
+private:
+    IDWriteFontCollection* fonts_;
+};
+
+// A fallback putting ideographs in `first`, then `second`, then the system
+IDWriteFontFallback* cjkFallback(IDWriteFactory2* factory, const wchar_t* first, const wchar_t* second) {
+    IDWriteFontFallbackBuilder* builder = nullptr;
+    factory->CreateFontFallbackBuilder(&builder);
+    DWRITE_UNICODE_RANGE ideographs{0x4E00, 0x9FFF};
+    const wchar_t* families[] = {first, second};
+    builder->AddMapping(&ideographs, 1, families, 2);
+    IDWriteFontFallback* system = nullptr;
+    factory->GetSystemFontFallback(&system);
+    builder->AddMappings(system);
+    system->Release();
+    IDWriteFontFallback* fallback = nullptr;
+    builder->CreateFontFallback(&fallback);
+    builder->Release();
+    return fallback;
+}
+
 IDWriteTextLayout* layoutOf(IDWriteFactory* factory, IDWriteTextFormat* format, const std::wstring& text,
                             float maxWidth = 100000.0f, float maxHeight = 100000.0f) {
     IDWriteTextLayout* layout = nullptr;
@@ -184,6 +259,53 @@ int main() {
     fonts->FindFamilyName(L"Segoe UI", &index, &exists);
     check(exists, "Segoe UI has a stand-in");
     check(fonts->GetFontFamilyCount() > 5, "families enumerate");
+
+    // Custom fallback (Tinta's CJK orders, #155 #254): the order decides
+    // which region's face draws a unified ideograph. 直 differs between
+    // Japanese and Simplified Chinese forms.
+    BOOL jp = FALSE, sc = FALSE;
+    fonts->FindFamilyName(L"Yu Gothic UI", &index, &jp);
+    fonts->FindFamilyName(L"Microsoft YaHei UI", &index, &sc);
+    if (!jp || !sc) {
+        std::cout << "skipped CJK fallback: no Japanese and Chinese stand-ins installed\n";
+    } else {
+        IDWriteFontFallback* japanese = cjkFallback(factory2, L"Yu Gothic UI", L"Microsoft YaHei UI");
+        IDWriteFontFallback* chinese = cjkFallback(factory2, L"Microsoft YaHei UI", L"Yu Gothic UI");
+        auto runsWith = [&](IDWriteFontFallback* fallback, const std::wstring& text) {
+            IDWriteTextFormat* f = nullptr;
+            factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                      DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"en-us", &f);
+            IDWriteTextFormat1* f1 = nullptr;
+            f->QueryInterface(__uuidof(IDWriteTextFormat1), reinterpret_cast<void**>(&f1));
+            f1->SetFontFallback(fallback);
+            IDWriteFontFallback* back = nullptr;
+            f1->GetFontFallback(&back);
+            check(back == fallback, "a format keeps its fallback");
+            if (back) back->Release();
+            IDWriteTextLayout* l = layoutOf(factory, f, text);
+            RunRecorder recorder(fonts);
+            l->Draw(nullptr, &recorder, 0, 0);
+            l->Release();
+            f1->Release();
+            f->Release();
+            return recorder.runs;
+        };
+        auto jpRuns = runsWith(japanese, L"A直");
+        auto scRuns = runsWith(chinese, L"A直");
+        check(jpRuns.size() == 2 && scRuns.size() == 2, "Latin and ideograph draw as two runs");
+        if (jpRuns.size() == 2 && scRuns.size() == 2) {
+            check(jpRuns[0].family == L"Segoe UI", "Latin stays in the base family");
+            check(jpRuns[1].family == L"Yu Gothic UI", "Japanese order draws the ideograph in Yu Gothic UI");
+            check(scRuns[1].family == L"Microsoft YaHei UI", "Chinese order draws it in Microsoft YaHei UI");
+            check(jpRuns[1].glyphs != scRuns[1].glyphs, "the two orders draw different glyphs for 直");
+        }
+        // Outside the mapped ranges the chained system fallback still finds a face
+        auto kana = runsWith(japanese, L"あ");
+        check(kana.size() == 1 && !kana[0].family.empty() && kana[0].family != L"Segoe UI",
+              "kana reach a face through the system fallback");
+        japanese->Release();
+        chinese->Release();
+    }
 
     if (failures) {
         std::cerr << failures << " test(s) failed\n";

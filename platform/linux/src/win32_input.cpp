@@ -17,6 +17,23 @@ void setOne(int virtualKey, bool down) {
 
 SHORT GetKeyState(int virtualKey) { return g_keyState[virtualKey & 0xFF]; }
 
+// Byte form: 0x80 down, 0x01 toggled
+BOOL GetKeyboardState(BYTE* state) {
+    if (!state) return FALSE;
+    for (int i = 0; i < 256; i++) {
+        state[i] = static_cast<BYTE>(((g_keyState[i] & 0x8000) ? 0x80 : 0) | (g_keyState[i] & 0x0001));
+    }
+    return TRUE;
+}
+
+BOOL SetKeyboardState(const BYTE* state) {
+    if (!state) return FALSE;
+    for (int i = 0; i < 256; i++) {
+        g_keyState[i] = static_cast<SHORT>(((state[i] & 0x80) ? 0x8000 : 0) | (state[i] & 0x01));
+    }
+    return TRUE;
+}
+
 // Side-specific keys also drive the generic key, as Windows reports them
 void tintaSetKeyState(int virtualKey, bool down) {
     setOne(virtualKey, down);

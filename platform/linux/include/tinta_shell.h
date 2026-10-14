@@ -175,6 +175,18 @@ LONG GetCurrentPackageFullName(UINT32* packageFullNameLength, LPWSTR packageFull
 HRESULT URLDownloadToCacheFileW(IUnknown* caller, LPCWSTR url, LPWSTR fileName, DWORD bufferSize,
                                 DWORD reserved, void* callback);
 
+// ---- OLE clipboard (upstream's tests save and restore the clipboard with it) -------------
+// The data object OleGetClipboard returns is a snapshot of the in-process
+// clipboard; OleSetClipboard puts such a snapshot back
+TINTA_UUID(IDataObject, 0x0d0c0010)
+struct IDataObject : IUnknown {};
+HRESULT OleInitialize(void* reserved);
+void OleUninitialize();
+HRESULT OleGetClipboard(IDataObject** dataObject);
+HRESULT OleSetClipboard(IDataObject* dataObject);
+HRESULT OleFlushClipboard();
+HANDLE OleDuplicateData(HANDLE source, CLIPFORMAT format, UINT flags);
+
 // ---- Print document targets (documenttarget.h) -------------------------------------------
 TINTA_UUID(IPrintDocumentPackageTarget, 0x0d0c0001)
 TINTA_UUID(IPrintDocumentPackageTargetFactory, 0x0d0c0002)
