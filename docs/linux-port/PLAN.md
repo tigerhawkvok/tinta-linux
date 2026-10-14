@@ -1,12 +1,14 @@
 # Tinta on Linux: port plan
 
-Status: proposal, 2026-10-13. Basis: tinta `c58981a` (3.8.0; identical to
-upstream `oipoistar/tinta` master), md-viewer `45cb36a` (0.3.0 + edit toggle).
+Status: decisions settled 2026-10-13 (§10). Phase 0 and the first Mermaid
+fix are done. Basis: tinta `c58981a` (3.8.0; identical to upstream
+`oipoistar/tinta` master), md-viewer `45cb36a` (0.3.0 + edit toggle).
 
 Goal: Tinta's UX (tabs, unified editor, annotations, native Mermaid and math,
 exports, themes) running natively on Linux (Wayland and X11). From md-viewer we
-take its Linux reach, its packaging, and the inline editing it tried
-("live preview"). Startup and footprint should stay close to Tinta's.
+take its Linux reach, its packaging, and its Mermaid coverage: a ```` ```mermaid ````
+fence that renders there should render in Tinta too. Startup and footprint
+should stay close to Tinta's.
 
 ## 1. Measurements behind the plan
 
@@ -21,7 +23,10 @@ take its Linux reach, its packaging, and the inline editing it tried
 | Strings | `std::wstring` throughout; 13 surrogate-pair sites; 36 `MultiByteToWideChar`/`WideCharToMultiByte` calls in 11 files | grep |
 | Upstream velocity | 233 commits since 2025-12-05; 30 in the last 30 days | `git log` |
 | md-viewer | Rust/egui; `main.rs` 7.4k lines + vendored `egui_commonmark` and `epaint`; ~35 MB binary (README) | `wc -l`, README |
-| md-viewer inline editing | Obsidian-style block swap landed in #203 (+4.4k lines) and was reverted within 2 days; `main` now has only a Preview/Edit toggle | `git show 68a38ab`, `9b68f50` |
+| md-viewer Mermaid | rendered by merman 0.3.0, a Rust port checked against Mermaid's own fixtures (merman HEAD tracks Mermaid 12.1) | `Cargo.lock`, merman README |
+| Tinta Mermaid coverage, before | 272 of 548 examples in Mermaid's syntax docs render; 892 of 1,908 realistic merman fixtures. The biggest single cause: a leading `---` frontmatter block made `detectKind` return `None` | `tests/mermaid_corpus/` |
+| Tinta Mermaid coverage, now | 336 / 548 docs examples; 1,228 / 1,908 realistic fixtures; no regressions | same, after `7c4ed53` |
+| Mermaid upstream churn | 3 commits in 3 months touch `mermaid.cpp`/`mermaid_ext.*` | `git log` |
 | GTK 4.22 startup | `gtk_init` 42 ms. Time to first painted frame: 112 ms with the `cairo` renderer, 130 ms with `ngl`, 300+ ms with the default `vulkan` | spike under Xvfb with software GL, 3–5 runs each; **real-GPU numbers unmeasured** |
 | Pango throughput | `CHANGELOG.md` (43 KB): 750 layouts (Tinta-style element measure + per-line segments), 42.6k clusters, 21 ms warm / 36 ms cold (28 µs per layout) | spike `seg.c`, Pango 1.58 |
 
@@ -38,8 +43,8 @@ the 22 native Mermaid families again in Rust/egui, on an immediate-mode
 framework that md-viewer had to fork twice (`egui_commonmark`, `epaint`) to get
 acceptable typography. What we take from md-viewer is knowledge: its Linux
 gotchas (`docs/LESSONS.md`, devlogs 050–052 on snap and Wayland), its packaging
-(`flatpak/`, `aur/`, `snap/`, `data/*.desktop`, metainfo), and the editing
-research in #203 (`docs/research/editing-*.md` at `68a38ab`).
+(`flatpak/`, `aur/`, `snap/`, `data/*.desktop`, metainfo), and its Mermaid
+coverage as the bar to meet (§6).
 
 ### 2.2 A compatibility layer instead of a rewrite
 
@@ -58,8 +63,8 @@ possible:
   reads (§4). These become a short, enumerated list of `#ifdef _WIN32`
   islands, tracked in `docs/linux-port/IFDEFS.md`.
 - **Diff budget:** an upstream merge should conflict only in `CMakeLists.txt`
-  and the island list. Linux CI turns any new Win32/D2D call upstream adds
-  into a compile error, which we fix by extending the shim.
+  and the island list. The Linux build turns any new Win32/D2D call upstream
+  adds into a compile error, which we fix by extending the shim.
 
 Rejected alternative: a clean `gfx::`/`plat::` abstraction implemented by both
 D2D and Cairo. It is better code, but it touches every render call site, so
@@ -92,6 +97,25 @@ abstraction.
   the spike. Full-window paint time at 4K is **unmeasured**. If it goes over
   8 ms, move the screen path to `GtkSnapshot`/GSK render nodes (GPU glyph
   cache) behind the same shim. Export stays on Cairo.
+
+### 2.4 Mermaid: fix Tinta's native parsers, don't embed merman
+
+Tinta draws Mermaid itself, with theme colours, selectable text and vector
+export. It falls back to a code block when its parser rejects a diagram, and
+that fallback is the gap against md-viewer. Closing it in the native parsers:
+
+- is platform-free shared code. It can proceed on Linux now, it fixes
+  Windows too, and upstream rarely touches those files (3 commits in 3
+  months), so merges stay cheap;
+- is measurable against the same corpora merman is checked with
+  (`tests/mermaid_corpus/`), with a regression gate per change.
+
+Embedding merman through its C bindings would add a Rust toolchain to the
+build and an SVG rasterization path that loses theme integration and text
+selection. md-viewer's whole binary is ~35 MB; merman's share is unmeasured.
+It stays a reserve option only for families Tinta has never drawn (zenuml,
+wardley, venn and the other Mermaid 11/12 betas), and only if those turn out
+to matter.
 
 ## 3. Architecture
 
@@ -171,19 +195,26 @@ Each phase ends in a state that can be shipped or demonstrated. Durations are
 **unmeasured**. After phase 1, the shim's size and real velocity will give a
 basis for estimating the rest.
 
-**Phase 0: Linux build of the pure core.** Add a platform branch to CMake
-(`if(WIN32)` keeps today's build byte-for-byte). Build md4c, markdown, mermaid,
-math parser, frontmatter, footnotes, document and wordcount, plus their
-existing tests (`mermaid_tests`, `math_parser_tests`, `document_tests`,
-`wordcount_tests`, `footnote_tests`, `keymap_tests`) with GCC 15 and Clang 22.
-Fix MSVC-isms (`_stricmp`, `_wcsicmp`, wchar width). Add an `upstream` remote
-and an `ubuntu-latest` CI job, and add a `pull_request` trigger so both
-platforms gate merges.
-*Exit:* `ctest` green on Linux for the pure suites.
+**Phase 0: Linux build of the pure core. Done (`32b17f8`).**
+
+- `CMakeLists.txt` gains a six-line hook after `SOURCES`/`HEADERS`: non-Windows
+  hosts include `platform/linux/linux.cmake` and stop there.
+- `platform/linux/include/windows.h` is the start of the shim: types, `VK_*`,
+  `CP_UTF8` conversion, `GetStringTypeW` (via GLib), `SYSTEMTIME`/`FILETIME`
+  and `GetKeyState`.
+- A force-included `tinta_prelude.h` supplies MSVC's CRT spellings (`_stricmp`,
+  `swprintf_s`, ...) and the standard headers MSVC includes transitively, so
+  no shared file changed.
+- `keymap`, `math_parser`, `mermaid_parser`, `document_types` and `word_count`
+  pass under GCC 15.2 and Clang 22.1. `footnote_tests` needs the full app
+  sources, so it waits for phase 1.
+- CI is deferred while all work stays local; the release workflow is
+  untouched.
 
 **Phase 1: headless rendering (most of the shim).** Build `gfx_cairo`,
 `text_pango` and `imaging`, wire up the existing `--exportpdf`/`--printpages`
-CLI paths, and add `--render-png out.png --width N --theme T`.
+CLI paths, and add `--render-png out.png --width N --theme T`. Link md4c
+statically: FetchContent currently builds it as `libmd4c.so` on Linux.
 *Exit:*
 - Every file in `tests/fixtures/` renders to PNG and PDF headless.
 - The layout suites (`code_block_layout`, `blockquote_layout`,
@@ -230,77 +261,63 @@ Cairo PNG, pandoc launched with `g_spawn`.
 metainfo, hicolor icons from `tinta.ico`, and a shared-mime-info entry for
 `.mmd` (no standard type exists). `--register` maps to `xdg-mime`.
 
-**Phase 7: inline editing (live preview).** §6.
+**Mermaid track (§6), alongside the phases.** It is pure code, so it needs
+nothing beyond phase 0, except drawing the frontmatter title, which waits for
+phase 1.
 
 **Later: macOS.** GTK4 runs there, so the same backend would work, with a
 non-native feel. A CoreText/CoreGraphics backend behind the same compat
 headers is the native option. Not scheduled.
 
-## 6. Inline editing (live preview)
+## 6. Mermaid compatibility
 
-Typora/Obsidian style: the document renders everywhere except the block under
-the caret, which shows its raw Markdown and is edited in place. This is a
-*platform-independent* feature, so it belongs in shared code. Windows benefits
-too, and it is a natural upstream PR.
+Bar to meet: a fence md-viewer (merman) renders also renders in Tinta. Each
+step below is measured with `tests/mermaid_corpus/`, must show no
+regressions in `compare_runs.py`, and ships with `mermaid_tests` cases plus a
+mixed fixture (AGENTS.md).
 
-Why it fits Tinta better than it fit md-viewer:
+| Step | What | Status | Measured effect |
+|---|---|---|---|
+| M1 | Leading YAML frontmatter, multi-line `%%{ }%%` directives, `flowchart-elk` | **done** (`7c4ed53`) | docs 272 → 336 / 548; realistic fixtures 892 → 1,228 / 1,908 |
+| M2 | Flowchart: `n@{ shape: ..., label: ... }` (Mermaid 11.3 shapes) | next | 154 realistic fixtures fail on this alone |
+| M3 | Flowchart edges: `A & B --> C`, `<-->`, `~~~`, `--->` lengths, `>text]` nodes, `accTitle`/`accDescr` | | 67 realistic, 16 docs examples |
+| M4 | Flowchart Markdown-string labels (`` "`**bold**`" ``) and quoted-label edge cases | | 23 realistic |
+| M5 | gitGraph `TB`/`BT`, state composites and multi-line notes, ER statements, class namespaces, requirement statements, xychart axes, gantt `dateFormat`s | | 77 + 42 + 14 + 10 + 18 + 26 + 12 realistic |
+| M6 | Draw the frontmatter `title` above the diagram | needs phase 1 to verify visually | correctness, not counts |
+| M7 | HTML export: compare the fence language case-insensitively, as the viewer does | needs phase 1 to build `export_html.cpp` on Linux | small |
 
-- Viewer layout is already per top-level block (`layoutNextBlock`,
-  `layoutElement`). Every run carries `docStart`/`docLength`, and
-  `scrollAnchors` maps source offsets to y positions.
-- `editor.cpp` (4.1k lines) already owns the caret, multiple carets, undo
-  (`EditAction`), IME, wrapping and the Markdown assists. Live mode gives the
-  editor a *view*, an island laid out at the active block's position. It does
-  not create a second editor widget per block. Two of md-viewer's failure
-  modes, undo fragmented per widget and IME inside a swapped widget, don't
-  arise.
-
-The remaining hard part, also md-viewer's main finding, is **layout jump on
-swap**. Mitigations:
-
-- Lay out the island in the block's own body font and width, with syntax
-  markers dimmed rather than inserted where possible.
-- Relayout only the two swapped blocks and shift later display-list items
-  by Δy. A `shiftLayoutItems` variant for y is needed; today's only shifts x.
-- Pin the scroll anchor to the caret line.
-
-Order of work:
-
-1. paragraphs and headings
-2. lists and blockquotes, kept atomic
-3. tables
-4. code, math and Mermaid, shown as source with the rendered output beneath
-   while active
-
-Regression tests assert block geometry before and after a swap: a Δy budget,
-and no movement for blocks above the active one.
-
-Coordinate with upstream before starting. Upstream changes `editor.cpp`
-often, and building this in the fork first guarantees conflicts.
+The counts overlap: one diagram can hit several gaps, so they are a ranking,
+not a forecast. The remaining families Tinta doesn't draw at all (zenuml,
+treeView, ishikawa, cynefin, venn, wardley, usecase, eventmodeling, swimlane,
+agentflow, railroad) account for 136 of the 548 docs examples. They are new
+work per family, not parser fixes: decide which matter before starting any.
 
 ## 7. Validation (AGENTS.md on Linux)
 
 - Fixtures go in `tests/fixtures/` as mixed documents, as AGENTS.md already
   requires. New `linux-*` fixtures cover font fallback, CJK, emoji, RTL,
   math-font fallback and HiDPI.
-- Headless rendering means fixtures render to PNG and PDF on CI with **no
+- Headless rendering means fixtures render to PNG and PDF with **no
   display**, at normal and narrow widths, across all 10 themes. Output goes to
-  `build/out/` (ignored), with PNGs uploaded as CI artifacts.
+  `build/out/` (ignored).
 - `input_tests` keep their approach (a message-only window becomes a hidden
   App on an offscreen Cairo target) and drive the real `WndProc` without a
   compositor.
+- Mermaid parser changes run `tests/mermaid_corpus/` before and after;
+  `compare_runs.py` must report no regressions.
 - Interactive checks happen on this desktop: Ubuntu 25.10, GNOME Wayland
   (`wayland-0`) and an X11 session. Each phase's exit records what was checked
-  and what is still limited.
+  and what is still limited, in a `tests/*-validation.md` record.
 
 ## 8. Upstream relationship
 
-- Remotes: `origin` is this fork; `upstream` is `oipoistar/tinta`. Merge
-  upstream regularly (no rebase); both CIs gate each merge.
-- Once phase 2 is stable, ask the upstream maintainer whether they'd take the
-  CMake split and `platform/linux/` as-is. Nothing changes on Windows. If they
-  accept, the fork stops being a fork. This is an outward-facing decision and
-  Philip's call.
+- Track `oipoistar/tinta` for now, and keep the option to break away later.
+  Merge upstream (no rebase) into the local branch; the Linux build turns any
+  new Win32/D2D call into a compile error, and the shim grows to cover it.
+- All work stays local: commits on local branches, no pushes, no PRs. The
+  branch `linux-port-plan` went to `origin` once, before that was decided.
+- Shared-code fixes such as the Mermaid work also fix Windows. Offering them
+  upstream is an outward-facing step and Philip's call.
 
 ## 9. Risks, ranked
 
@@ -317,21 +334,24 @@ often, and building this in the fork first guarantees conflicts.
 4. **Upstream churn into Win32-heavy code** (`tabs.cpp`, `main_d2d.cpp`,
    `input.cpp`), where the islands live. Mitigation: keep islands small and
    merge often.
-5. **Startup**: 112–130 ms to first frame measured headless, against
+5. **Wide `printf` semantics.** MSVC reads `%s` in a wide format as a wide
+   string; glibc reads it as a narrow one. One site does this
+   (`src/pandoc.cpp:189`), inside the pandoc island. Compiling with
+   `-Wformat` on Linux catches new ones.
+6. **Startup**: 112–130 ms to first frame measured headless, against
    Windows Tinta's advertised <100 ms. GTK init alone is 42 ms. Measure on
    real hardware in phase 2 before optimizing.
-6. **Pango cost per layout** (28 µs warm). Fine for incremental layout of
+7. **Pango cost per layout** (28 µs warm). Fine for incremental layout of
    large documents (43 KB in 21 ms); revisit only if a fixture shows layout
    above budget.
 
-## 10. Open questions
+## 10. Decisions (2026-10-13)
 
-1. **What "inline markdown" means.** This plan assumes Obsidian-style live
-   preview (§6). If it meant md-viewer's current single-pane Preview/Edit
-   toggle, phase 7 shrinks to a small task; Tinta's `Ctrl+E` and
-   `Ctrl+Shift+E` already cover most of it.
-2. **Track upstream (compat layer, recommended) or hard-fork Linux-only?**
-   A hard fork allows a cleaner abstraction but has to port every upstream
-   feature by hand.
-3. **Is macOS in scope?** If it is first-class rather than "later", the
-   toolkit decision (§2.3) needs another look.
+1. **"Inline markdown" means Mermaid fences rendered in place, as md-viewer
+   does**, not an inline editing mode. This became §6; the live-preview phase
+   was dropped.
+2. **Track upstream** with the compat layer, and keep the option to break
+   away.
+3. **macOS later.** GTK4 or a CoreText backend behind the same headers; not
+   scheduled.
+4. **Local only.** No pushes, no PRs.
