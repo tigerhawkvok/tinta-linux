@@ -1,4 +1,5 @@
 #include "drafts.h"
+#include "fs_path.h"
 #include "i18n.h"
 #include "settings.h"
 #include "signals.h"
@@ -9,7 +10,6 @@
 #include <shlobj.h>
 #include <fstream>
 #include <sstream>
-#include <filesystem>
 
 // The config home's drafts folder (portable beside the exe, else
 // %APPDATA%\Tinta), created on first use
@@ -40,7 +40,7 @@ static void writeDraft(const std::wstring& draftPath,
                        const std::string& origPath,
                        const std::wstring& text) {
     if (draftPath.empty()) return;
-    std::ofstream out(std::filesystem::path(draftPath), std::ios::binary);
+    std::ofstream out(fsPath(draftPath), std::ios::binary);
     if (!out) return;
     std::string header = "<!-- tinta-draft:" + origPath + " -->\n";
     std::string body = toUtf8(text);
@@ -89,11 +89,11 @@ static bool isLiveTintaProcess(DWORD pid) {
     bool live = false;
     if (QueryFullProcessImageNameW(proc, 0, image, &size)) {
         std::wstring path(image, size);
-        size_t slash = path.find_last_of(L'\\');
+        size_t slash = path.find_last_of(L"\\/");
         std::wstring base =
             slash == std::wstring::npos ? path : path.substr(slash + 1);
         for (wchar_t& c : base) c = (wchar_t)towlower(c);
-        live = (base == L"tinta.exe");
+        live = (base == L"tinta.exe" || base == L"tinta");
     }
     CloseHandle(proc);
     return live;
@@ -129,7 +129,7 @@ void draftsScanForRecovery(App& app) {
 
 void draftsRecoverAll(App& app, HWND hwnd) {
     for (const std::wstring& path : app.recoveredDrafts) {
-        std::ifstream file(std::filesystem::path(path), std::ios::binary);
+        std::ifstream file(fsPath(path), std::ios::binary);
         if (!file) continue;
         std::stringstream buf;
         buf << file.rdbuf();

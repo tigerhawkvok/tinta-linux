@@ -5,6 +5,7 @@
 // raw markdown since that conversion is source-to-source.
 
 #include "pandoc.h"
+#include "fs_path.h"
 
 #include "editor.h"
 #include "export.h"
@@ -17,7 +18,6 @@
 
 #include <fstream>
 #include <string>
-#include <filesystem>
 
 namespace {
 
@@ -198,12 +198,12 @@ void pandocExportFlow(App& app, HWND hwnd, int fmt) {
         std::string md = app.editMode ? toUtf8Str(app.editorText)
                                       : std::string();
         if (md.empty() && !app.currentFile.empty()) {
-            std::ifstream in(std::filesystem::path(toWideStr(app.currentFile)),
+            std::ifstream in(fsPath(toWideStr(app.currentFile)),
                              std::ios::binary);
             md.assign(std::istreambuf_iterator<char>(in),
                       std::istreambuf_iterator<char>());
         }
-        std::ofstream outFile(std::filesystem::path(tempFile), std::ios::binary);
+        std::ofstream outFile(fsPath(tempFile), std::ios::binary);
         if (!outFile) return;
         outFile.write(md.data(), (std::streamsize)md.size());
     }

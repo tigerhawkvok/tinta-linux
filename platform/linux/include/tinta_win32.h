@@ -375,6 +375,19 @@ HWND SetFocus(HWND hwnd);
 HWND GetFocus();
 HWND GetAncestor(HWND hwnd, UINT flags);
 HWND FindWindowExW(HWND parent, HWND childAfter, LPCWSTR className, LPCWSTR windowName);
+inline HWND FindWindowW(LPCWSTR className, LPCWSTR windowName) {
+    return FindWindowExW(nullptr, nullptr, className, windowName);
+}
+struct PAINTSTRUCT {
+    HDC hdc;
+    BOOL fErase;
+    RECT rcPaint;
+    BOOL fRestore;
+    BOOL fIncUpdate;
+    BYTE rgbReserved[32];
+};
+HDC BeginPaint(HWND hwnd, PAINTSTRUCT* paint);
+BOOL EndPaint(HWND hwnd, const PAINTSTRUCT* paint);
 int GetClassNameW(HWND hwnd, LPWSTR className, int maxCount);
 BOOL ScreenToClient(HWND hwnd, POINT* point);
 BOOL ClientToScreen(HWND hwnd, POINT* point);

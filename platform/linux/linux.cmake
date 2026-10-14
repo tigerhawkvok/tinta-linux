@@ -8,11 +8,13 @@
 set(TINTA_LINUX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platform/linux)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
+pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
 pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo pangoft2)
 pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo cairo-pdf cairo-png)
 pkg_check_modules(PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 pkg_check_modules(RSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
+# Remote images (URLDownloadToCacheFileW); without it they show as links
+pkg_check_modules(CURL IMPORTED_TARGET libcurl)
 
 # Shared code relies on MSVC's transitive standard includes
 add_compile_options(
@@ -23,11 +25,20 @@ add_library(tinta_compat STATIC
     ${TINTA_LINUX_DIR}/src/win32_base.cpp
     ${TINTA_LINUX_DIR}/src/win32_input.cpp
     ${TINTA_LINUX_DIR}/src/dwrite_pango.cpp
+    ${TINTA_LINUX_DIR}/src/d2d_cairo.cpp
+    ${TINTA_LINUX_DIR}/src/wic_imaging.cpp
+    ${TINTA_LINUX_DIR}/src/com_streams.cpp
+    ${TINTA_LINUX_DIR}/src/win32_window.cpp
+    ${TINTA_LINUX_DIR}/src/win32_system.cpp
 )
 target_include_directories(tinta_compat PUBLIC ${TINTA_LINUX_DIR}/include)
 target_compile_definitions(tinta_compat PUBLIC UNICODE _UNICODE NOMINMAX)
 target_link_libraries(tinta_compat PUBLIC PkgConfig::GLIB PkgConfig::PANGOCAIRO PkgConfig::CAIRO
     PkgConfig::PIXBUF PkgConfig::RSVG)
+if(CURL_FOUND)
+    target_link_libraries(tinta_compat PUBLIC PkgConfig::CURL)
+    target_compile_definitions(tinta_compat PRIVATE TINTA_HAVE_CURL)
+endif()
 
 set(TINTA_MERMAID_SOURCES
     src/mermaid.cpp
@@ -55,6 +66,12 @@ target_compile_definitions(tinta_core PUBLIC
     TINTA_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     TINTA_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     TINTA_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+
+# The app: Tinta's own WinMain behind a Linux main(). Headless until the
+# GTK window layer (phase 2): --render-png, --printpages and --export*.
+add_executable(tinta ${TINTA_LINUX_DIR}/src/main_linux.cpp src/main_d2d.cpp)
+target_include_directories(tinta PRIVATE ${TINTA_LINUX_DIR}/src)
+target_link_libraries(tinta PRIVATE tinta_core)
 
 # Mermaid through merman instead of the native parsers (PLAN.md §6)
 option(TINTA_MERMAN "Render Mermaid with merman (needs rustup)" ON)
@@ -84,6 +101,23 @@ if(BUILD_TESTING)
     add_executable(compat_dwrite_tests ${TINTA_LINUX_DIR}/tests/dwrite_tests.cpp)
     target_link_libraries(compat_dwrite_tests PRIVATE tinta_compat)
     add_test(NAME compat_dwrite COMMAND compat_dwrite_tests)
+
+    add_executable(compat_d2d_wic_tests ${TINTA_LINUX_DIR}/tests/d2d_wic_tests.cpp)
+    target_include_directories(compat_d2d_wic_tests PRIVATE ${TINTA_LINUX_DIR}/src)
+    find_package(ZLIB REQUIRED)  # reads the compressed PDF the print path writes
+    target_link_libraries(compat_d2d_wic_tests PRIVATE tinta_compat ZLIB::ZLIB)
+    add_test(NAME compat_d2d_wic COMMAND compat_d2d_wic_tests)
+
+    # The whole app headless: an absolute path argument opens the document
+    # (it is not taken for a /switch) and the window paints and saves
+    set(TINTA_SMOKE_HOME ${CMAKE_BINARY_DIR}/linux-render/.ctest-home)
+    add_test(NAME linux_headless_render
+        COMMAND tinta ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/markdown-regression-control.md
+            --render-png=${CMAKE_BINARY_DIR}/linux-render/ctest-control.png --size=900x700 --settle-ms=100)
+    set_tests_properties(linux_headless_render PROPERTIES
+        ENVIRONMENT "XDG_CONFIG_HOME=${TINTA_SMOKE_HOME}/config;XDG_CACHE_HOME=${TINTA_SMOKE_HOME}/cache;XDG_DATA_HOME=${TINTA_SMOKE_HOME}/data"
+        PASS_REGULAR_EXPRESSION "render-png: window \"[^\"]*markdown-regression-control\\.md"
+        FAIL_REGULAR_EXPRESSION "no painted window|\\[timeout\\]")
 
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)

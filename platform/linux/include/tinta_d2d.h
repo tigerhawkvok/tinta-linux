@@ -348,17 +348,17 @@ public:
     D2D1_POINT_2F TransformPoint(D2D1_POINT_2F p) const {
         return {p.x * _11 + p.y * _21 + _31, p.x * _12 + p.y * _22 + _32};
     }
-    Matrix3x2F operator*(const Matrix3x2F& other) const {
-        Matrix3x2F result;
-        result.SetProduct(*this, other);
-        return result;
-    }
 };
 
 }  // namespace D2D1
 
-inline D2D1_MATRIX_3X2_F operator*(const D2D1_MATRIX_3X2_F& a, const D2D1_MATRIX_3X2_F& b) {
-    return D2D1::Matrix3x2F(a) * D2D1::Matrix3x2F(b);
+// One product for every mix of Matrix3x2F and the plain struct: a member
+// operator next to this would make Matrix3x2F * D2D1_MATRIX_3X2_F
+// ambiguous (Clang rejects it)
+inline D2D1::Matrix3x2F operator*(const D2D1_MATRIX_3X2_F& a, const D2D1_MATRIX_3X2_F& b) {
+    D2D1::Matrix3x2F result;
+    result.SetProduct(D2D1::Matrix3x2F(a), D2D1::Matrix3x2F(b));
+    return result;
 }
 
 // ---- Interfaces ---------------------------------------------------------------

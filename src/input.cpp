@@ -1,4 +1,5 @@
 #include "frontmatter_ui.h"
+#include "fs_path.h"
 #include "input.h"
 #include "link_target.h"
 #include "annotations.h"
@@ -249,7 +250,7 @@ void handleSelectScrollTimer(App& app, HWND hwnd) {
 // Loads a document into the viewer and resets per-document state.
 // Shared by the folder browser's item clicks, path input, and new-file flow.
 bool openDocumentInViewer(App& app, const std::wstring& fullPath) {
-    std::ifstream file{std::filesystem::path(fullPath)};
+    std::ifstream file{fsPath(fullPath)};
     if (!file) return false;
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -571,7 +572,7 @@ static void openThemesIniFile() {
     if (slash == std::wstring::npos) return;
     p = p.substr(0, slash + 1) + L"themes.ini";
     if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::ofstream f{std::filesystem::path(p)};
+        std::ofstream f{fsPath(p)};
         f << "; Custom themes: [theme] sections, RRGGBB colors.\n";
     }
     ShellExecuteW(nullptr, L"open", configFilePathForShell(p).c_str(),
@@ -2294,7 +2295,7 @@ static bool openWikiLink(App& app, const std::string& target) {
     namespace fs = std::filesystem;
     std::error_code ec;
     std::wstring wideTarget = toWide(target);
-    fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
+    fs::path dir = fsPath(toWide(app.currentFile)).parent_path();
 
     auto tryOpen = [&](const fs::path& p) {
         return fs::exists(p, ec) && !fs::is_directory(p, ec) &&
@@ -2339,7 +2340,7 @@ static void offerCreateFileRef(App& app, const std::string& url) {
     if (qmd::fileRefIsExternal(path)) {
         auto wide = toWide(path);
         signalPushKey(app, SIG_WARN, SIGI_FILE, "toast.file_missing",
-                      std::filesystem::path(wide).filename().wstring(), wide);
+                      fsPath(wide).filename().wstring(), wide);
         return;
     }
     app.createRefPath = std::move(path);
@@ -2367,7 +2368,7 @@ static bool openFileRefTarget(App& app, HWND hwnd, const std::string& url) {
                 ? "toast.file_missing" : error == ERROR_NO_ASSOCIATION
                 ? "toast.file_no_app" : "toast.file_open_failed";
             signalPushKey(app, SIG_ERROR, SIGI_FILE, message,
-                          std::filesystem::path(wide).filename().wstring(), wide);
+                          fsPath(wide).filename().wstring(), wide);
         }
         return false;
     }
@@ -2466,7 +2467,7 @@ static void startPageInvoke(App& app, HWND hwnd, int id) {
 static void createRefAction(App& app, HWND hwnd, int action) {
     app.createRefPending = false;
     if (action == 1 && !app.createRefPath.empty()) {
-        std::filesystem::path target(toWide(app.createRefPath));
+        std::filesystem::path target = fsPath(toWide(app.createRefPath));
         std::error_code ec;
         if (target.has_parent_path()) {
             std::filesystem::create_directories(target.parent_path(), ec);
@@ -2558,7 +2559,7 @@ static const App::TaskRect* taskRectAt(const App& app) {
 static void toggleTaskOnDisk(App& app, HWND hwnd, size_t markOffset, bool wasChecked) {
     if (app.currentFile.empty()) return;
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream in(std::filesystem::path(widePath), std::ios::binary);
+    std::ifstream in(fsPath(widePath), std::ios::binary);
     if (!in) return;
     std::string disk((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
@@ -2578,7 +2579,7 @@ static void toggleTaskOnDisk(App& app, HWND hwnd, size_t markOffset, bool wasChe
     }
     disk[diskPos] = checked ? ' ' : 'x';
 
-    std::ofstream out(std::filesystem::path(widePath), std::ios::binary | std::ios::trunc);
+    std::ofstream out(fsPath(widePath), std::ios::binary | std::ios::trunc);
     if (!out) return;
     out.write(disk.data(), (std::streamsize)disk.size());
     out.close();
@@ -4298,7 +4299,7 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
     } else if (app.linkPeekUrl.rfind("wiki:", 0) == 0 &&
                !app.currentFile.empty()) {
         std::wstring t = toWide(app.linkPeekUrl.substr(5));
-        fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
+        fs::path dir = fsPath(toWide(app.currentFile)).parent_path();
         if (fs::exists(dir / t, ec)) {
             target = dir / t;
         } else if (fs::exists(dir / (t + L".md"), ec)) {
@@ -4413,7 +4414,7 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
         if (CompareFileTime(&ft, &app.lastFileWriteTime) != 0) {
             app.lastFileWriteTime = ft;
             // Reload file
-            std::ifstream file{std::filesystem::path(widePath)};
+            std::ifstream file{fsPath(widePath)};
             if (file) {
                 std::stringstream buffer;
                 buffer << file.rdbuf();

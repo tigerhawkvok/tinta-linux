@@ -3,6 +3,7 @@
 // Much faster startup than OpenGL
 
 #include "app.h"
+#include "fs_path.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
@@ -2031,7 +2032,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             posX = _wtoi(argv[++i]);
             posY = _wtoi(argv[++i]);
             hasPos = true;
-        } else if (arg[0] != L'-' && arg[0] != L'/') {
+        } else if (arg[0] != L'-' &&
+                   (arg[0] != L'/' ||
+                    GetFileAttributesW(arg.c_str()) != INVALID_FILE_ATTRIBUTES)) {
+            // A leading '/' marks a switch unless it names a file (an
+            // absolute path outside Windows)
             // Convert to UTF-8
             int len = WideCharToMultiByte(CP_UTF8, 0, arg.c_str(), -1, nullptr, 0, nullptr, nullptr);
             inputFile.resize(len - 1);
@@ -2225,9 +2230,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     };
 
     auto loadFile = [&](const std::string& path) -> bool {
-        // Use wide string path for ifstream to support non-ASCII paths (MSVC extension)
+        // Wide path for ifstream to support non-ASCII paths
         std::wstring widePath = toWide(path);
-        std::ifstream file(widePath);
+        std::ifstream file(fsPath(widePath));
         if (!file) return false;
         std::stringstream buffer;
         buffer << file.rdbuf();

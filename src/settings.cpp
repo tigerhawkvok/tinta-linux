@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "fs_path.h"
 #include "document.h"
 #include "i18n.h"
 
@@ -8,7 +9,6 @@
 #include <appmodel.h>
 #include <fstream>
 #include <string>
-#include <filesystem>
 
 static int settingsLanguageIndex(const Settings& settings) {
     if (settings.language != "auto") {
@@ -31,7 +31,7 @@ void saveSettings(const Settings& settings) {
     std::wstring path = getSettingsPath();
     if (path.empty()) return;
 
-    std::ofstream file{std::filesystem::path(path)};
+    std::ofstream file{fsPath(path)};
     if (!file) return;
 
     file << "[Settings]\n";
@@ -260,7 +260,7 @@ Settings loadSettings() {
     std::wstring path = getSettingsPath();
     if (path.empty()) return settings;
 
-    std::ifstream file{std::filesystem::path(path)};
+    std::ifstream file{fsPath(path)};
     if (!file) return settings;
 
     bool sawKeyProfile = false, sawFrontmatterRules = false;

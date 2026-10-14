@@ -38,6 +38,14 @@ inline int sprintf_s(char (&buffer)[N], const char* format, ...) {
     return written;
 }
 
+inline int sprintf_s(char* buffer, size_t size, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(buffer, size, format, args);
+    va_end(args);
+    return written;
+}
+
 // MSVC reads %s in a wide format as a wide string; glibc reads it as a narrow
 // one. Shared code must use %ls for wide strings.
 template <size_t N>

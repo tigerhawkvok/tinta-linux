@@ -1,4 +1,5 @@
 #include "frontmatter_ui.h"
+#include "fs_path.h"
 #include "render.h"
 #include "file_utils.h"
 #include "inline_style.h"
@@ -2513,7 +2514,7 @@ static void asyncImageWorker(HWND hwnd, UINT maxDimension,
 static bool loadSvgBitmap(App& app, const std::wstring& path,
                           App::ImageEntry& entry) {
     if (!app.d2dFactory || !app.wicFactory || !app.renderTarget) return false;
-    std::ifstream file(std::filesystem::path(path), std::ios::binary);
+    std::ifstream file(fsPath(path), std::ios::binary);
     if (!file) return false;
     std::string bytes((std::istreambuf_iterator<char>(file)),
                       std::istreambuf_iterator<char>());
@@ -2686,14 +2687,14 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
         std::wstring wsrc = toWide(src);
         if (!app.currentFile.empty()) {
-            std::filesystem::path basePath(toWide(app.currentFile));
+            std::filesystem::path basePath = fsPath(toWide(app.currentFile));
             std::filesystem::path imgPath = basePath.parent_path() / wsrc;
             widePath = imgPath.wstring();
         } else {
             // An untitled note has no folder of its own: relative images
             // resolve against the launch folder, as they did while the
             // process still worked there (#253)
-            widePath = (std::filesystem::path(launchDirectory()) / wsrc).wstring();
+            widePath = (fsPath(launchDirectory()) / wsrc).wstring();
         }
     }
 

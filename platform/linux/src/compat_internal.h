@@ -52,6 +52,36 @@ struct PixelBuffer {
 cairo_surface_t* surfaceOf(IWICBitmap* bitmap);  // the WIC bitmap's own pixels
 bool readWicSource(IWICBitmapSource* source, PixelBuffer& out);
 
+// The surface a render target currently draws into (window targets: the
+// image the window layer presents)
+cairo_surface_t* targetSurface(ID2D1RenderTarget* target);
+// The surface of the window's current HwndRenderTarget, or null
+cairo_surface_t* windowSurface(HWND hwnd);
+
+// Headless runs (main_linux.cpp): no display; `renderPng` captures the
+// window once its startup work has settled, then quits
+struct HeadlessOptions {
+    std::string renderPng;
+    int width = 0, height = 0;  // client size in pixels; 0 keeps the saved size
+    UINT dpi = 96;
+    int settleMs = 400;     // quiet time (no messages, no paints) before capture
+    int timeoutMs = 20000;  // capture anyway after this long
+    int repaints = 0;       // full repaints to time after settling (frame cost)
+};
+HeadlessOptions& headless();
+
+// CoCreateInstance helpers
+HRESULT createPrintTargetFactory(REFIID riid, void** object);
+HRESULT createWicFactory(REFIID riid, void** object);
+// Image decodes so far (tests: a frame must not decode twice)
+int wicDecodeCount();
+
+// Streams over files and memory (IStream)
+IStream* createFileStream(const std::string& path, bool write, bool create);
+IStream* createMemoryStream(const void* data, size_t size);
+// The memory stream's contents (for GetHGlobalFromStream and WIC)
+bool memoryStreamBytes(IStream* stream, std::vector<unsigned char>& out);
+
 }  // namespace tinta
 
 #endif  // TINTA_LINUX_COMPAT_INTERNAL_H

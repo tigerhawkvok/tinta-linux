@@ -1,4 +1,5 @@
 #include "search.h"
+#include "fs_path.h"
 #include "utils.h"
 #include "render.h"
 
@@ -122,7 +123,7 @@ void startFolderSearchScan(App& app) {
         }
     }
     std::filesystem::path current, folder;
-    if (!app.currentFile.empty()) current = toWide(app.currentFile);
+    if (!app.currentFile.empty()) current = fsPath(toWide(app.currentFile));
     if (app.folderSearchEnabled && !current.empty()) folder = current.parent_path();
     if (tabs.empty() && folder.empty()) return;
     int generation = ++app.folderSearchGeneration;

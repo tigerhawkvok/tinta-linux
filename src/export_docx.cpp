@@ -5,6 +5,7 @@
 // same primitives the viewer draws, and land as embedded pictures.
 
 #include "export.h"
+#include "fs_path.h"
 #include "d2d_init.h"
 #include <set>
 
@@ -27,7 +28,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include <filesystem>
 
 using namespace qmd;
 
@@ -169,7 +169,7 @@ std::string hexOver(D2D1_COLOR_F c, D2D1_COLOR_F background) {
 }
 
 bool readBinaryFile(const std::wstring& path, std::string& out) {
-    std::ifstream in(std::filesystem::path(path), std::ios::binary);
+    std::ifstream in(fsPath(path), std::ios::binary);
     if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -1529,7 +1529,7 @@ bool exportDocxFile(App& app, const std::wstring& path) {
     }
     std::string package = zip.finish();
 
-    std::ofstream out(std::filesystem::path(path), std::ios::binary);
+    std::ofstream out(fsPath(path), std::ios::binary);
     if (!out) return false;
     out.write(package.data(), package.size());
     return out.good();
@@ -1631,7 +1631,7 @@ bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path) {
             std::string png = encodeWicPng(app, bitmap, w, h);
             bitmap->Release();
             if (!png.empty()) {
-                std::ofstream out(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+                std::ofstream out(fsPath(path), std::ios::binary | std::ios::trunc);
                 if (out) {
                     out.write(png.data(), (std::streamsize)png.size());
                     ok = out.good();

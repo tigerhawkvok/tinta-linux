@@ -1,4 +1,5 @@
 #include "inline_style.h"
+#include "fs_path.h"
 #include "link_target.h"
 
 #include <cctype>
@@ -49,13 +50,13 @@ bool isLocalFileRefUrl(const std::string& url) {
 bool resolveFileRef(App& app, const std::string& raw, std::string& absOut) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path path(refToWide(raw));
+    fs::path path = fsPath(refToWide(raw));
     if (path.is_relative()) {
         if (app.currentFile.empty()) {
             absOut = raw;
             return false;  // unsaved buffer: nothing to resolve against
         }
-        path = fs::path(refToWide(app.currentFile)).parent_path() / path;
+        path = fsPath(refToWide(app.currentFile)).parent_path() / path;
     }
     path = path.lexically_normal();
     absOut = refToUtf8(path.wstring());

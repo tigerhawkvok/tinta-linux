@@ -1,4 +1,5 @@
 #include "frontmatter_ui.h"
+#include "fs_path.h"
 #include "editor.h"
 #include "document.h"
 #include "drafts.h"
@@ -1497,7 +1498,7 @@ void enterEditMode(App& app) {
 
     // Load raw file content
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream file(std::filesystem::path(widePath), std::ios::binary);
+    std::ifstream file(fsPath(widePath), std::ios::binary);
     if (!file) return;
 
     std::stringstream buf;
@@ -1585,7 +1586,7 @@ void exitEditMode(App& app) {
     // note has no file — reset the viewer to an empty document instead of
     // leaving the discarded text rendered.
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream file{std::filesystem::path(widePath)};
+    std::ifstream file{fsPath(widePath)};
     if (app.currentFile.empty()) {
         auto result = parseDocument(app.parser, std::string(), app.currentFile);
         if (result.success) {
@@ -1928,7 +1929,7 @@ void saveEditorFile(App& app, HWND hwnd) {
     std::wstring widePath = toWide(app.currentFile);
     bool useCRLF = false;
     {
-        std::ifstream check(std::filesystem::path(widePath), std::ios::binary);
+        std::ifstream check(fsPath(widePath), std::ios::binary);
         if (check) {
             char buf[4096];
             check.read(buf, sizeof(buf));
@@ -1954,7 +1955,7 @@ void saveEditorFile(App& app, HWND hwnd) {
         utf8 = std::move(crlf);
     }
 
-    std::ofstream out(std::filesystem::path(widePath), std::ios::binary);
+    std::ofstream out(fsPath(widePath), std::ios::binary);
     if (out) {
         out.write(utf8.data(), utf8.size());
         out.close();
@@ -2594,7 +2595,7 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 if (paste.empty() && !app.currentFile.empty() &&
                     IsClipboardFormatAvailable(CF_BITMAP)) {
                     namespace fs = std::filesystem;
-                    fs::path doc(toWide(app.currentFile));
+                    fs::path doc = fsPath(toWide(app.currentFile));
                     std::wstring stem = doc.stem().wstring();
                     std::wstring name;
                     fs::path target;
