@@ -101,6 +101,12 @@ struct Layout {
     float height = 0.0f;
 };
 
+// Blanks a leading YAML frontmatter block (--- ... ---: Mermaid's title and
+// config) and every %%{ }%% directive, which may span lines. Newlines stay,
+// so error line numbers still match the source. Both are ignored: the
+// frontmatter title is not drawn yet.
+std::string stripPreamble(std::string_view source);
+
 ParseResult parse(std::string_view source);
 Layout layout(const Diagram& diagram, const std::vector<Size>& nodeSizes,
               float nodeGap, float rankGap);

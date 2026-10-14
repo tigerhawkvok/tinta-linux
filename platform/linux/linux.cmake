@@ -54,6 +54,18 @@ if(BUILD_TESTING)
     target_include_directories(mermaid_tests PRIVATE include)
     add_test(NAME mermaid_parser COMMAND mermaid_tests)
 
+    add_executable(mermaid_fence_tests
+        tests/mermaid_fence_tests.cpp
+        ${TINTA_MERMAID_SOURCES}
+        src/document.cpp src/frontmatter.cpp
+        src/markdown.cpp src/footnotes.cpp
+    )
+    target_include_directories(mermaid_fence_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(mermaid_fence_tests PRIVATE md4c tinta_compat)
+    target_compile_definitions(mermaid_fence_tests PRIVATE
+        TINTA_MERMAID_PREAMBLE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-preamble.md")
+    add_test(NAME mermaid_fences COMMAND mermaid_fence_tests)
+
     add_executable(document_tests
         tests/document_tests.cpp
         src/document.cpp src/frontmatter.cpp
