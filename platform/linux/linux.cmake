@@ -39,6 +39,11 @@ set(TINTA_MERMAID_SOURCES
     src/mermaid_c4.cpp
 )
 
+# Mermaid coverage against external corpora: tests/mermaid_corpus/README.md
+add_executable(mermaid_corpus_probe EXCLUDE_FROM_ALL
+    tests/mermaid_corpus/mermaid_corpus_probe.cpp ${TINTA_MERMAID_SOURCES})
+target_include_directories(mermaid_corpus_probe PRIVATE include)
+
 if(BUILD_TESTING)
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
