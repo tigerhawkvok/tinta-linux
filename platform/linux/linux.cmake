@@ -39,10 +39,23 @@ set(TINTA_MERMAID_SOURCES
     src/mermaid_c4.cpp
 )
 
+# Mermaid through merman instead of the native parsers (PLAN.md §6)
+option(TINTA_MERMAN "Render Mermaid with merman (needs rustup)" ON)
+if(TINTA_MERMAN)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/merman.cmake)
+endif()
+
 # Mermaid coverage against external corpora: tests/mermaid_corpus/README.md
 add_executable(mermaid_corpus_probe EXCLUDE_FROM_ALL
     tests/mermaid_corpus/mermaid_corpus_probe.cpp ${TINTA_MERMAID_SOURCES})
 target_include_directories(mermaid_corpus_probe PRIVATE include)
+if(TINTA_MERMAN)
+    add_executable(merman_corpus_probe EXCLUDE_FROM_ALL
+        tests/mermaid_corpus/mermaid_corpus_probe.cpp src/merman_engine.cpp
+        ${TINTA_MERMAID_SOURCES})
+    target_include_directories(merman_corpus_probe PRIVATE include)
+    target_link_libraries(merman_corpus_probe PRIVATE tinta_merman)
+endif()
 
 if(BUILD_TESTING)
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
@@ -70,6 +83,21 @@ if(BUILD_TESTING)
     target_compile_definitions(mermaid_fence_tests PRIVATE
         TINTA_MERMAID_PREAMBLE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-preamble.md")
     add_test(NAME mermaid_fences COMMAND mermaid_fence_tests)
+
+    if(TINTA_MERMAN)
+        add_executable(merman_engine_tests
+            tests/merman_engine_tests.cpp
+            src/merman_engine.cpp
+            src/document.cpp src/frontmatter.cpp
+            src/markdown.cpp src/footnotes.cpp
+        )
+        target_include_directories(merman_engine_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+        target_link_libraries(merman_engine_tests PRIVATE md4c tinta_compat tinta_merman)
+        target_compile_definitions(merman_engine_tests PRIVATE
+            TINTA_MERMAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-merman.md"
+            TINTA_MERMAID_PREAMBLE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-preamble.md")
+        add_test(NAME merman_engine COMMAND merman_engine_tests)
+    endif()
 
     add_executable(document_tests
         tests/document_tests.cpp

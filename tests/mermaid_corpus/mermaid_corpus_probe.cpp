@@ -5,8 +5,13 @@
 // status: ok | unrecognized | fail | crash | timeout
 // .mmd files are one diagram; .md files contribute every fence whose info
 // string's first word is in the accepted set (default: mermaid).
+// Built twice: mermaid_corpus_probe (native parsers) and, with TINTA_MERMAN,
+// merman_corpus_probe (merman_engine), so compare_runs.py diffs the two.
 #include "mermaid.h"
 #include "mermaid_ext.h"
+#ifdef TINTA_MERMAN
+#include "merman_engine.h"
+#endif
 
 #include <signal.h>
 #include <sys/wait.h>
@@ -101,6 +106,13 @@ static void probeOne(const std::string& src, std::string& kind,
                      std::string& status, std::string& detail) {
     mermaidext::Kind k = mermaidext::detectKind(src);
     kind = kindName(k);
+#ifdef TINTA_MERMAN
+    // kind stays the native family name, for grouping; "none" = native lacks it
+    auto diagram = merman_engine::renderSvg(src, merman_engine::Theme{});
+    status = diagram.ok ? "ok" : "fail";
+    if (!diagram.ok) detail = diagram.error;
+    return;
+#endif
     if (k == mermaidext::Kind::None) {
         status = "unrecognized";
         return;

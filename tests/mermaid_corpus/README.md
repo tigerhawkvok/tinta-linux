@@ -43,6 +43,13 @@ python3 -I tests/mermaid_corpus/compare_runs.py build/out/mermaid-corpus/before 
 
 `compare_runs.py` exits 1 if any diagram that rendered before no longer does.
 
+With `TINTA_MERMAN` on, `merman_corpus_probe` builds from the same source and
+renders through `merman_engine` instead. Its `kind` column is still the native
+family name, for grouping; `none` there means the native renderer lacks the
+family, not merman. Run it into its own output directory, then
+`compare_runs.py <native out> <merman out>` lists what merman gains and every
+diagram it loses.
+
 ## Baseline (2026-10-13, at the commits pinned above)
 
 | Corpus | Diagrams | Rendering | In families Tinta draws |
@@ -67,3 +74,8 @@ The largest remaining gaps in the realistic merman set:
 Families Tinta does not draw at all include zenuml, treeView, ishikawa,
 cynefin, venn, wardley, usecase, eventmodeling, swimlane, agentflow and
 railroad. Most are Mermaid 11/12 betas.
+
+merman, same corpora: 548 / 548 docs examples, 1,892 / 1,908 realistic
+fixtures and 3,759 / 3,796 overall. Twelve diagrams the native renderer draws
+are rejected by merman (6 need the `math` capability; see
+`tests/mermaid-merman-validation.md`).
