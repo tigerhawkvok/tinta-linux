@@ -33,9 +33,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(corrosion)
 
-# Every diagram family; SVG out; Cytoscape layouts (mindmap, architecture).
-# No ELK (EPL-2.0) and no math labels (bundled OFL fonts) yet.
-set(TINTA_MERMAN_FEATURES all-diagrams svg layout-cytoscape CACHE STRING
+# Every diagram family; SVG out; Cytoscape layouts (mindmap, architecture);
+# math labels through RaTeX (MIT code, OFL-1.1 KaTeX fonts: ship the notice).
+# No ELK (EPL-2.0).
+set(TINTA_MERMAN_FEATURES all-diagrams svg layout-cytoscape math CACHE STRING
     "merman-ffi Cargo features")
 
 corrosion_import_crate(
@@ -48,9 +49,9 @@ corrosion_import_crate(
     LOCKED
 )
 
-# Size/speed trade-off measured in PLAN.md §6.1. panic stays unwind: merman
-# turns panics into error results at the FFI boundary.
-set(TINTA_MERMAN_OPT_LEVEL s CACHE STRING "merman-ffi Cargo opt-level")
+# Speed over size (PLAN.md §6.1 has the trade-off). panic stays unwind:
+# merman turns panics into error results at the FFI boundary.
+set(TINTA_MERMAN_OPT_LEVEL 3 CACHE STRING "merman-ffi Cargo opt-level")
 corrosion_set_env_vars(merman_ffi
     CARGO_PROFILE_RELEASE_OPT_LEVEL=${TINTA_MERMAN_OPT_LEVEL}
     CARGO_PROFILE_RELEASE_LTO=fat
@@ -61,3 +62,6 @@ add_library(tinta_merman INTERFACE)
 target_include_directories(tinta_merman INTERFACE ${merman_SOURCE_DIR}/crates/merman-ffi/include)
 target_link_libraries(tinta_merman INTERFACE merman_ffi)
 target_compile_definitions(tinta_merman INTERFACE TINTA_MERMAN=1)
+if("math" IN_LIST TINTA_MERMAN_FEATURES)
+    target_compile_definitions(tinta_merman INTERFACE TINTA_MERMAN_MATH=1)
+endif()

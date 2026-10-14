@@ -55,6 +55,11 @@ if(TINTA_MERMAN)
         ${TINTA_MERMAID_SOURCES})
     target_include_directories(merman_corpus_probe PRIVATE include)
     target_link_libraries(merman_corpus_probe PRIVATE tinta_merman)
+
+    add_executable(merman_svg EXCLUDE_FROM_ALL
+        tests/mermaid_corpus/merman_svg.cpp src/merman_engine.cpp)
+    target_include_directories(merman_svg PRIVATE include)
+    target_link_libraries(merman_svg PRIVATE tinta_merman)
 endif()
 
 if(BUILD_TESTING)

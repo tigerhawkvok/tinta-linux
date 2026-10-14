@@ -92,9 +92,60 @@ void testTheme() {
           "drop shadows are switched off");
 }
 
+size_t count(const std::string& haystack, const std::string& needle) {
+    size_t n = 0;
+    for (size_t at = haystack.find(needle); at != std::string::npos;
+         at = haystack.find(needle, at + needle.size())) {
+        n++;
+    }
+    return n;
+}
+
+// RaTeX math lives in HTML <foreignObject> labels that only browsers draw;
+// the engine lifts each formula into the resvg-safe SVG (PLAN.md §6.2)
+void testMathLabels() {
+    merman_engine::Theme theme;
+    theme.roles = {{"text", "#3a2b1c"}};
+    const char* source =
+        "flowchart LR\n"
+        "  A[\"$$x^2$$\"] -->|\"$$\\sqrt{x+3}$$\"| B(\"$$\\frac{1}{2}$$\")\n"
+        "  B --> C[plain label]\n";
+    auto diagram = merman_engine::renderSvg(source, theme);
+    check(diagram.ok, "math flowchart renders" + (diagram.ok ? "" : ": " + diagram.error));
+    check(diagram.svg.find("<foreignObject") == std::string::npos, "math output has no foreignObject");
+    check(count(diagram.svg, "data-tinta-math=") == 3, "all three formulas are lifted, found " +
+              std::to_string(count(diagram.svg, "data-tinta-math=")));
+    check(count(diagram.svg, "style=\"fill:#3a2b1c;stroke:none;filter:none\"") >= 3,
+          "formula glyphs carry an inline theme-coloured style, so diagram CSS cannot restyle them");
+    check(diagram.svg.find("plain label") != std::string::npos, "plain labels keep their text");
+
+    // Sequence diagrams place labels absolutely, and resvg-safe leaves raw
+    // $$...$$ actor texts behind; mixed text+math messages keep their text
+    const char* sequence =
+        "sequenceDiagram\n"
+        "  participant 1 as $$\\alpha$$\n"
+        "  participant 2 as $$\\beta$$\n"
+        "  1->>2: Solve: $$\\sqrt{2+2}$$\n"
+        "  Note right of 2: $$\\sqrt{2+2}=\\sqrt{4}=2$$\n";
+    auto seq = merman_engine::renderSvg(sequence, theme);
+    check(seq.ok, "math sequence renders" + (seq.ok ? "" : ": " + seq.error));
+    check(count(seq.svg, "data-tinta-math=") == 5,
+          "actors (top and bottom) and the note are lifted, found " +
+              std::to_string(count(seq.svg, "data-tinta-math=")));
+    check(seq.svg.find(">$$") == std::string::npos, "no raw $$ text is left");
+    check(seq.svg.find("Solve:") != std::string::npos, "mixed labels keep their text");
+
+    auto plain = merman_engine::renderSvg("flowchart LR\n  A --> B\n", theme);
+    check(plain.ok && plain.svg.find("data-tinta-math") == std::string::npos,
+          "diagrams without math are rendered once, untouched");
+}
+
 }  // namespace
 
 int main() {
+#ifdef TINTA_MERMAN_MATH
+    testMathLabels();
+#endif
     checkFixture(TINTA_MERMAN_FIXTURE, {true, true, true, true, false});
     checkFixture(TINTA_MERMAID_PREAMBLE_FIXTURE,
                  {true, true, true, true, true, true, true, true, false});

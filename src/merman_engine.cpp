@@ -2,6 +2,8 @@
 
 #include "merman.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -134,10 +136,16 @@ private:
 
 }  // namespace
 
-std::string optionsJson(const Theme& theme) {
-    std::string json = "{\"svg\":{\"pipeline\":\"resvg-safe\"},"
-                       "\"site_config\":{\"themeCSS\":\"* { filter: none !important; }\"},"
-                       "\"presentation\":{\"theme\":{\"appearance\":";
+namespace {
+
+std::string optionsJson(const Theme& theme, const char* pipeline) {
+    std::string json = "{\"svg\":{\"pipeline\":\"";
+    json += pipeline;
+    json += "\"},\"site_config\":{\"themeCSS\":\"* { filter: none !important; }\"},";
+#ifdef TINTA_MERMAN_MATH
+    json += "\"environment\":{\"math_renderer\":\"ratex\"},";
+#endif
+    json += "\"presentation\":{\"theme\":{\"appearance\":";
     json += theme.dark ? "\"dark\"" : "\"light\"";
     if (!theme.fontFamily.empty()) {
         json += ",\"font_family\":";
@@ -170,11 +178,296 @@ std::string optionsJson(const Theme& theme) {
     return json;
 }
 
+// ---- Math labels -----------------------------------------------------------
+// RaTeX draws each formula as an inline <svg> (sized in em) inside an HTML
+// <foreignObject> label, which only a browser renders; the resvg-safe
+// pipeline drops it, leaving the label empty or (sequence actors) showing
+// a raw "$$...$$" text in its place. Each math-only label of the parity
+// render is placed, by its absolute position, over the resvg-safe render,
+// centred in the label box and painted in the theme's text colour. Labels
+// mixing text and math keep the resvg-safe text without the formula.
+
+std::string attribute(std::string_view tag, std::string_view name) {
+    std::string key = " " + std::string(name) + "=\"";
+    size_t at = tag.find(key);
+    if (at == std::string_view::npos) return {};
+    at += key.size();
+    size_t end = tag.find('"', at);
+    return end == std::string_view::npos ? std::string() : std::string(tag.substr(at, end - at));
+}
+
+float number(const std::string& text) {
+    return text.empty() ? 0.0f : std::strtof(text.c_str(), nullptr);
+}
+
+// Sum of translate() functions; false for any other transform, whose
+// formulas are then left out rather than misplaced
+bool translation(const std::string& transform, float& dx, float& dy) {
+    dx = dy = 0.0f;
+    size_t at = 0;
+    while (at < transform.size()) {
+        if (std::isspace(static_cast<unsigned char>(transform[at]))) {
+            at++;
+            continue;
+        }
+        if (transform.compare(at, 10, "translate(") != 0) return false;
+        size_t close = transform.find(')', at);
+        if (close == std::string::npos) return false;
+        std::string args = transform.substr(at + 10, close - at - 10);
+        for (char& c : args) {
+            if (c == ',') c = ' ';
+        }
+        float x = 0.0f, y = 0.0f;
+        int read = std::sscanf(args.c_str(), "%f %f", &x, &y);
+        if (read < 1) return false;
+        dx += x;
+        dy += read == 2 ? y : 0.0f;
+        at = close + 1;
+    }
+    return true;
+}
+
+struct Formula {
+    std::string viewBox, body;
+    float widthEm = 0.0f, heightEm = 0.0f;
+};
+
+// The formulas of a math-only foreignObject label; empty when the label also
+// carries plain text (it keeps the resvg-safe text fallback instead)
+std::vector<Formula> formulas(std::string_view html) {
+    std::vector<Formula> found;
+    std::string rest;  // html with the formulas cut out
+    size_t cursor = 0;
+    for (size_t at = html.find("<svg"); at != std::string_view::npos; at = html.find("<svg", cursor)) {
+        size_t open = html.find('>', at);
+        size_t close = html.find("</svg>", at);
+        if (open == std::string_view::npos || close == std::string_view::npos) return {};
+        std::string_view tag = html.substr(at, open - at);
+        std::string width = attribute(tag, "width");
+        if (width.size() < 3 || width.compare(width.size() - 2, 2, "em") != 0) return {};
+        Formula formula;
+        formula.viewBox = attribute(tag, "viewBox");
+        formula.widthEm = number(width);
+        formula.heightEm = number(attribute(tag, "height"));
+        formula.body = std::string(html.substr(open + 1, close - open - 1));
+        found.push_back(std::move(formula));
+        rest += html.substr(cursor, at - cursor);
+        cursor = close + 6;
+    }
+    rest += html.substr(cursor);
+    bool inTag = false;
+    for (char c : rest) {
+        if (c == '<') inTag = true;
+        else if (c == '>') inTag = false;
+        else if (!inTag && !std::isspace(static_cast<unsigned char>(c))) return {};
+    }
+    return found;
+}
+
+// Inline style on every formula shape: lifted into a node, the diagram's own
+// stylesheet (.node path, .node rect: gradient fills, strokes) would
+// otherwise restyle the glyphs, and CSS outranks presentation attributes
+std::string pinGlyphStyle(const std::string& body, const std::string& colour) {
+    const std::string style = " style=\"fill:" + colour + ";stroke:none;filter:none\"";
+    std::string out;
+    out.reserve(body.size() + 64);
+    for (size_t i = 0; i < body.size(); i++) {
+        out += body[i];
+        if (body[i] != '<') continue;
+        for (const char* shape : {"path", "rect", "polygon", "circle", "ellipse", "line", "polyline"}) {
+            size_t n = std::strlen(shape);
+            if (body.compare(i + 1, n, shape) == 0 && i + 1 + n < body.size() &&
+                (body[i + 1 + n] == ' ' || body[i + 1 + n] == '/' || body[i + 1 + n] == '>')) {
+                out.append(shape, n);
+                out += style;
+                i += n;
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+std::string themeTextColour(const Theme& theme) {
+    for (const auto& role : theme.roles) {
+        if (role.first == "text") return role.second;
+    }
+    return theme.dark ? "#e5e7eb" : "#333333";
+}
+
+struct PlacedLabel {
+    float x, y, width, height;  // root user space
+    bool edgeLabel;
+    std::vector<Formula> parts;
+};
+
+// Every math-only foreignObject of `svg` with its absolute box. Tags are
+// walked with a stack of accumulated translations; the HTML inside each
+// foreignObject is read as a whole, never pushed.
+std::vector<PlacedLabel> placedFormulas(const std::string& svg) {
+    struct Frame {
+        float x, y;
+        bool placeable;
+    };
+    std::vector<Frame> stack;
+    std::vector<PlacedLabel> placed;
+    for (size_t at = svg.find('<'); at != std::string::npos;) {
+        if (svg.compare(at, 4, "<!--") == 0 || svg.compare(at, 9, "<![CDATA[") == 0) {
+            size_t end = svg.find(svg[at + 2] == '-' ? "-->" : "]]>", at);
+            if (end == std::string::npos) break;
+            at = svg.find('<', end);
+            continue;
+        }
+        size_t end = svg.find('>', at);
+        if (end == std::string::npos) break;
+        if (svg[at + 1] == '?' || svg[at + 1] == '!') {
+            at = svg.find('<', end);
+            continue;
+        }
+        if (svg[at + 1] == '/') {
+            if (!stack.empty()) stack.pop_back();
+            at = svg.find('<', end);
+            continue;
+        }
+        std::string_view tag(svg.data() + at, end - at);
+        bool selfClosing = svg[end - 1] == '/';
+        Frame frame = stack.empty() ? Frame{0.0f, 0.0f, true} : stack.back();
+        float dx, dy;
+        if (translation(attribute(tag, "transform"), dx, dy)) {
+            frame.x += dx;
+            frame.y += dy;
+        } else {
+            frame.placeable = false;
+        }
+        if (tag.compare(0, 14, "<foreignObject") == 0 && !selfClosing) {
+            size_t close = svg.find("</foreignObject>", end);
+            if (close == std::string::npos) break;
+            std::string_view html(svg.data() + end + 1, close - end - 1);
+            auto parts = formulas(html);
+            float width = number(attribute(tag, "width"));
+            float height = number(attribute(tag, "height"));
+            if (frame.placeable && !parts.empty() && width > 0.0f && height > 0.0f) {
+                placed.push_back({frame.x + number(attribute(tag, "x")),
+                                  frame.y + number(attribute(tag, "y")), width, height,
+                                  html.find("class=\"edgeLabel\"") != std::string_view::npos,
+                                  std::move(parts)});
+            }
+            at = svg.find('<', close + 16);
+            continue;
+        }
+        if (!selfClosing) stack.push_back(frame);
+        at = svg.find('<', end);
+    }
+    return placed;
+}
+
+// Drops <text> elements whose whole content is $$...$$ formulas: resvg-safe
+// leaves them where the browser would have shown the rendered math
+std::string withoutRawMath(const std::string& svg) {
+    std::string out;
+    size_t cursor = 0;
+    for (size_t at = svg.find("<text"); at != std::string::npos; at = svg.find("<text", cursor)) {
+        size_t close = svg.find("</text>", at);
+        if (close == std::string::npos) break;
+        std::string content;
+        bool inTag = false;
+        for (size_t i = svg.find('>', at) + 1; i < close; i++) {
+            if (svg[i] == '<') inTag = true;
+            else if (svg[i] == '>') inTag = false;
+            else if (!inTag) content += svg[i];
+        }
+        bool rawMath = false;
+        size_t i = 0;
+        while (i < content.size()) {
+            if (std::isspace(static_cast<unsigned char>(content[i]))) {
+                i++;
+            } else if (content.compare(i, 2, "$$") == 0) {
+                size_t end = content.find("$$", i + 2);
+                if (end == std::string::npos) {
+                    rawMath = false;
+                    break;
+                }
+                rawMath = true;
+                i = end + 2;
+            } else {
+                rawMath = false;
+                break;
+            }
+        }
+        out.append(svg, cursor, at - cursor);
+        if (!rawMath) out.append(svg, at, close + 7 - at);
+        cursor = close + 7;
+    }
+    out.append(svg, cursor, std::string::npos);
+    return out;
+}
+
+// The math-only labels of `parity`, drawn over `safe` in a root group
+std::string liftFormulas(const std::string& safe, const std::string& parity,
+                         const std::string& colour) {
+    std::vector<PlacedLabel> labels = placedFormulas(parity);
+    if (labels.empty()) return safe;
+    std::string lifted = "<g data-tinta-math-labels=\"1\">";
+    for (const auto& label : labels) {
+        float widestEm = 0.0f, totalEm = 0.0f;
+        for (const auto& part : label.parts) {
+            widestEm = std::max(widestEm, part.widthEm);
+            totalEm += part.heightEm;
+        }
+        if (widestEm <= 0.0f || totalEm <= 0.0f) continue;
+        // The label's font size: box heights fit the formulas exactly,
+        // widths do not (node labels are a fixed CSS width)
+        float px = label.height / totalEm;
+        float y = label.y + (label.height - totalEm * px) / 2.0f;
+        char buffer[256];
+        // Edge labels sit on their line: the diagram's `.edgeLabel rect`
+        // rule paints a bare rect in the theme's label background
+        if (label.edgeLabel) {
+            std::snprintf(buffer, sizeof buffer,
+                          "<g class=\"edgeLabel\"><rect x=\"%g\" y=\"%g\" width=\"%g\" "
+                          "height=\"%g\"/></g>",
+                          label.x, label.y, label.width, label.height);
+            lifted += buffer;
+        }
+        for (const auto& part : label.parts) {
+            std::snprintf(buffer, sizeof buffer,
+                          "<svg data-tinta-math=\"1\" x=\"%g\" y=\"%g\" width=\"%g\" "
+                          "height=\"%g\" viewBox=\"%s\" overflow=\"visible\">",
+                          label.x + (label.width - part.widthEm * px) / 2.0f, y,
+                          part.widthEm * px, part.heightEm * px, part.viewBox.c_str());
+            lifted += buffer;
+            lifted += pinGlyphStyle(part.body, colour);
+            lifted += "</svg>";
+            y += part.heightEm * px;
+        }
+    }
+    lifted += "</g>";
+    std::string out = withoutRawMath(safe);
+    size_t rootClose = out.rfind("</svg>");
+    if (rootClose == std::string::npos) return safe;
+    out.insert(rootClose, lifted);
+    return out;
+}
+
+}  // namespace
+
+std::string optionsJson(const Theme& theme) { return optionsJson(theme, "resvg-safe"); }
+
 Diagram renderSvg(std::string_view source, const Theme& theme) {
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
     static Engine engine;
-    return engine.svg(source, optionsJson(theme));
+    Diagram diagram = engine.svg(source, optionsJson(theme, "resvg-safe"));
+#ifdef TINTA_MERMAN_MATH
+    // Mermaid math is $$...$$ only
+    if (diagram.ok && source.find("$$") != std::string_view::npos) {
+        Diagram parity = engine.svg(source, optionsJson(theme, "parity"));
+        if (parity.ok) {
+            diagram.svg = liftFormulas(diagram.svg, parity.svg, themeTextColour(theme));
+        }
+    }
+#endif
+    return diagram;
 }
 
 }  // namespace merman_engine

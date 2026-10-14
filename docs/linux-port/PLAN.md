@@ -27,7 +27,7 @@ should stay close to Tinta's.
 | Tinta Mermaid coverage, before | 272 of 548 examples in Mermaid's syntax docs render; 892 of 1,908 realistic merman fixtures. The biggest single cause: a leading `---` frontmatter block made `detectKind` return `None` | `tests/mermaid_corpus/` |
 | Tinta Mermaid coverage, after M1 | 336 / 548 docs examples; 1,228 / 1,908 realistic fixtures; no regressions | same, after `7c4ed53` |
 | merman coverage | 548 / 548 docs examples; 1,892 / 1,908 realistic fixtures | `merman_corpus_probe`, §6.1 |
-| merman cost | +13.9–17.6 MB stripped depending on profile; Rust 1.95 in the build | §6.1 |
+| merman cost | +14–22 MB stripped depending on profile and math (default: ~22 MB); Rust 1.95 in the build | §6.1 |
 | Mermaid upstream churn | 3 commits in 3 months touch `mermaid.cpp`/`mermaid_ext.*` | `git log` |
 | GTK 4.22 startup | `gtk_init` 42 ms. Time to first painted frame: 112 ms with the `cairo` renderer, 130 ms with `ngl`, 300+ ms with the default `vulkan` | spike under Xvfb with software GL, 3–5 runs each; **real-GPU numbers unmeasured** |
 | Pango throughput | `CHANGELOG.md` (43 KB): 750 layouts (Tinta-style element measure + per-line segments), 42.6k clusters, 21 ms warm / 36 ms cold (28 µs per layout) | spike `seg.c`, Pango 1.58 |
@@ -104,7 +104,8 @@ abstraction.
 
 Decided 2026-10-13 after measuring both. merman renders every Mermaid docs
 example; the native parsers render 61% even after fixes. The costs are build
-and size: Rust in the build, and 14–18 MB added to the binary. Design and
+and size: Rust in the build, and ~22 MB added to the binary (ruled
+acceptable). Design and
 numbers: §6.
 
 ## 3. Architecture
@@ -287,7 +288,8 @@ over the 1,908 realistic fixtures:
 |---|---|---|---|---|
 | `release` default (opt 3), with PNG | 23.7 MB | 2.3 ms | 8.0 ms | 68 ms |
 | opt 2, fat LTO | 17.6 MB | 2.4 ms | 8.6 ms | 79 ms |
-| **opt `s`, fat LTO** (chosen default, `TINTA_MERMAN_OPT_LEVEL`) | **15.4 MB** | 3.2 ms | 11.5 ms | 125 ms |
+| opt `s`, fat LTO | 15.4 MB | 3.2 ms | 11.5 ms | 125 ms |
+| **opt 3, fat LTO, with `math`** (current default) | **22.4 MB** (test binary) | n/a | n/a | n/a |
 | opt `z`, fat LTO | 14.1 MB | 5.1 ms | 20.7 ms | 235 ms |
 | opt `z`, fat LTO, with PNG (the Windows set) | 16.7 MB | n/a | n/a | n/a |
 
@@ -305,8 +307,10 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
   checkout (FetchContent at `3a4b8c3`), through Corrosion or a cargo custom
   command.
   - Features: `all-diagrams,svg,layout-cytoscape`, plus `png` on Windows.
-  - No `layout-elk` (EPL-2.0) and no `math` (bundles OFL fonts) for now.
-  - Profile: `opt-level=z`, fat LTO, `panic=unwind`.
+  - `math` is included. `layout-elk` (EPL-2.0) is not.
+  - Profile: `opt-level=3`, fat LTO, `panic=unwind`. Speed over size: size
+    was ruled not a concern on 2026-10-13, since anything under ~100 MB is
+    invisible on disk.
 - **Switch.** A CMake option `TINTA_MERMAN`, ON by default in this fork.
   - OFF builds upstream's native renderer exactly as today. That keeps a build
     with no Rust and keeps upstream merges cheap.
@@ -351,9 +355,14 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
   - DOCX: PNG at 2×.
   - PDF and print: vector on Linux, a high-resolution bitmap on Windows.
   - Copy as image: PNG at 2×.
-- **Math labels.** The `math` feature would recover the 6 math-label
-  diagrams natively. Its size is unmeasured, and it adds OFL-1.1 KaTeX font
-  notices. Until then they take the native fallback.
+- **Math labels.** These are on: the `math` feature uses RaTeX, which is MIT
+  with OFL-1.1 KaTeX fonts.
+  - RaTeX puts formulas inside HTML `foreignObject` labels, which
+    `resvg-safe` drops. So `$$` sources render twice, and `merman_engine`
+    lifts each math-only formula from the `parity` SVG onto the safe one
+    by absolute position, with an inline theme-colour style.
+  - Labels mixing text and math keep only their text.
+  - Details: `tests/mermaid-merman-validation.md`.
 - **Licences.** merman's `rust-render-base` scope is MIT, ISC, BSD-3,
   Apache-2.0 and DOMPurify's Apache-2.0-or-MPL-2.0. Ship a
   `THIRD_PARTY_NOTICES` file.
@@ -397,7 +406,8 @@ What this supersedes:
   Merge upstream (no rebase) into the local branch; the Linux build turns any
   new Win32/D2D call into a compile error, and the shim grows to cover it.
 - All work stays local: commits on local branches, no pushes, no PRs. The
-  branch `linux-port-plan` went to `origin` once, before that was decided.
+  branch `linux-port-plan` went to `origin` once, before that was decided,
+  and was deleted there on 2026-10-13.
 - Shared-code fixes such as the Mermaid work also fix Windows. Offering them
   upstream is an outward-facing step and Philip's call.
 
@@ -424,7 +434,8 @@ What this supersedes:
    Windows Tinta's advertised <100 ms. GTK init alone is 42 ms. Measure on
    real hardware in phase 2 before optimizing.
 7. **merman in the build.** Rust 1.95 via rustup on every build machine;
-   ~70 s cold build; 14–18 MB in the binary against Tinta's ~2.5 MB. Pinned
+   ~70 s cold build; ~22 MB in the binary against Tinta's ~2.5 MB (size
+   ruled not a concern). Pinned
    by commit. `TINTA_MERMAN=OFF` builds without it.
 8. **Pango cost per layout** (28 µs warm). Fine for incremental layout of
    large documents (43 KB in 21 ms); revisit only if a fixture shows layout
@@ -441,5 +452,10 @@ What this supersedes:
    scheduled.
 4. **Local only.** No pushes, no PRs.
 5. **merman replaces the native Mermaid parsers.** Native stays linked as
-   the fallback for the 12 corpus diagrams merman rejects; `TINTA_MERMAN=OFF`
-   keeps an upstream-identical build.
+   the fallback for the corpus diagrams merman rejects (6 once math is on);
+   `TINTA_MERMAN=OFF` keeps an upstream-identical build.
+6. **Math in diagram labels: yes.** RaTeX is built in, with the formula
+   lifting of §6.2.
+7. **Binary size is not a constraint.** Anything under ~100 MB is invisible
+   on disk, so profiles favour speed.
+8. **Phase 1 approved.**
