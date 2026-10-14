@@ -835,7 +835,7 @@ int printDebugPages(App& app, const std::wstring& outDir) {
         IWICBitmapEncoder* encoder = nullptr;
         IWICStream* stream = nullptr;
         IWICBitmapFrameEncode* frame = nullptr;
-        std::wstring path = outDir + L"\\page-" + std::to_wstring(index + 1) + L".png";
+        std::wstring path = joinPath(outDir, L"page-" + std::to_wstring(index + 1) + L".png");
         if (app.wicFactory &&
             SUCCEEDED(app.wicFactory->CreateStream(&stream)) &&
             SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&

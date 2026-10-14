@@ -16,7 +16,7 @@
 static std::wstring draftsDirPath() {
     std::wstring path = tintaConfigDir();
     if (path.empty()) return L"";
-    path += L"\\drafts";
+    path = joinPath(path, L"drafts");
     CreateDirectoryW(path.c_str(), nullptr);
     return path;
 }
@@ -27,10 +27,10 @@ static std::wstring draftFileFor(const App& app, int tabId) {
     std::wstring dir = draftsDirPath();
     if (dir.empty()) return L"";
     wchar_t name[96];
-    swprintf_s(name, _countof(name), L"\\draft-%lu-%llu-%d.md",
+    swprintf_s(name, _countof(name), L"draft-%lu-%llu-%d.md",
                GetCurrentProcessId(),
                (unsigned long long)(uintptr_t)app.hwnd, tabId);
-    return dir + name;
+    return joinPath(dir, name);
 }
 
 // A draft is the buffer prefixed with one comment line naming the file it
@@ -105,14 +105,14 @@ void draftsScanForRecovery(App& app) {
     if (dir.empty()) return;
 
     WIN32_FIND_DATAW find;
-    HANDLE h = FindFirstFileW((dir + L"\\draft-*.md").c_str(), &find);
+    HANDLE h = FindFirstFileW(joinPath(dir, L"draft-*.md").c_str(), &find);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         std::wstring name = find.cFileName;
         DWORD pid = (DWORD)_wtoi(name.c_str() + 6);  // after "draft-"
         if (pid == GetCurrentProcessId()) continue;
         if (pid != 0 && isLiveTintaProcess(pid)) continue;
-        app.recoveredDrafts.push_back(dir + L"\\" + name);
+        app.recoveredDrafts.push_back(joinPath(dir, name));
     } while (FindNextFileW(h, &find));
     FindClose(h);
 

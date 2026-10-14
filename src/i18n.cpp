@@ -1456,7 +1456,7 @@ std::wstring languagesIniPath() {
     // Follows the config home: portable beside the exe, else %APPDATA%
     std::wstring dir = tintaConfigDir();
     if (dir.empty()) return L"";
-    return dir + L"\\languages.ini";
+    return joinPath(dir, L"languages.ini");
 }
 
 // Section-name aliases onto the compiled languages

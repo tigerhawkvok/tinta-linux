@@ -11,10 +11,12 @@
 #include <chrono>
 #include <functional>
 #include <thread>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
 
 namespace tinta {
 namespace {
@@ -476,10 +478,16 @@ public:
         pixels_.pixels.assign(static_cast<size_t>(pixels_.stride) * height, 0);
         return S_OK;
     }
-    HRESULT SetResolution(double, double) override { return S_OK; }
+    HRESULT SetResolution(double dpiX, double dpiY) override {
+        dpiX_ = dpiX;
+        dpiY_ = dpiY;
+        return S_OK;
+    }
+    // 24bpp BGR, 32bpp BGRA and 32bpp PBGRA are written as given; anything
+    // else is answered with 32bpp BGRA, as WIC does for formats it lacks
     HRESULT SetPixelFormat(WICPixelFormatGUID* format) override {
-        // Only 32bpp formats are written; report the one taken
-        if (*format != GUID_WICPixelFormat32bppPBGRA && *format != GUID_WICPixelFormat32bppBGRA) {
+        if (*format != GUID_WICPixelFormat24bppBGR && *format != GUID_WICPixelFormat32bppPBGRA &&
+            *format != GUID_WICPixelFormat32bppBGRA) {
             *format = GUID_WICPixelFormat32bppBGRA;
         }
         format_ = *format;
@@ -488,10 +496,21 @@ public:
     HRESULT WritePixels(UINT lines, UINT stride, UINT, BYTE* data) override {
         if (pixels_.pixels.empty()) return E_UNEXPECTED;
         UINT rows = std::min<UINT>(lines, static_cast<UINT>(pixels_.height - written_));
+        bool bgr = format_ == GUID_WICPixelFormat24bppBGR;
         for (UINT y = 0; y < rows; y++) {
             unsigned char* row = pixels_.pixels.data() + (written_ + y) * pixels_.stride;
-            std::memcpy(row, data + y * stride, std::min<size_t>(stride, pixels_.stride));
-            if (format_ == GUID_WICPixelFormat32bppBGRA) premultiply(row, pixels_.width);
+            const BYTE* in = data + y * stride;
+            if (bgr) {
+                for (int x = 0; x < pixels_.width && static_cast<UINT>(x * 3 + 2) < stride; x++) {
+                    row[x * 4 + 0] = in[x * 3 + 0];
+                    row[x * 4 + 1] = in[x * 3 + 1];
+                    row[x * 4 + 2] = in[x * 3 + 2];
+                    row[x * 4 + 3] = 255;
+                }
+            } else {
+                std::memcpy(row, in, std::min<size_t>(stride, pixels_.stride));
+                if (format_ == GUID_WICPixelFormat32bppBGRA) premultiply(row, pixels_.width);
+            }
         }
         written_ += static_cast<int>(rows);
         return S_OK;
@@ -504,54 +523,62 @@ public:
         for (int y = 0; y < rows; y++) {
             std::memcpy(pixels_.pixels.data() + y * pixels_.stride, in.pixels.data() + y * in.stride, bytes);
         }
+        double dpiX = 96.0, dpiY = 96.0;
+        if (SUCCEEDED(source->GetResolution(&dpiX, &dpiY)) && dpiX_ <= 0) SetResolution(dpiX, dpiY);
         written_ = pixels_.height;
         return S_OK;
     }
+    // gdk-pixbuf writes both containers with their resolution (PNG pHYs,
+    // JFIF density); alpha survives in PNG, JPEG flattens it onto white
     HRESULT Commit() override {
         if (pixels_.pixels.empty()) return E_UNEXPECTED;
-        cairo_surface_t* surface = cairo_image_surface_create_for_data(
-            pixels_.pixels.data(), CAIRO_FORMAT_ARGB32, pixels_.width, pixels_.height, pixels_.stride);
-        bool ok;
+        bool alpha = !jpeg_ && format_ != GUID_WICPixelFormat24bppBGR;
+        GdkPixbuf* pixbuf = toPixbuf(alpha);
+        std::string x = std::to_string(static_cast<int>(std::lround(dpiX_ > 0 ? dpiX_ : 96.0)));
+        std::string y = std::to_string(static_cast<int>(std::lround(dpiY_ > 0 ? dpiY_ : 96.0)));
+        std::vector<char*> keys{const_cast<char*>("x-dpi"), const_cast<char*>("y-dpi")};
+        std::vector<char*> values{x.data(), y.data()};
         if (jpeg_) {
-            GdkPixbuf* pixbuf = gdk_pixbuf_get_from_surface_compat(surface);
-            gchar* buffer = nullptr;
-            gsize size = 0;
-            ok = pixbuf && gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &size, "jpeg", nullptr, "quality", "92", nullptr);
-            ULONG out = 0;
-            ok = ok && SUCCEEDED(output_->Write(buffer, static_cast<ULONG>(size), &out));
-            g_free(buffer);
-            if (pixbuf) g_object_unref(pixbuf);
-        } else {
-            ok = cairo_surface_write_to_png_stream(surface, &FrameEncode::write, output_) == CAIRO_STATUS_SUCCESS;
+            keys.push_back(const_cast<char*>("quality"));
+            values.push_back(const_cast<char*>("92"));
         }
-        cairo_surface_destroy(surface);
+        keys.push_back(nullptr);
+        values.push_back(nullptr);
+        gchar* buffer = nullptr;
+        gsize size = 0;
+        bool ok = gdk_pixbuf_save_to_bufferv(pixbuf, &buffer, &size, jpeg_ ? "jpeg" : "png", keys.data(),
+                                             values.data(), nullptr);
+        ULONG out = 0;
+        ok = ok && SUCCEEDED(output_->Write(buffer, static_cast<ULONG>(size), &out)) && out == size;
+        g_free(buffer);
+        g_object_unref(pixbuf);
         return ok ? S_OK : E_FAIL;
     }
 
 private:
-    static cairo_status_t write(void* closure, const unsigned char* data, unsigned int length) {
-        ULONG written = 0;
-        HRESULT hr = static_cast<IStream*>(closure)->Write(data, length, &written);
-        return SUCCEEDED(hr) && written == length ? CAIRO_STATUS_SUCCESS : CAIRO_STATUS_WRITE_ERROR;
-    }
-
-    // Straight RGB(A) pixbuf from a premultiplied surface
-    static GdkPixbuf* gdk_pixbuf_get_from_surface_compat(cairo_surface_t* surface) {
-        int w = cairo_image_surface_get_width(surface), h = cairo_image_surface_get_height(surface);
-        int stride = cairo_image_surface_get_stride(surface);
-        const unsigned char* data = cairo_image_surface_get_data(surface);
-        GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, w, h);
+    // Straight RGB(A) from the premultiplied buffer
+    GdkPixbuf* toPixbuf(bool alpha) const {
+        int w = pixels_.width, h = pixels_.height, channels = alpha ? 4 : 3;
+        GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, alpha, 8, w, h);
         guchar* out = gdk_pixbuf_get_pixels(pixbuf);
         int outStride = gdk_pixbuf_get_rowstride(pixbuf);
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                const unsigned char* p = data + y * stride + x * 4;
+        for (int yy = 0; yy < h; yy++) {
+            for (int xx = 0; xx < w; xx++) {
+                const unsigned char* p = pixels_.pixels.data() + yy * pixels_.stride + xx * 4;
+                guchar* o = out + yy * outStride + xx * channels;
                 unsigned a = p[3];
-                // Flatten onto white: JPEG has no alpha
-                auto mix = [a](unsigned c) { return static_cast<guchar>(std::min(255u, c + (255 - a))); };
-                out[y * outStride + x * 3 + 0] = mix(p[2]);
-                out[y * outStride + x * 3 + 1] = mix(p[1]);
-                out[y * outStride + x * 3 + 2] = mix(p[0]);
+                if (alpha) {
+                    auto straight = [a](unsigned c) { return a ? static_cast<guchar>(std::min(255u, (c * 255 + a / 2) / a)) : 0; };
+                    o[0] = straight(p[2]);
+                    o[1] = straight(p[1]);
+                    o[2] = straight(p[0]);
+                    o[3] = static_cast<guchar>(a);
+                } else {
+                    auto onWhite = [a](unsigned c) { return static_cast<guchar>(std::min(255u, c + (255 - a))); };
+                    o[0] = onWhite(p[2]);
+                    o[1] = onWhite(p[1]);
+                    o[2] = onWhite(p[0]);
+                }
             }
         }
         return pixbuf;
@@ -561,6 +588,7 @@ private:
     bool jpeg_;
     PixelBuffer pixels_;
     GUID format_ = GUID_WICPixelFormat32bppPBGRA;
+    double dpiX_ = 0.0, dpiY_ = 0.0;
     int written_ = 0;
 };
 

@@ -102,13 +102,12 @@ add_test(NAME i18n COMMAND i18n_tests)
 tinta_upstream_test(config_path_tests tests/config_path_tests.cpp)
 add_test(NAME config_paths COMMAND config_path_tests)
 
-# Known Linux failures, not yet investigated except where noted; shown as
-# "Disabled" rather than hidden. frontmatter: its failed-save case locks the
-# file with share mode 0, and Linux has no mandatory locks.
-set_tests_properties(copy_file_path frontmatter config_paths PROPERTIES DISABLED TRUE)
-# input_tests suites still failing on Linux, being worked through
-set_tests_properties(ui_font_language image_cache_and_decode table_and_modifier_input docked_preview_and_hints
-    PROPERTIES DISABLED TRUE)
+# Still failing on Linux; shown as "Disabled" rather than hidden.
+# table_and_modifier_input: at 650 px a table cell fits "Zcdef" in Segoe UI
+# but not in its wider Noto Sans stand-in, so the text wraps and the drag
+# selection ends early (font metrics, not a compat bug; PLAN.md §9).
+# ui_font_language: symbols, Arabic and Hebrew in interface text (open).
+set_tests_properties(table_and_modifier_input ui_font_language PROPERTIES DISABLED TRUE)
 
 tinta_upstream_test(inline_code_baseline_tests tests/inline_code_baseline_tests.cpp)
 target_compile_definitions(inline_code_baseline_tests PRIVATE

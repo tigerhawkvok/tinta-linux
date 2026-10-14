@@ -24,7 +24,7 @@ static int settingsLanguageIndex(const Settings& settings) {
 std::wstring getSettingsPath() {
     std::wstring dir = tintaConfigDir();
     if (dir.empty()) return L"";
-    return dir + L"\\settings.ini";
+    return joinPath(dir, L"settings.ini");
 }
 
 void saveSettings(const Settings& settings) {

@@ -866,7 +866,7 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
             if (!remote) {
                 std::wstring widePath = toWide(src);
                 if (widePath.size() < 2 || widePath[1] != L':') {
-                    widePath = ctx.baseDir + L"\\" + widePath;
+                    widePath = joinPath(ctx.baseDir, widePath);
                 }
                 size_t dot = src.find_last_of('.');
                 if (dot != std::string::npos) {

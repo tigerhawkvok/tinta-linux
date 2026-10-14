@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "fs_path.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -25,7 +26,7 @@ std::wstring tintaConfigDir() {
         if (slash != std::wstring::npos) {
             dir = dir.substr(0, slash);
             DWORD attrs =
-                GetFileAttributesW((dir + L"\\settings.ini").c_str());
+                GetFileAttributesW(joinPath(dir, L"settings.ini").c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES &&
                 !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
                 cached = dir;
@@ -38,7 +39,7 @@ std::wstring tintaConfigDir() {
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0,
                                    appDataPath))) {
         std::wstring path = appDataPath;
-        path += L"\\Tinta";
+        path = joinPath(path, L"Tinta");
         CreateDirectoryW(path.c_str(), nullptr);  // Create if not exists
         cached = path;
     }

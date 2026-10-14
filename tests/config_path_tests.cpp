@@ -48,12 +48,15 @@ int main() {
         check(fs::equivalent(path, fs::path(resolved), error) && !error,
               "shell path identifies the same file, including spaces and Unicode");
 
+#ifdef _WIN32
         // The helper must not depend on how a caller spells an existing path.
+        // (Extended \\?\ paths exist only on Windows.)
         std::wstring ordinary = path.wstring();
         std::wstring extended = ordinary.rfind(L"\\\\", 0) == 0
             ? L"\\\\?\\UNC\\" + ordinary.substr(2) : L"\\\\?\\" + ordinary;
         check(configFilePathForShell(extended) == resolved,
               "extended DOS input resolves to the ordinary shell path");
+#endif
 
         HANDLE shared = CreateFileW(path.c_str(), GENERIC_READ,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

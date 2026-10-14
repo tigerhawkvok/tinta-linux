@@ -1036,7 +1036,7 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
         std::wstring widePath = toWide(src);
         // Resolve relative to the document folder
         if (widePath.size() < 2 || widePath[1] != L':') {
-            widePath = ctx.baseDir + L"\\" + widePath;
+            widePath = joinPath(ctx.baseDir, widePath);
         }
         std::string data;
         const char* mime = mimeForPath(src);

@@ -122,8 +122,18 @@ void saveTests(App&app,const std::filesystem::path&output){
     restoreEditBuffer(app,toWide(original),false,0,0);saveEditorFile(app,app.hwnd);
     check(read(path).find("updated: old")==std::string::npos,"explicit save maintains dates even for a clean buffer");
     auto blocked=output/"blocked.md";write(blocked,original);app.currentFile=toUtf8(blocked.wstring());restoreEditBuffer(app,toWide(original),true,0,3);
-    auto undoSize=app.undoStack.size();HANDLE lock=CreateFileW(blocked.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,0,nullptr);
+    auto undoSize=app.undoStack.size();
+#ifdef _WIN32
+    HANDLE lock=CreateFileW(blocked.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,0,nullptr);
     check(lock!=INVALID_HANDLE_VALUE,"failure test locks its isolated file");saveEditorFile(app,app.hwnd);if(lock!=INVALID_HANDLE_VALUE)CloseHandle(lock);
+#else
+    // No mandatory locks here: a read-only file makes the write fail instead
+    namespace fsp=std::filesystem;
+    fsp::permissions(blocked,fsp::perms::owner_read|fsp::perms::group_read|fsp::perms::others_read);
+    check(!std::ofstream(blocked,std::ios::app),"failure test makes its isolated file read-only");
+    saveEditorFile(app,app.hwnd);
+    fsp::permissions(blocked,fsp::perms::owner_write,fsp::perm_options::add);
+#endif
     check(app.editorDirty&&toUtf8(app.editorText)==original&&app.undoStack.size()==undoSize&&read(blocked)==original,"failed write leaves source, editor and undo history unchanged");
     app.currentFile=toUtf8(path.wstring());app.frontmatter.shown=false;restoreEditBuffer(app,toWide(original),true,0,0);saveEditorFile(app,app.hwnd);
     check(read(path)==original,"hidden metadata disables automatic date writes");
