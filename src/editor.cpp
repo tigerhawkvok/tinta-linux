@@ -1497,7 +1497,7 @@ void enterEditMode(App& app) {
 
     // Load raw file content
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream file(widePath, std::ios::binary);
+    std::ifstream file(std::filesystem::path(widePath), std::ios::binary);
     if (!file) return;
 
     std::stringstream buf;
@@ -1585,7 +1585,7 @@ void exitEditMode(App& app) {
     // note has no file — reset the viewer to an empty document instead of
     // leaving the discarded text rendered.
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream file(widePath);
+    std::ifstream file{std::filesystem::path(widePath)};
     if (app.currentFile.empty()) {
         auto result = parseDocument(app.parser, std::string(), app.currentFile);
         if (result.success) {
@@ -1928,7 +1928,7 @@ void saveEditorFile(App& app, HWND hwnd) {
     std::wstring widePath = toWide(app.currentFile);
     bool useCRLF = false;
     {
-        std::ifstream check(widePath, std::ios::binary);
+        std::ifstream check(std::filesystem::path(widePath), std::ios::binary);
         if (check) {
             char buf[4096];
             check.read(buf, sizeof(buf));
@@ -1954,7 +1954,7 @@ void saveEditorFile(App& app, HWND hwnd) {
         utf8 = std::move(crlf);
     }
 
-    std::ofstream out(widePath, std::ios::binary);
+    std::ofstream out(std::filesystem::path(widePath), std::ios::binary);
     if (out) {
         out.write(utf8.data(), utf8.size());
         out.close();

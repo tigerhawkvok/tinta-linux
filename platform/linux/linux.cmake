@@ -39,6 +39,17 @@ set(TINTA_MERMAID_SOURCES
     src/mermaid_c4.cpp
 )
 
+# The app minus its Windows entry point, on the compat layer (phase 1)
+set(TINTA_CORE_SOURCES ${SOURCES})
+list(REMOVE_ITEM TINTA_CORE_SOURCES src/main_d2d.cpp)
+add_library(tinta_core STATIC ${TINTA_CORE_SOURCES})
+target_include_directories(tinta_core PUBLIC include src ${md4c_SOURCE_DIR}/src)
+target_link_libraries(tinta_core PUBLIC md4c tinta_compat)
+target_compile_definitions(tinta_core PUBLIC
+    TINTA_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    TINTA_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    TINTA_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+
 # Mermaid through merman instead of the native parsers (PLAN.md §6)
 option(TINTA_MERMAN "Render Mermaid with merman (needs rustup)" ON)
 if(TINTA_MERMAN)

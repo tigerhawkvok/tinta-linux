@@ -245,6 +245,7 @@ const int THEME_COUNT = sizeof(THEMES) / sizeof(THEMES[0]);
 #include <memory>
 #include <sstream>
 #include <vector>
+#include <filesystem>
 
 namespace {
 
@@ -347,7 +348,7 @@ void applyThemeKey(CustomTheme& ct, const std::string& key, const std::string& v
 void writeThemesIni() {
     std::wstring path = themesIniPath();
     if (path.empty()) return;
-    std::ofstream file(path);
+    std::ofstream file{std::filesystem::path(path)};
     if (!file) return;
     file << "; User themes. Colors are RRGGBB hex. Restart not required for\n";
     file << "; themes saved from the editor; hand edits load at next launch.\n";
@@ -405,7 +406,7 @@ void loadCustomThemes() {
     g_customThemes.clear();
     std::wstring path = themesIniPath();
     if (path.empty()) return;
-    std::ifstream file(path);
+    std::ifstream file{std::filesystem::path(path)};
     if (!file) return;
 
     std::unique_ptr<CustomTheme> current;

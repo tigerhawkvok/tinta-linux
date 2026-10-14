@@ -36,6 +36,37 @@ typedef uintptr_t WPARAM;
 typedef intptr_t LPARAM;
 typedef intptr_t LRESULT;
 typedef int32_t HRESULT;
+typedef int INT;
+typedef int8_t INT8;
+typedef int16_t INT16;
+typedef int32_t INT32;
+typedef int64_t INT64;
+typedef uint8_t UINT8;
+typedef uint16_t UINT16;
+typedef uint32_t UINT32;
+typedef uint64_t UINT64;
+typedef float FLOAT;
+typedef intptr_t INT_PTR;
+typedef uintptr_t UINT_PTR;
+typedef intptr_t LONG_PTR;
+typedef uintptr_t ULONG_PTR;
+typedef uintptr_t DWORD_PTR;
+typedef size_t SIZE_T;
+typedef BOOL* LPBOOL;
+typedef DWORD* LPDWORD;
+typedef BYTE* LPBYTE;
+typedef const void* LPCVOID;
+typedef void* HANDLE;
+typedef unsigned short USHORT;
+typedef unsigned char UCHAR;
+typedef DWORD COLORREF;
+typedef WORD ATOM;
+
+#define WINAPI
+#define CALLBACK
+#define APIENTRY
+#define CONST const
+#define VOID void
 
 #ifndef TRUE
 #define TRUE 1
@@ -201,5 +232,8 @@ ULONGLONG GetTickCount64();
 // Windows. The window layer reports transitions through tintaSetKeyState.
 SHORT GetKeyState(int virtualKey);
 void tintaSetKeyState(int virtualKey, bool down);
+
+// Windows, GDI, files, clipboard, dialogs, shell, registry
+#include "tinta_win32.h"
 
 #endif  // TINTA_LINUX_WINDOWS_H

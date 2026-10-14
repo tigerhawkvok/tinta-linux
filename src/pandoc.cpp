@@ -17,6 +17,7 @@
 
 #include <fstream>
 #include <string>
+#include <filesystem>
 
 namespace {
 
@@ -197,12 +198,12 @@ void pandocExportFlow(App& app, HWND hwnd, int fmt) {
         std::string md = app.editMode ? toUtf8Str(app.editorText)
                                       : std::string();
         if (md.empty() && !app.currentFile.empty()) {
-            std::ifstream in(toWideStr(app.currentFile),
+            std::ifstream in(std::filesystem::path(toWideStr(app.currentFile)),
                              std::ios::binary);
             md.assign(std::istreambuf_iterator<char>(in),
                       std::istreambuf_iterator<char>());
         }
-        std::ofstream outFile(tempFile, std::ios::binary);
+        std::ofstream outFile(std::filesystem::path(tempFile), std::ios::binary);
         if (!outFile) return;
         outFile.write(md.data(), (std::streamsize)md.size());
     }

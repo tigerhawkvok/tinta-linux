@@ -5,8 +5,10 @@
 #ifndef TINTA_LINUX_PRELUDE_H
 #define TINTA_LINUX_PRELUDE_H
 
+#include <climits>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 
 #include "msvc_crt.h"
 

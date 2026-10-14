@@ -20,6 +20,8 @@
 inline int _stricmp(const char* a, const char* b) { return strcasecmp(a, b); }
 inline int _strnicmp(const char* a, const char* b, size_t n) { return strncasecmp(a, b, n); }
 inline int _wcsicmp(const wchar_t* a, const wchar_t* b) { return wcscasecmp(a, b); }
+// std::filesystem::path::c_str() is wide on Windows and UTF-8 here
+inline int _wcsicmp(const char* a, const char* b) { return strcasecmp(a, b); }
 inline int _wcsnicmp(const wchar_t* a, const wchar_t* b, size_t n) { return wcsncasecmp(a, b, n); }
 inline int _wtoi(const wchar_t* s) { return static_cast<int>(wcstol(s, nullptr, 10)); }
 

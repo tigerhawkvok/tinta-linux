@@ -2513,7 +2513,7 @@ static void asyncImageWorker(HWND hwnd, UINT maxDimension,
 static bool loadSvgBitmap(App& app, const std::wstring& path,
                           App::ImageEntry& entry) {
     if (!app.d2dFactory || !app.wicFactory || !app.renderTarget) return false;
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::path(path), std::ios::binary);
     if (!file) return false;
     std::string bytes((std::istreambuf_iterator<char>(file)),
                       std::istreambuf_iterator<char>());

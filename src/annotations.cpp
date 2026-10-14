@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <fstream>
+#include <filesystem>
 
 namespace {
 
@@ -177,7 +178,7 @@ void sanitizeForComment(std::string& text) {
 
 void writeSourceAndReload(App& app, HWND hwnd, const std::string& src) {
     if (app.currentFile.empty()) return;
-    std::ofstream out(toWide(app.currentFile), std::ios::binary | std::ios::trunc);
+    std::ofstream out(std::filesystem::path(toWide(app.currentFile)), std::ios::binary | std::ios::trunc);
     if (!out) return;
     out.write(src.data(), (std::streamsize)src.size());
     out.close();

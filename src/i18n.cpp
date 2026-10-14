@@ -586,6 +586,7 @@ int detectSystemLanguage() {
 #include <fstream>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
 
 namespace {
 
@@ -1529,7 +1530,7 @@ void loadLanguageOverrides() {
 
     std::wstring path = languagesIniPath();
     if (path.empty()) return;
-    std::ifstream file(path);
+    std::ifstream file{std::filesystem::path(path)};
     if (!file) return;
 
     int locale = -1;
@@ -1568,7 +1569,7 @@ void openLanguagesIniFile() {
     std::wstring path = languagesIniPath();
     if (path.empty()) return;
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::ofstream f(path, std::ios::binary);
+        std::ofstream f(std::filesystem::path(path), std::ios::binary);
         f << "; Tinta UI translations \xe2\x80\x94 UTF-8, key=value under a language section.\n";
         f << "; Uncomment a line, translate the right-hand side, restart Tinta \xe2\x80\x94\n";
         f << "; the language appears in Settings once it has translations.\n";

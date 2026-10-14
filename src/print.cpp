@@ -21,6 +21,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <filesystem>
 
 // --- Printing (#74) ---
 //
@@ -940,7 +941,7 @@ bool exportPdfFile(App& app, const std::wstring& path) {
 ID2D1Bitmap* renderPeekBitmap(App& app, const std::wstring& path,
                               float widthDips, float& heightDips) {
     if (!app.deviceContext || !app.root) return nullptr;
-    std::ifstream file(path);
+    std::ifstream file{std::filesystem::path(path)};
     if (!file) return nullptr;
     std::stringstream buffer;
     buffer << file.rdbuf();
