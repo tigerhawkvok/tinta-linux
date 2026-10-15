@@ -292,6 +292,17 @@ and its GTK plugin. The `.desktop` file and hicolor icons are in. Still to
 do: AppStream metainfo, the `.mmd` MIME entry, and the Flatpak, AUR and
 `.deb` packages.
 
+**Windows from Linux (2026-10-14).** `platform/windows/build-windows.sh`
+cross-compiles the portable `tinta.exe` with clang-cl and lld-link against
+the MSVC CRT and Windows SDK from xwin. Philip accepted Microsoft's license;
+the script asks for `TINTA_ACCEPT_MSVC_LICENSE=1` before the first download.
+The shared code builds unchanged, with a static CRT and only Windows DLLs
+imported. Under Wine, the window renders and `--exporthtml` works.
+Rendering fidelity, print and PDF still need a real Windows machine. Record:
+`tests/windows-cross-build-validation.md`. With a Windows toolchain on
+Linux, MM5's merman build could also be cross-compiled
+(`x86_64-pc-windows-msvc`), but its DirectWrite checks still need Windows.
+
 **Mermaid track (§6), alongside the phases.** MM1 and MM2 need nothing
 beyond phase 0. MM3 (the viewer hookup) waits for phase 1, and MM5 for a
 Windows machine.
