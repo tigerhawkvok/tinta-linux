@@ -1,5 +1,5 @@
 // Writes merman_engine's SVG for one Mermaid source file, for visual checks.
-// usage: merman_svg <in.mmd> <out.svg> [--dark]
+// usage: merman_svg <in.mmd> <out.svg> [--dark] [--font FAMILY]
 #include "merman_engine.h"
 
 #include <fstream>
@@ -9,16 +9,21 @@
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "usage: merman_svg <in.mmd> <out.svg> [--dark]\n";
+        std::cerr << "usage: merman_svg <in.mmd> <out.svg> [--dark] [--font FAMILY]\n";
         return 2;
     }
     std::ifstream in(argv[1], std::ios::binary);
     std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     merman_engine::Theme theme;
-    if (argc > 3 && std::string(argv[3]) == "--dark") {
-        theme.dark = true;
-        theme.roles = {{"canvas", "#1e1e2e"}, {"surface", "#313244"}, {"text", "#cdd6f4"},
-                       {"border", "#89b4fa"}, {"line", "#a6adc8"}};
+    for (int i = 3; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--dark") {
+            theme.dark = true;
+            theme.roles = {{"canvas", "#1e1e2e"}, {"surface", "#313244"}, {"text", "#cdd6f4"},
+                           {"border", "#89b4fa"}, {"line", "#a6adc8"}};
+        } else if (arg == "--font" && i + 1 < argc) {
+            theme.fontFamily = argv[++i];
+        }
     }
     auto diagram = merman_engine::renderSvg(source, theme);
     if (!diagram.ok) {

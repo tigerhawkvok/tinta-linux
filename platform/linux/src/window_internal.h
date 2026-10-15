@@ -59,6 +59,7 @@ void beginResize(HWND hwnd, int hitCode);
 void minimize(HWND hwnd);
 void toggleMaximize(HWND hwnd);
 POINT cursorPos();
+void setImeCaret(HWND hwnd, POINT caret);  // client pixels
 
 // Wakes a blocked waitForEvents from any thread
 void wake();

@@ -25,6 +25,8 @@ POINT g_pointer{0, 0};  // last pointer position, client pixels
 std::map<UINT32, wchar_t> g_keyChars;  // WM_KEYDOWN sequence -> its WM_CHAR
 std::set<guint> g_keysDown;            // hardware keycodes held (autorepeat bit)
 UINT32 g_keySeq = 0;
+bool g_imFiltering = false;  // inside filter_keypress: commits are the key's
+std::string g_imCommitted;   // what the input method committed meanwhile
 
 struct Native {
     HWND hwnd = nullptr;
@@ -42,6 +44,7 @@ struct Native {
     double lastNcX = -100, lastNcY = -100;
     bool overClient = false;  // last hit test, for WM_NCMOUSELEAVE / WM_MOUSELEAVE
     WPARAM buttons = 0;       // MK_ flags held
+    GtkIMContext* im = nullptr;  // input methods: dead keys, compose, IBus/Fcitx
 };
 
 std::vector<Native*> g_natives;
@@ -347,6 +350,27 @@ guint baseKeyval(GtkEventControllerKey* controller, guint keycode, guint keyval)
     return keyval;
 }
 
+// Text as WM_CHAR, one UTF-16 unit each (a surrogate pair is two, as on
+// Windows)
+void postText(Native* n, const std::string& utf8) {
+    std::wstring text = toWide(utf8);
+    for (wchar_t c : text) postFromUi(n->hwnd, WM_CHAR, static_cast<WPARAM>(c), 1);
+}
+
+void imCommitted(GtkIMContext*, const gchar* text, gpointer data) {
+    if (g_imFiltering) {
+        g_imCommitted += text;  // keyPressed decides
+    } else {
+        postText(static_cast<Native*>(data), text);  // IBus/Fcitx, Wayland text-input
+    }
+}
+
+// Tinta positions the candidate window on WM_IME_STARTCOMPOSITION
+// (ImmSetCompositionWindow, below)
+void imPreeditStarted(GtkIMContext*, gpointer data) {
+    postFromUi(static_cast<Native*>(data)->hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+}
+
 gboolean keyPressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType state,
                     gpointer data) {
     auto* n = static_cast<Native*>(data);
@@ -358,6 +382,27 @@ gboolean keyPressed(GtkEventControllerKey* controller, guint keyval, guint keyco
     // TranslateMessage gives Tinta the character only if it declines the key
     UINT32 seq = ++g_keySeq;
     bool ctrl = (state & GDK_CONTROL_MASK) != 0, alt = (state & GDK_ALT_MASK) != 0;
+    // The input method sees plain keys first (shortcuts never). Committing
+    // just the key's own character changes nothing; composed text (a dead
+    // key's accent, a CJK phrase) arrives as WM_CHAR; a key it keeps for a
+    // composition sends nothing, as an IME does on Windows
+    if (n->im && !ctrl && !alt) {
+        GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+        g_imFiltering = true;
+        g_imCommitted.clear();
+        bool consumed = event && gtk_im_context_filter_keypress(n->im, event);
+        g_imFiltering = false;
+        if (consumed) {
+            gunichar own = gdk_keyval_to_unicode(keyval);
+            char ownUtf8[8] = {};
+            if (own) g_unichar_to_utf8(own, ownUtf8);
+            if (g_imCommitted.empty()) return TRUE;  // composing
+            if (g_imCommitted != ownUtf8) {
+                postText(n, g_imCommitted);
+                return TRUE;
+            }
+        }
+    }
     gunichar ch = gdk_keyval_to_unicode(keyval);
     if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) ch = '\r';
     else if (keyval == GDK_KEY_BackSpace) ch = 8;
@@ -379,6 +424,11 @@ void keyReleased(GtkEventControllerKey* controller, guint keyval, guint keycode,
     auto* n = static_cast<Native*>(data);
     g_keysDown.erase(keycode);
     if (g_modal) return;
+    if (n->im) {
+        if (GdkEvent* event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller))) {
+            gtk_im_context_filter_keypress(n->im, event);
+        }
+    }
     UINT vk = virtualKey(baseKeyval(controller, keycode, keyval));
     syncModifiers(state);
     if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) tintaSetKeyState(static_cast<int>(vk), false);
@@ -396,6 +446,10 @@ void activeChanged(GObject* window, GParamSpec*, gpointer data) {
     auto* n = static_cast<Native*>(data);
     bool active = gtk_window_is_active(GTK_WINDOW(window));
     postFromUi(n->hwnd, active ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
+    if (n->im) {
+        if (active) gtk_im_context_focus_in(n->im);
+        else gtk_im_context_focus_out(n->im);
+    }
     if (!active) {
         n->buttons = 0;
         g_keysDown.clear();
@@ -632,6 +686,10 @@ void createWindow(HWND hwnd) {
 
     g_signal_connect(n->window, "close-request", G_CALLBACK(closeRequested), n);
     g_signal_connect(n->window, "notify::is-active", G_CALLBACK(activeChanged), n);
+    n->im = gtk_im_multicontext_new();
+    gtk_im_context_set_client_widget(n->im, n->area);
+    g_signal_connect(n->im, "commit", G_CALLBACK(imCommitted), n);
+    g_signal_connect(n->im, "preedit-start", G_CALLBACK(imPreeditStarted), n);
     g_natives.push_back(n);
 }
 
@@ -655,6 +713,10 @@ void destroyWindow(HWND hwnd) {
     if (!n) return;
     hwnd->native = nullptr;
     g_natives.erase(std::remove(g_natives.begin(), g_natives.end(), n), g_natives.end());
+    if (n->im) {
+        gtk_im_context_set_client_widget(n->im, nullptr);
+        g_object_unref(n->im);
+    }
     gtk_window_destroy(n->window);
     g_object_unref(n->window);
     delete n;
@@ -751,6 +813,16 @@ void toggleMaximize(HWND hwnd) {
 }
 
 POINT cursorPos() { return g_pointer; }
+
+// ImmSetCompositionWindow: the caret (client pixels) the input method's
+// candidate window follows
+void setImeCaret(HWND hwnd, POINT caret) {
+    Native* n = nativeOf(hwnd);
+    if (!n || !n->im) return;
+    GdkRectangle area{static_cast<int>(caret.x / n->scale), static_cast<int>(caret.y / n->scale), 1,
+                      static_cast<int>(20 / n->scale) + 1};
+    gtk_im_context_set_cursor_location(n->im, &area);
+}
 
 void wake() { g_main_context_wakeup(nullptr); }
 

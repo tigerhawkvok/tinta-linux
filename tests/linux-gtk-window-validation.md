@@ -218,8 +218,20 @@ was away and unlocked the session for them.
 
 - **Real-GPU time to first frame on Plasma.** The desktop check's map time
   includes KWin queries.
-- **IME and compose/dead keys.** Keys map to text with
-  `gdk_keyval_to_unicode`; there is no `GtkIMContext` yet (phase 3).
+- **IME beyond dead keys.** Each window has a `GtkIMMulticontext`.
+  - Plain keys pass through it first. A commit of the key's own character
+    changes nothing (`WM_KEYDOWN`, then `WM_CHAR` via `TranslateMessage`).
+  - Composed text becomes `WM_CHAR`, and a key kept for a composition sends
+    nothing.
+  - Commits outside key handling (IBus/Fcitx, Wayland text-input) become
+    `WM_CHAR`.
+  - `preedit-start` posts `WM_IME_STARTCOMPOSITION`, and Tinta's
+    `ImmSetCompositionWindow` caret moves GTK's candidate window.
+
+  `gui_check`'s `dead-keys` check (US-international on its Xvfb) types
+  dead_acute + e into the find field and reads back `é`. Without the input
+  method step it reads `e`. Not driven here: an IBus or Fcitx session for
+  CJK, and inline preedit drawing (Tinta shows the text once committed).
 - **Clipboard:** only text crosses to the desktop, not HTML, PNG or TSV.
   OLE clipboard snapshots stay in-process.
 - **Not wired yet:** the tab-drag ghost and tear-off windows (phase 4), and

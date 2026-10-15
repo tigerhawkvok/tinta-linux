@@ -1050,10 +1050,17 @@ UINT DragQueryFileW(HDROP drop, UINT index, LPWSTR file, UINT size) {
 void DragFinish(HDROP drop) { delete drop; }
 void DragAcceptFiles(HWND, BOOL) {}
 
-// ---- IME --------------------------------------------------------------------------------------
-HIMC ImmGetContext(HWND) { return reinterpret_cast<HIMC>(1); }
+// ---- IME: the window's GtkIMContext (gtk_window.cpp); composed text arrives as WM_CHAR --------
+HIMC ImmGetContext(HWND hwnd) { return reinterpret_cast<HIMC>(hwnd); }
 BOOL ImmReleaseContext(HWND, HIMC) { return TRUE; }
-BOOL ImmSetCompositionWindow(HIMC, COMPOSITIONFORM*) { return TRUE; }
+
+// The caret the candidate window follows (Tinta sets it on WM_IME_STARTCOMPOSITION)
+BOOL ImmSetCompositionWindow(HIMC imc, COMPOSITIONFORM* form) {
+    if (!imc || !form) return FALSE;
+    tinta::gtk::setImeCaret(reinterpret_cast<HWND>(imc), form->ptCurrentPos);
+    return TRUE;
+}
+
 BOOL ImmSetCandidateWindow(HIMC, CANDIDATEFORM*) { return TRUE; }
 LONG ImmGetCompositionStringW(HIMC, DWORD, void*, DWORD) { return 0; }
 

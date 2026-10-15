@@ -243,6 +243,32 @@ def settle(x, geometry, path, quiet_ms=400, timeout=8.0):
     return last
 
 
+def dead_key_check(x):
+    """(ok, detail) for composing é from dead_acute + e in the find field."""
+    if not shutil.which("setxkbmap"):
+        return False, "setxkbmap not found"
+    subprocess.run(["setxkbmap", "-layout", "us", "-variant", "intl"], check=False)
+    time.sleep(0.5)
+    try:
+        x.key("Control_L", "f")
+        time.sleep(0.3)
+        x.key("Control_L", "a")  # replace any earlier query
+        time.sleep(0.1)
+        x.key("dead_acute")
+        x.key("e")
+        time.sleep(0.3)
+        x.key("Control_L", "a")
+        x.key("Control_L", "c")
+        time.sleep(0.4)
+        text = x.clipboard_text() or ""
+        x.key("Escape")
+        time.sleep(0.3)
+    finally:
+        subprocess.run(["setxkbmap", "-layout", "us"], check=False)
+        time.sleep(0.3)
+    return text == "é", f"the find field holds {text!r}"
+
+
 DROP_DOC = os.path.join(HERE, "..", "fixtures", "markdown-regression-control.md")
 
 
@@ -403,6 +429,10 @@ def run(args):
     time.sleep(0.3)
     part = x.clipboard_text() or ""
     report("select", 0 < len(part) < whole, f"drag copied {len(part)} of {whole} chars")
+
+    # An input method composes: with a dead-key layout (US international,
+    # this server only), dead_acute then e types é into the find field
+    report("dead-keys", *dead_key_check(x))
 
     # Drag and drop from another application (drag_source.c stands in for a
     # file manager): Tinta opens the file in a tab, and the title names it
