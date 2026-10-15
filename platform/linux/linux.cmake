@@ -241,6 +241,16 @@ if(BUILD_TESTING)
             -DDOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-merman.md
             -DHOME_DIR=${CMAKE_BINARY_DIR}/linux-render/.merman-exports
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/merman_export_check.cmake)
+
+        # merman's raster (the Windows path) loads the fonts Tinta names
+        if(TINTA_MERMAN_PNG)
+            add_executable(merman_raster_fonts_tests tests/merman_raster_fonts_tests.cpp src/merman_engine.cpp)
+            target_include_directories(merman_raster_fonts_tests PRIVATE include)
+            target_link_libraries(merman_raster_fonts_tests PRIVATE tinta_compat tinta_merman)
+            target_compile_definitions(merman_raster_fonts_tests PRIVATE
+                TINTA_FONTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts")
+            add_test(NAME merman_raster_fonts COMMAND merman_raster_fonts_tests)
+        endif()
     endif()
 
     add_executable(document_tests

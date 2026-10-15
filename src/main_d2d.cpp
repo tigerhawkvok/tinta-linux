@@ -1081,10 +1081,15 @@ render_document:
             app.metrics.fileLoadUs / 1000.0);
         const DiagramMetrics& dm = app.diagramMetrics;
         if (dm.layouts > 0) {
+            wchar_t fonts[64] = L"";
+            if (dm.fontFiles > 0) {
+                swprintf_s(fonts, _countof(fonts), L" | %zu fonts %.1f ms", dm.fontFiles,
+                           dm.fontListUs / 1000.0);
+            }
             swprintf_s(statsLine3, _countof(statsLine3),
-                L"\nmerman \u00D7%zu: SVG %.1f ms | raster \u00D7%zu %.1f ms (1st %.1f) | decode %.1f ms",
+                L"\nmerman \u00D7%zu: SVG %.1f ms | raster \u00D7%zu %.1f ms (1st %.1f) | decode %.1f ms%ls",
                 dm.layouts, dm.layoutUs / 1000.0, dm.rasters, dm.rasterUs / 1000.0,
-                dm.firstRasterUs / 1000.0, dm.decodeUs / 1000.0);
+                dm.firstRasterUs / 1000.0, dm.decodeUs / 1000.0, fonts);
         }
         swprintf_s(stats, _countof(stats), L"Tinta v%d.%d.%d  |  %ls\n%ls%ls",
                    TINTA_VERSION_MAJOR, TINTA_VERSION_MINOR,

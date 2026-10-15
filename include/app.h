@@ -90,6 +90,8 @@ struct DiagramMetrics {
     int64_t rasterUs = 0;
     int64_t firstRasterUs = 0;  // includes merman's one-time system font scan
     int64_t decodeUs = 0;       // merman's PNG into a bitmap (Windows)
+    size_t fontFiles = 0;       // font files named to merman's raster (Windows)
+    int64_t fontListUs = 0;     // finding them
 };
 
 // Syntax highlighting token types

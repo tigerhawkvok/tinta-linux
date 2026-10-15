@@ -120,3 +120,62 @@ a third, language-neutral line once a diagram has been drawn:
   Windows diagram path natively; Rust from scratch took 204 s.
 
 ctest: 49/49 in `build/`. `merman_layout` also passes in `build-png/`.
+
+## The 2.9 s: merman scanned every system font (4.0.1 measurements)
+
+Philip read the new stats line from v4.0.1 on his work laptop, for the
+same README:
+
+| | first render | after one zoom step |
+|---|---|---|
+| SVG layout | 22.7 ms | |
+| merman PNG | 3,053.9 ms | 3,219.7 - 3,053.9 = 165.8 ms |
+| decode | 29.0 ms | 32.4 ms |
+
+A render costs 166 ms there, against 123 ms on Linux. The remaining
+2.89 s was paid once per process: merman's raster builds its font
+database by opening every file in `C:\Windows\Fonts`
+(`fontdb::load_system_fonts`). The same scan takes about 16 ms on Linux.
+Per-file opens on a managed laptop are the likely cost; that part is
+unmeasured.
+
+Fix:
+- `cmake/patches/merman-raster-font-files.patch`, applied by
+  `cmake/apply_patch.cmake` when merman is fetched. When
+  `MERMAN_RASTER_FONT_FILES` is set (paths joined like PATH), merman loads
+  only those files. If none of them loads, it scans as before.
+- On Windows, before the first PNG, Tinta resolves a family list to files
+  through DirectWrite's system font set (`prepareMermanRasterFonts`). The
+  font cache answers the names, so no file is opened to find them. The
+  list:
+  - every theme's face and the rest of the diagram stack;
+  - fontdb's generic families (Arial, Times New Roman, Courier New);
+  - Windows' per-script fallback faces (Segoe UI and its symbol, emoji
+    and historic faces, the CJK UI faces, Nirmala UI, Leelawadee UI and
+    the rest).
+- Linux leaves the variable unset; its scan is fast.
+- The stats line adds `N fonts X ms` for the list.
+- `TINTA_TRACE_FONTS=<file>` writes the list to a file. Windows GUI
+  processes have no stderr.
+
+Checked:
+- `merman_raster_fonts`, registered only when `TINTA_MERMAN_PNG`. Each
+  case renders in a forked child, because the font database is built once
+  per process:
+  - Selawik only renders;
+  - adding an unused Argon leaves the PNG byte-identical;
+  - Argon only draws differently;
+  - an unloadable list matches the unset variable (the system scan).
+- With the patch reversed, "Argon only draws differently" fails: merman
+  ignores the list and scans.
+- Wine, with `--stats` and the trace: 13 files named. They are Wine's
+  stand-ins for Courier New, Times New Roman, Arial and Microsoft YaHei,
+  plus Cambria and the host's Noto Sans and DejaVu Sans in all styles.
+  Labels draw.
+  - Selawik, copied into the prefix's Fonts folder without registration,
+    is not an installed font, and DirectWrite rightly leaves it out.
+  - Wine's timings (240 ms for the list, 450 ms first raster) are not
+    representative: Wine builds the font set itself, while Windows serves
+    it from the font cache service.
+- Not yet measured on real Windows. The stats line will show the list
+  time, the file count and the first raster.

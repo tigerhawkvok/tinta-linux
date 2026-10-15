@@ -30,6 +30,11 @@
 #include <thread>
 #include <d2d1_3.h>
 #include <shlwapi.h>
+#if defined(_WIN32) && defined(TINTA_MERMAN_PNG)
+#include <dwrite_3.h>
+#include <cwctype>
+#include <unordered_set>
+#endif
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "shlwapi.lib")
 
@@ -2865,6 +2870,133 @@ merman_engine::Theme mermanTheme(App& app) {
     return theme;
 }
 
+#ifdef TINTA_MERMAN_PNG
+#ifdef _WIN32
+// The file behind font `index` of a font set, or empty (a font that is not
+// a local file, such as one Windows downloads on demand)
+std::wstring localFontPath(IDWriteFontSet* fonts, UINT32 index) {
+    std::wstring path;
+    IDWriteFontFaceReference* reference = nullptr;
+    IDWriteFontFile* file = nullptr;
+    IDWriteFontFileLoader* loader = nullptr;
+    IDWriteLocalFontFileLoader* local = nullptr;
+    const void* key = nullptr;
+    UINT32 keySize = 0;
+    UINT32 length = 0;
+    if (SUCCEEDED(fonts->GetFontFaceReference(index, &reference)) &&
+        SUCCEEDED(reference->GetFontFile(&file)) &&
+        SUCCEEDED(file->GetReferenceKey(&key, &keySize)) &&
+        SUCCEEDED(file->GetLoader(&loader)) &&
+        SUCCEEDED(loader->QueryInterface(__uuidof(IDWriteLocalFontFileLoader),
+                                         reinterpret_cast<void**>(&local))) &&
+        SUCCEEDED(local->GetFilePathLengthFromKey(key, keySize, &length))) {
+        path.resize(length + 1);
+        if (SUCCEEDED(local->GetFilePathFromKey(key, keySize, &path[0], length + 1))) {
+            path.resize(length);
+        } else {
+            path.clear();
+        }
+    }
+    if (local) local->Release();
+    if (loader) loader->Release();
+    if (file) file->Release();
+    if (reference) reference->Release();
+    return path;
+}
+#endif
+
+// Name the font files merman's raster loads, before its first PNG. Left to
+// itself merman opens every system font once per process: 2.9 s on a
+// managed Windows laptop. The list covers every theme's face and the rest
+// of the diagram stack (mermanTheme), fontdb's generic families, and the
+// faces Windows itself falls back to per script. DirectWrite's font set
+// answers the names from the font cache, without opening the files.
+void prepareMermanRasterFonts(App& app) {
+#ifdef _WIN32
+    static bool prepared = false;
+    if (prepared) return;
+    prepared = true;
+    auto t0 = Clock::now();
+    IDWriteFactory3* factory = nullptr;
+    IDWriteFontSet* fonts = nullptr;
+    if (!app.dwriteFactory ||
+        FAILED(app.dwriteFactory->QueryInterface(__uuidof(IDWriteFactory3),
+                                                 reinterpret_cast<void**>(&factory))) ||
+        FAILED(factory->GetSystemFontSet(&fonts))) {
+        if (factory) factory->Release();
+        return;  // no font sets (before Windows 10): merman scans
+    }
+    std::unordered_set<std::wstring> wanted;
+    auto want = [&](std::wstring name) {
+        for (auto& c : name) c = (wchar_t)std::towlower(c);
+        if (!name.empty()) wanted.insert(name);
+    };
+    for (int i = 0; i < themeCount(); i++) {
+        if (themeAt(i).fontFamily) want(themeAt(i).fontFamily);
+    }
+    for (const wchar_t* name : {
+             L"Selawik", L"Noto Sans", L"DejaVu Sans",          // the diagram stack
+             L"Arial", L"Times New Roman", L"Courier New",      // fontdb's generics
+             L"Segoe UI", L"Segoe UI Symbol", L"Segoe UI Emoji", L"Segoe UI Historic",
+             L"Microsoft YaHei", L"Microsoft JhengHei", L"Yu Gothic", L"Malgun Gothic",
+             L"Nirmala UI", L"Leelawadee UI", L"Ebrima", L"Gadugi", L"Javanese Text",
+             L"Myanmar Text", L"Mongolian Baiti", L"Microsoft Himalaya",
+             L"Microsoft New Tai Lue", L"Microsoft Tai Le", L"Microsoft Yi Baiti",
+             L"Sylfaen", L"Cambria Math"}) {
+        want(name);
+    }
+    const DWRITE_FONT_PROPERTY_ID kNames[] = {
+        DWRITE_FONT_PROPERTY_ID_WIN32_FAMILY_NAME,
+        DWRITE_FONT_PROPERTY_ID_TYPOGRAPHIC_FAMILY_NAME,
+        DWRITE_FONT_PROPERTY_ID_WEIGHT_STRETCH_STYLE_FAMILY_NAME,
+    };
+    std::unordered_set<std::wstring> seen;
+    std::wstring list;
+    UINT32 count = fonts->GetFontCount();
+    for (UINT32 i = 0; i < count; i++) {
+        bool match = false;
+        for (DWRITE_FONT_PROPERTY_ID id : kNames) {
+            IDWriteLocalizedStrings* names = nullptr;
+            BOOL exists = FALSE;
+            if (FAILED(fonts->GetPropertyValues(i, id, &exists, &names)) || !names) continue;
+            for (UINT32 n = 0; n < names->GetCount() && !match; n++) {
+                UINT32 length = 0;
+                if (FAILED(names->GetStringLength(n, &length))) continue;
+                std::wstring name(length + 1, L'\0');
+                if (FAILED(names->GetString(n, &name[0], length + 1))) continue;
+                name.resize(length);
+                for (auto& c : name) c = (wchar_t)std::towlower(c);
+                match = wanted.count(name) > 0;
+            }
+            names->Release();
+            if (match) break;
+        }
+        if (!match) continue;
+        std::wstring path = localFontPath(fonts, i);
+        if (path.empty() || !seen.insert(path).second) continue;
+        if (!list.empty()) list += L';';
+        list += path;
+    }
+    fonts->Release();
+    factory->Release();
+    if (!list.empty()) SetEnvironmentVariableW(L"MERMAN_RASTER_FONT_FILES", list.c_str());
+    // TINTA_TRACE_FONTS=<file> writes the list there, one path per line
+    if (const wchar_t* tracePath = _wgetenv(L"TINTA_TRACE_FONTS")) {
+        if (FILE* out = _wfopen(tracePath, L"w, ccs=UTF-8")) {
+            std::wstring lines = list;
+            std::replace(lines.begin(), lines.end(), L';', L'\n');
+            std::fwprintf(out, L"%ls\n", lines.c_str());
+            std::fclose(out);
+        }
+    }
+    app.diagramMetrics.fontFiles = seen.size();
+    app.diagramMetrics.fontListUs = usElapsed(t0);
+#else
+    (void)app;  // merman reads fontconfig's fonts, quickly
+#endif
+}
+#endif
+
 // Rendered SVG per source and theme: layout reruns on every resize and
 // scroll-driven relayout, merman only when the diagram or theme changes
 struct MermanRender {
@@ -2976,6 +3108,9 @@ static bool layoutMermanDiagram(App& app, const std::string& source,
         App::ImageEntry entry;
         entry.failed = true;
         DiagramMetrics& metrics = app.diagramMetrics;
+#ifdef TINTA_MERMAN_PNG
+        prepareMermanRasterFonts(app);  // timed on its own
+#endif
         auto t0 = Clock::now();
 #ifdef TINTA_MERMAN_PNG
         bool rendered = false;
@@ -3693,6 +3828,7 @@ bool mermanDiagramPng(App& app, const std::string& source, float scale,
     std::string svg;
     if (!mermanDiagramSvg(app, source, false, svg, width, height)) return false;
     std::string error;
+    prepareMermanRasterFonts(app);
     png = merman_engine::renderPng(source, mermanTheme(app), scale,
                                    cssColor(background), error);
     return !png.empty();
