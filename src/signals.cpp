@@ -173,7 +173,7 @@ bool runSignalAction(App& app, HWND hwnd, int action) {
     switch (action) {
         case SIGA_OPEN_RELEASE:
             ShellExecuteW(nullptr, L"open",
-                          L"https://github.com/oipoistar/tinta/releases/latest",
+                          L"https://github.com/tigerhawkvok/tinta-linux/releases/latest",
                           nullptr, nullptr, SW_SHOWNORMAL);
             app.updateDismissed = true;
             return true;

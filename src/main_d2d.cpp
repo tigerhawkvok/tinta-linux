@@ -1210,7 +1210,7 @@ static void updateCheckWorker(HWND hwnd) {
                                            INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (connect) {
             HINTERNET request = WinHttpOpenRequest(
-                connect, L"GET", L"/repos/oipoistar/tinta/releases/latest",
+                connect, L"GET", L"/repos/tigerhawkvok/tinta-linux/releases/latest",
                 nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                 WINHTTP_FLAG_SECURE);
             if (request) {
