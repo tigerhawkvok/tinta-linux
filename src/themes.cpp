@@ -219,6 +219,32 @@ const D2DTheme THEMES[] = {
         hexColor(0x2EE6CF),    // syntaxFunction - cyan
         hexColor(0xF5E663),    // syntaxType - softened yellow
         hexColor(0xC77DFF)     // syntaxControlFlow - violet (no longer keyword)
+    },
+
+    // 11. Wombat - Philip's charcoal Wombat palette on Abyss's syntax colors.
+    // Headings use Noto Sans Display, the display cut of the body face (his
+    // Windows setup had Segoe UI); MonoLisa falls back to Monaspace Argon
+    {
+        L"Wombat", L"Noto Sans", L"Noto Sans Display", L"MonoLisa", true,
+        hexColor(0x242424),    // background - charcoal
+        hexColor(0xF6F3E8),    // text - warm off-white
+        hexColor(0x4BC98A),    // heading - green
+        hexColor(0x8AC6F2),    // link - sky blue
+        hexColor(0xB8F53C),    // code - lime
+        hexColor(0x0F0F0F),    // codeBackground - near black
+        hexColor(0x333333),    // blockquoteBorder
+        hexColor(0xCC99CC),    // accent - mauve
+        hexColor(0xFF4DD8),    // syntaxKeyword - magenta
+        hexColor(0xB8F53C),    // syntaxString - lime
+        hexColor(0x5C6660),    // syntaxComment - green-tinted gray
+        hexColor(0xFF8A3D),    // syntaxNumber - orange
+        hexColor(0x2EE6CF),    // syntaxFunction - cyan
+        hexColor(0xF5E663),    // syntaxType - yellow
+        hexColor(0xC77DFF),    // syntaxControlFlow - violet
+        hexColor(0xCAE682),    // inlineCode - Wombat's string green
+        {},                    // headingColors - all use heading
+        hexColor(0xFFC125),    // highlightBackground - goldenrod
+        hexColor(0x424242)     // highlightText - dark gray
     }
 };
 

@@ -24,7 +24,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 # Built-in themes in THEMES order (src/themes.cpp)
-THEMES = ["Paper", "Sakura", "Arctic", "Meadow", "Dusk", "Midnight", "Dracula", "Forest", "Ember", "Abyss"]
+THEMES = ["Paper", "Sakura", "Arctic", "Meadow", "Dusk", "Midnight", "Dracula", "Forest", "Ember", "Abyss", "Wombat"]
 
 
 def custom_theme_names(themes_ini):
@@ -44,10 +44,11 @@ def settings_ini(theme, themes_ini=""):
     return "\n".join(lines) + "\n"
 
 
-def export_pdf(tinta, doc, out_pdf, theme, themes_ini=""):
+def export_pdf(tinta, doc, out_pdf, theme, themes_ini="", env_extra=None):
     """Tinta's own --exportpdf path; returns (exit code, wall ms, stderr)."""
     home = os.path.join(os.path.dirname(out_pdf), ".home", os.path.basename(out_pdf))
     env = isolated_env(home, theme, themes_ini)
+    env.update(env_extra or {})
     start = time.monotonic()
     proc = subprocess.run([tinta, doc, "--exportpdf", out_pdf], env=env, cwd=home, capture_output=True, text=True,
                           timeout=120)
@@ -63,6 +64,13 @@ def isolated_env(home, theme, themes_ini):
     if themes_ini:
         shutil.copyfile(themes_ini, os.path.join(config, "themes.ini"))
     env = dict(os.environ)
+    # The user's own fonts stay visible: fontconfig finds them under
+    # $XDG_DATA_HOME/fonts, and isolating settings must not swap typefaces
+    # (a theme's MonoLisa silently became the fallback face)
+    user_data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    os.makedirs(os.path.join(home, "data"))
+    if os.path.isdir(os.path.join(user_data, "fonts")):
+        os.symlink(os.path.join(user_data, "fonts"), os.path.join(home, "data", "fonts"))
     env["XDG_CONFIG_HOME"] = os.path.join(home, "config")
     env["XDG_CACHE_HOME"] = os.path.join(home, "cache")
     env["XDG_DATA_HOME"] = os.path.join(home, "data")
@@ -136,7 +144,8 @@ def main():
             if os.path.exists(out_pdf):
                 os.remove(out_pdf)
             code, wall, stderr = export_pdf(tinta, os.path.abspath(doc), out_pdf, args.theme,
-                                            os.path.abspath(args.themes_ini) if args.themes_ini else "")
+                                            os.path.abspath(args.themes_ini) if args.themes_ini else "",
+                                            dict(e.split("=", 1) for e in args.env))
             head = open(out_pdf, "rb").read(5) if os.path.exists(out_pdf) else b""
             pdf_ok = code == 0 and head == b"%PDF-"
             failures += not pdf_ok

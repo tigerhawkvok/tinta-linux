@@ -72,11 +72,23 @@ int main(int argc, char** argv) {
     check(fs::equivalent(tintaConfigDir(), dir), "theme persistence uses only the portable test folder");
     loadCustomThemes();
     check(themeCount() == THEME_COUNT + 5, "all custom theme sections load");
+    // Built-ins inherit the code color unless they set inline code (Wombat)
+    int wombat = -1;
     for (int i = 0; i < THEME_COUNT; ++i) {
-        check(!themeAt(i).inlineCode, "built-in themes retain inheritance");
+        if (std::wstring(themeAt(i).name) == L"Wombat") wombat = i;
+        if (themeAt(i).inlineCode) continue;
         check(sameColor(themeInlineCodeColor(themeAt(i)), themeAt(i).code),
               "built-in inline color remains exactly the existing code color");
     }
+    check(wombat == THEME_COUNT - 1, "Wombat is the last built-in (saved indices stay valid)");
+    check(wombat >= 0 && themeAt(wombat).inlineCode &&
+              sameColor(themeInlineCodeColor(themeAt(wombat)), hexColor(0xCAE682)) &&
+              sameColor(themeAt(wombat).code, hexColor(0xB8F53C)) &&
+              themeAt(wombat).highlightBackground && sameColor(*themeAt(wombat).highlightBackground, hexColor(0xFFC125)) &&
+              themeAt(wombat).highlightText && sameColor(*themeAt(wombat).highlightText, hexColor(0x424242)),
+          "Wombat keeps its own inline code and highlight colors");
+    for (int i = 0; i < THEME_COUNT - 1; ++i)
+        check(!themeAt(i).inlineCode, "the upstream built-ins retain inheritance");
     check(!themeAt(THEME_COUNT).inlineCode, "legacy custom theme inherits code");
     check(sameColor(themeInlineCodeColor(themeAt(THEME_COUNT)), hexColor(0x334455)),
           "legacy custom code value is the fallback");
@@ -116,7 +128,7 @@ int main(int argc, char** argv) {
         auto doc = app.parser.parse(read(fixture));
         check(doc.success, "mixed Markdown/theme fixture parses");
         app.root = doc.root;
-        for (int index : {THEME_COUNT, THEME_COUNT+1, THEME_COUNT+2}) {
+        for (int index : {THEME_COUNT, THEME_COUNT+1, THEME_COUNT+2, wombat}) {
             applyTheme(app, index);
             for (int width : {1050, 650}) {
                 app.width = width;
