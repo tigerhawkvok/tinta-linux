@@ -661,7 +661,10 @@ public:
             const char* v = std::getenv("TINTA_BITMAP_LEVELS");  // "0" disables (diagnostics)
             return !v || std::strcmp(v, "0") != 0;
         }();
-        while (levelsEnabled && smooth && shrink > 0 && shrink * 2 <= 1.0 && levelIndex < 12) {
+        // Only raster targets: PDF and print pages (recording surfaces) keep
+        // every pixel, and the viewer or printer does the scaling
+        bool raster = cairo_surface_get_type(cairo_get_target(cr_)) == CAIRO_SURFACE_TYPE_IMAGE;
+        while (levelsEnabled && raster && smooth && shrink > 0 && shrink * 2 <= 1.0 && levelIndex < 12) {
             shrink *= 2;
             levelIndex++;
         }

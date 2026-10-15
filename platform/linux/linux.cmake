@@ -96,6 +96,10 @@ install(TARGETS tinta RUNTIME DESTINATION bin COMPONENT tinta)
 option(TINTA_MERMAN "Render Mermaid with merman (needs rustup)" ON)
 if(TINTA_MERMAN)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/merman.cmake)
+    # The viewer draws Mermaid through merman (render.cpp); the native
+    # renderer stays linked as its fallback
+    target_sources(tinta_core PRIVATE src/merman_engine.cpp)
+    target_link_libraries(tinta_core PUBLIC tinta_merman)
 endif()
 
 # Mermaid coverage against external corpora: tests/mermaid_corpus/README.md
@@ -207,6 +211,14 @@ if(BUILD_TESTING)
             TINTA_MERMAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-merman.md"
             TINTA_MERMAID_PREAMBLE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-preamble.md")
         add_test(NAME merman_engine COMMAND merman_engine_tests)
+
+        # MM3: the viewer draws fences through merman (render.cpp)
+        add_executable(merman_layout_tests tests/merman_layout_tests.cpp)
+        target_include_directories(merman_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+        target_link_libraries(merman_layout_tests PRIVATE tinta_core)
+        target_compile_definitions(merman_layout_tests PRIVATE
+            TINTA_MERMAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-merman.md")
+        add_test(NAME merman_layout COMMAND merman_layout_tests)
     endif()
 
     add_executable(document_tests

@@ -125,11 +125,67 @@ Still missing:
   p95 11.5 ms, max 125 ms.
 - Engine creation: 2–3 ms.
 
+## MM3: merman in the viewer (2026-10-14)
+
+What it does:
+- With `TINTA_MERMAN` (on by default on Linux), a ```` ```mermaid ```` fence
+  and a whole `.mmd` document draw through merman first. The fallbacks are
+  the native renderer, then the code block.
+- `render.cpp` `layoutMermanDiagram` asks merman for the diagram in the
+  active theme's colours:
+  - Roles match the native renderer: nodes fill with the code background,
+    outlines take the accent, labels the text colour, and lines are text
+    mixed into the background. Notes, actors, clusters and activations are
+    derived from the same colours.
+  - Series colours come from the syntax palette.
+  - The body face is resolved through DirectWrite, so librsvg gets the
+    installed stand-in (Selawik for Segoe UI). The body size is used too.
+- The SVG is cached per source and theme (up to 64), so merman runs only
+  when either changes, not on every relayout.
+- The SVG is rasterized through the Direct2D SVG path (librsvg on Linux),
+  sharing `rasterizeSvg` with SVG images, at exactly the device pixels the
+  diagram covers. It is cached in the image cache under that scale.
+  - Diagrams centre in the column like native ones.
+  - Wide diagrams scroll sideways until the reader's fit-to-width toggle
+    shrinks them, as native diagrams do.
+  - Print and PDF place the same rectangle at 300 dpi (3.125 pixels per CSS
+    pixel, within the largest bitmap).
+- The compat layer's `DrawBitmap` used halved bitmap levels on every
+  target. They now apply to raster targets only, so PDFs keep full
+  resolution: the diagram images went from about 150 to 300–353 ppi, and
+  ordinary images in PDFs benefit too. `compat_d2d_wic` checks that a 400 px
+  bitmap in a 100 DIP box reaches the PDF as 400×400; with levels on every
+  target, that check fails.
+
+Checked:
+- **`merman_layout`** (`tests/merman_layout_tests.cpp`, on
+  `tests/fixtures/mermaid-merman.md`) asserts that:
+  - the four diagrams the native parser rejects are drawn as four bitmaps,
+    and the invalid fifth fence stays a code block
+  - every bitmap is exactly its rectangle in pixels, at 1× and at 2× zoom
+    (the diagram doubles)
+  - switching to Wombat draws it again
+  - at 420 px a diagram offers fit-to-width, and enabling it shrinks the
+    diagram inside the window
+
+  Mutations each fail the matching check: merman off, a fixed 2× raster,
+  fit ignored, and a cache key without the theme.
+- **Looked at in Paper and Wombat.** The state diagram with
+  `<<choice>>`/`<<fork>>`, nested states and a multi-line note, the
+  Mermaid 11 flowchart (`n@{ shape: ... }`, `A & B`, `<-->`), the
+  top-to-bottom git graph and the class namespaces all render. Before, the
+  native parser showed all four as code. The invalid source shows as code.
+- ctest 46/46 with merman on.
+
 ## Not checked
 
-- Any rendering inside Tinta (MM3, after phase 1), on Windows (MM5), or with
-  host text measurement (MM2). Default metrics leave labels tight against
-  their boxes.
+- **Host text measurement (MM2).** merman's default metrics still decide
+  label boxes; librsvg then draws with the real face, so labels can sit
+  tight against their boxes.
+- **Search and selection over diagram labels (MM4).** Native flowchart
+  labels are in `docText`; merman diagrams are images.
+- **HTML and DOCX exports** still use the native renderer.
+- **Windows (MM5).** merman is off in the cross-built exe.
 - Shipping the OFL-1.1 KaTeX font notice, which is packaging work for
   phase 6.
 - The first configure on a machine without the 1.95.0 toolchain. Here it was

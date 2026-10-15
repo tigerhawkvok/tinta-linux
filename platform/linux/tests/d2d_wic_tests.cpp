@@ -280,7 +280,17 @@ void testGeometryAndPdf(ID2D1Factory1* factory) {
     context->CreateSolidColorBrush(&black, nullptr, &brush);
     D2D1_RECT_F box = D2D1::RectF(96, 96, 192, 192);
     context->FillRectangle(&box, brush);
+    // A 400 px bitmap in a 100 DIP box: the PDF keeps all 400 pixels (screen
+    // drawing would use a halved level; paper needs the full resolution)
+    std::vector<unsigned char> pixels(400 * 400 * 4, 0x80);
+    ID2D1Bitmap* photo = nullptr;
+    D2D1_BITMAP_PROPERTIES photoProps = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    context->CreateBitmap(D2D1::SizeU(400, 400), pixels.data(), 400 * 4, &photoProps, &photo);
+    D2D1_RECT_F photoBox = D2D1::RectF(300, 96, 400, 196);
+    if (photo) context->DrawBitmap(photo, &photoBox, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
     context->EndDraw();
+    if (photo) photo->Release();
     page->Close();
     context->SetTarget(nullptr);
 
@@ -309,6 +319,8 @@ void testGeometryAndPdf(ID2D1Factory1* factory) {
         // objects in compressed object streams, so look inside those too
         std::string text = pdfText(bytes);
         check(text.find("/MediaBox [ 0 0 612 792 ]") != std::string::npos, "Letter page box in points");
+        check(text.find("/Width 400") != std::string::npos && text.find("/Height 400") != std::string::npos,
+              "a shrunk bitmap keeps its full 400x400 pixels in the PDF");
         control->Release();
     }
     if (device) device->Release();

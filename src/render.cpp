@@ -8,6 +8,10 @@
 #include "search.h"
 #include "mermaid.h"
 #include "mermaid_ext.h"
+#ifdef TINTA_MERMAN
+#include "editor.h"  // toUtf8
+#include "merman_engine.h"
+#endif
 #include "math_render.h"
 #include "image_loader.h"
 
@@ -943,6 +947,12 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 }
 
 static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
+#ifdef TINTA_MERMAN
+static bool layoutMermanDiagram(App& app, const std::string& source,
+                                unsigned fitKey, float& y, float indent,
+                                float maxWidth, D2D1_RECT_F* bounds,
+                                bool* fitCandidate);
+#endif
 
 // Display math ($$...$$, #80): a centered block rendered natively; the raw
 // TeX joins docText so search and selection see the source
@@ -2140,6 +2150,22 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
         bool fitActive = fitBlockEnabled(app, fitKey);
         bool fitCandidate = false;
         bool rendered = false;
+#ifdef TINTA_MERMAN
+        // merman first (Mermaid's own layouts, every diagram type); the
+        // native renderer, then the code block, are the fallbacks
+        if (layoutMermanDiagram(app, code, fitKey, y, indent, maxWidth,
+                                &renderedBounds, &fitCandidate)) {
+            App::CodeBlockInfo info;
+            info.bounds = renderedBounds;
+            info.codeText = toWide(code);
+            info.isDiagram = true;
+            info.fitKey = fitKey;
+            info.fitCandidate = fitCandidate || fitActive;
+            info.fitActive = fitActive;
+            app.codeBlocks.push_back(std::move(info));
+            return;
+        }
+#endif
         LayoutSnapshot preSnap = takeSnapshot(app);
         float preY = y;
         float scaleMul = 1.0f;
@@ -2533,6 +2559,92 @@ static void asyncImageWorker(HWND hwnd, UINT maxDimension,
         delete delivered;
 }
 
+// A WIC bitmap with a Direct2D SVG-capable context drawing into it
+// (ID2D1DeviceContext5, Windows 10 1703+; librsvg behind it on Linux)
+static bool createSvgTarget(App& app, UINT w, UINT h, IWICBitmap** wicOut,
+                            ID2D1DeviceContext5** dcOut) {
+    *wicOut = nullptr;
+    *dcOut = nullptr;
+    if (FAILED(app.wicFactory->CreateBitmap(
+            w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand,
+            wicOut))) {
+        return false;
+    }
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    ID2D1RenderTarget* rt = nullptr;
+    if (FAILED(app.d2dFactory->CreateWicBitmapRenderTarget(*wicOut, props,
+                                                           &rt))) {
+        (*wicOut)->Release();
+        *wicOut = nullptr;
+        return false;
+    }
+    HRESULT hr = rt->QueryInterface(IID_PPV_ARGS(dcOut));
+    rt->Release();
+    if (FAILED(hr) || !*dcOut) {
+        // Pre-1703 Windows: no Direct2D SVG; the alt text shows instead
+        (*wicOut)->Release();
+        *wicOut = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Draws SVG `bytes` (svgW x svgH units) at `pixelScale` pixels per unit
+// into the entry's bitmap; its size stays in SVG units
+static bool rasterizeSvg(App& app, const std::string& bytes, float svgW,
+                         float svgH, float pixelScale,
+                         App::ImageEntry& entry) {
+    UINT pxW = (UINT)std::ceil(svgW * pixelScale);
+    UINT pxH = (UINT)std::ceil(svgH * pixelScale);
+    UINT maxPx = app.renderTarget->GetMaximumBitmapSize();
+    if (pxW == 0 || pxH == 0 || pxW > maxPx || pxH > maxPx) return false;
+    IWICBitmap* wicBitmap = nullptr;
+    ID2D1DeviceContext5* dc = nullptr;
+    if (!createSvgTarget(app, pxW, pxH, &wicBitmap, &dc)) return false;
+    bool drawn = false;
+    {
+        IStream* stream = SHCreateMemStream((const BYTE*)bytes.data(),
+                                            (UINT)bytes.size());
+        ID2D1SvgDocument* doc = nullptr;
+        if (stream &&
+            SUCCEEDED(dc->CreateSvgDocument(stream, D2D1::SizeF(svgW, svgH),
+                                            &doc)) &&
+            doc) {
+            dc->BeginDraw();
+            dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(pixelScale, pixelScale));
+            dc->DrawSvgDocument(doc);
+            drawn = SUCCEEDED(dc->EndDraw());
+            doc->Release();
+        }
+        if (stream) stream->Release();
+    }
+    dc->Release();
+
+    if (drawn) {
+        D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                              D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0f * pixelScale, 96.0f * pixelScale);
+        ID2D1Bitmap* bitmap = nullptr;
+        if (SUCCEEDED(app.renderTarget->CreateBitmapFromWicBitmap(
+                wicBitmap, &bp, &bitmap)) &&
+            bitmap) {
+            entry.bitmap.Attach(bitmap);
+            entry.width = (int)svgW;
+            entry.height = (int)svgH;
+            entry.bytes = (size_t)pxW * pxH * 4;
+            entry.failed = false;
+        }
+    }
+    wicBitmap->Release();
+    return !entry.failed;
+}
+
 // SVG images rasterize at 2x through the Direct2D SVG renderer
 // (ID2D1DeviceContext5, Windows 10 1703+). Shapes, paths, and gradients
 // render; <text> elements are not supported by D2D's SVG subset.
@@ -2545,49 +2657,14 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
                       std::istreambuf_iterator<char>());
     if (bytes.empty()) return false;
 
-    auto makeDc5 = [&](UINT w, UINT h, IWICBitmap** wicOut,
-                       ID2D1DeviceContext5** dcOut) -> bool {
-        *wicOut = nullptr;
-        *dcOut = nullptr;
-        if (FAILED(app.wicFactory->CreateBitmap(
-                w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand,
-                wicOut))) {
-            return false;
-        }
-        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                              D2D1_ALPHA_MODE_PREMULTIPLIED),
-            96.0f, 96.0f);
-        ID2D1RenderTarget* rt = nullptr;
-        if (FAILED(app.d2dFactory->CreateWicBitmapRenderTarget(*wicOut, props,
-                                                               &rt))) {
-            (*wicOut)->Release();
-            *wicOut = nullptr;
-            return false;
-        }
-        HRESULT hr = rt->QueryInterface(IID_PPV_ARGS(dcOut));
-        rt->Release();
-        if (FAILED(hr) || !*dcOut) {
-            // Pre-1703 Windows: no Direct2D SVG; the alt text shows instead
-            (*wicOut)->Release();
-            *wicOut = nullptr;
-            return false;
-        }
-        return true;
-    };
-    auto makeStream = [&]() -> IStream* {
-        return SHCreateMemStream((const BYTE*)bytes.data(),
-                                 (UINT)bytes.size());
-    };
-
     // Pass 1: parse only, to learn the intrinsic size
     float svgW = 0.0f, svgH = 0.0f;
     {
         IWICBitmap* tmp = nullptr;
         ID2D1DeviceContext5* dc = nullptr;
-        if (!makeDc5(4, 4, &tmp, &dc)) return false;
-        IStream* stream = makeStream();
+        if (!createSvgTarget(app, 4, 4, &tmp, &dc)) return false;
+        IStream* stream = SHCreateMemStream((const BYTE*)bytes.data(),
+                                            (UINT)bytes.size());
         ID2D1SvgDocument* doc = nullptr;
         if (stream &&
             SUCCEEDED(dc->CreateSvgDocument(stream, D2D1::SizeF(512, 512),
@@ -2628,48 +2705,195 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
     svgH = std::min(svgH, 4096.0f);
 
     // Pass 2: rasterize at 2x for crisp zooming
-    UINT pxW = (UINT)std::ceil(svgW * 2.0f);
-    UINT pxH = (UINT)std::ceil(svgH * 2.0f);
-    IWICBitmap* wicBitmap = nullptr;
-    ID2D1DeviceContext5* dc = nullptr;
-    if (!makeDc5(pxW, pxH, &wicBitmap, &dc)) return false;
-    bool drawn = false;
-    {
-        IStream* stream = makeStream();
-        ID2D1SvgDocument* doc = nullptr;
-        if (stream &&
-            SUCCEEDED(dc->CreateSvgDocument(stream, D2D1::SizeF(svgW, svgH),
-                                            &doc)) &&
-            doc) {
-            dc->BeginDraw();
-            dc->Clear(D2D1::ColorF(0, 0, 0, 0));
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(2.0f, 2.0f));
-            dc->DrawSvgDocument(doc);
-            drawn = SUCCEEDED(dc->EndDraw());
-            doc->Release();
-        }
-        if (stream) stream->Release();
-    }
-    dc->Release();
-
-    if (drawn) {
-        D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                              D2D1_ALPHA_MODE_PREMULTIPLIED),
-            192.0f, 192.0f);
-        ID2D1Bitmap* bitmap = nullptr;
-        if (SUCCEEDED(app.renderTarget->CreateBitmapFromWicBitmap(
-                wicBitmap, &bp, &bitmap)) &&
-            bitmap) {
-            entry.bitmap.Attach(bitmap);
-            entry.width = (int)svgW;
-            entry.height = (int)svgH;
-            entry.failed = false;
-        }
-    }
-    wicBitmap->Release();
-    return !entry.failed;
+    return rasterizeSvg(app, bytes, svgW, svgH, 2.0f, entry);
 }
+
+#ifdef TINTA_MERMAN
+// ---- Mermaid through merman (docs/linux-port/PLAN.md §6) --------------------
+namespace {
+
+std::string cssColor(D2D1_COLOR_F c) {
+    auto channel = [](float v) {
+        return (int)std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+    };
+    char text[8];
+    std::snprintf(text, sizeof text, "#%02x%02x%02x", channel(c.r),
+                  channel(c.g), channel(c.b));
+    return text;
+}
+
+D2D1_COLOR_F mixColor(D2D1_COLOR_F a, D2D1_COLOR_F b, float t) {
+    return D2D1::ColorF(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                        a.b + (b.b - a.b) * t, 1.0f);
+}
+
+// The installed family DirectWrite would use for `name` (a stand-in on
+// Linux: Segoe UI is Selawik there), which the SVG renderer can find
+std::string installedFamily(App& app, const wchar_t* name) {
+    std::wstring family = name ? name : L"";
+    IDWriteFontCollection* fonts = nullptr;
+    if (!family.empty() && app.dwriteFactory &&
+        SUCCEEDED(app.dwriteFactory->GetSystemFontCollection(&fonts, FALSE)) &&
+        fonts) {
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        IDWriteFontFamily* found = nullptr;
+        IDWriteLocalizedStrings* names = nullptr;
+        if (SUCCEEDED(fonts->FindFamilyName(family.c_str(), &index, &exists)) &&
+            exists && SUCCEEDED(fonts->GetFontFamily(index, &found)) && found &&
+            SUCCEEDED(found->GetFamilyNames(&names)) && names) {
+            UINT32 length = 0;
+            if (SUCCEEDED(names->GetStringLength(0, &length))) {
+                std::wstring resolved(length + 1, L'\0');
+                if (SUCCEEDED(names->GetString(0, resolved.data(), length + 1))) {
+                    resolved.resize(length);
+                    family = resolved;
+                }
+            }
+        }
+        if (names) names->Release();
+        if (found) found->Release();
+        fonts->Release();
+    }
+    return toUtf8(family);
+}
+
+// The active theme in merman's roles, matching the native renderer: nodes
+// fill with the code background, outline in the accent, label in the text
+// colour; series (pie, charts) take the syntax palette
+merman_engine::Theme mermanTheme(App& app) {
+    const D2DTheme& t = app.theme;
+    merman_engine::Theme theme;
+    theme.dark = t.isDark;
+    theme.roles = {
+        {"canvas", cssColor(t.background)},
+        {"surface", cssColor(t.codeBackground)},
+        {"surface-alt", cssColor(mixColor(t.codeBackground, t.accent, 0.15f))},
+        {"surface-muted", cssColor(mixColor(t.background, t.codeBackground, 0.5f))},
+        {"text", cssColor(t.text)},
+        {"subtle-text", cssColor(mixColor(t.text, t.background, 0.3f))},
+        {"border", cssColor(t.accent)},
+        {"line", cssColor(mixColor(t.text, t.background, 0.35f))},
+        {"edge-label-background", cssColor(t.background)},
+        {"cluster-background", cssColor(mixColor(t.background, t.codeBackground, 0.5f))},
+        {"cluster-border", cssColor(t.blockquoteBorder)},
+        {"note-background", cssColor(mixColor(t.background, t.accent, 0.15f))},
+        {"note-border", cssColor(t.accent)},
+        {"note-text", cssColor(t.text)},
+        {"actor-background", cssColor(t.codeBackground)},
+        {"actor-border", cssColor(t.accent)},
+        {"actor-text", cssColor(t.text)},
+        {"activation-background", cssColor(mixColor(t.codeBackground, t.accent, 0.2f))},
+        {"activation-border", cssColor(t.accent)},
+    };
+    theme.seriesPalette = {cssColor(t.accent), cssColor(t.syntaxString),
+                           cssColor(t.syntaxNumber), cssColor(t.syntaxFunction),
+                           cssColor(t.syntaxType), cssColor(t.syntaxKeyword),
+                           cssColor(t.link), cssColor(t.heading)};
+    theme.fontFamily = installedFamily(app, t.fontFamily);
+    float scale = app.contentScale * app.zoomFactor;
+    theme.fontSize = app.textFormat && scale > 0.0f
+                         ? app.textFormat->GetFontSize() / scale
+                         : 16.0f;
+    return theme;
+}
+
+// Rendered SVG per source and theme: layout reruns on every resize and
+// scroll-driven relayout, merman only when the diagram or theme changes
+struct MermanRender {
+    merman_engine::Diagram diagram;
+    unsigned long long lastUsed = 0;
+};
+std::unordered_map<std::string, MermanRender>& mermanRenders() {
+    static std::unordered_map<std::string, MermanRender> renders;
+    return renders;
+}
+
+const merman_engine::Diagram& renderMerman(const std::string& source,
+                                           const merman_engine::Theme& theme,
+                                           std::string& key) {
+    static unsigned long long clock = 0;
+    key = std::to_string(std::hash<std::string>{}(
+        source + '\n' + merman_engine::optionsJson(theme)));
+    auto& renders = mermanRenders();
+    auto it = renders.find(key);
+    if (it == renders.end()) {
+        if (renders.size() >= 64) {  // drop the least recently used
+            auto oldest = renders.begin();
+            for (auto i = renders.begin(); i != renders.end(); ++i) {
+                if (i->second.lastUsed < oldest->second.lastUsed) oldest = i;
+            }
+            renders.erase(oldest);
+        }
+        it = renders.emplace(key, MermanRender{merman_engine::renderSvg(source, theme), 0}).first;
+    }
+    it->second.lastUsed = ++clock;
+    return it->second.diagram;
+}
+
+}  // namespace
+
+// A Mermaid diagram rendered by merman and drawn as an image, rasterized at
+// the device pixels it covers (crisp at any zoom and display scale). Fit
+// to width when the reader asked for it, as native diagrams do.
+static bool layoutMermanDiagram(App& app, const std::string& source,
+                                unsigned fitKey, float& y, float indent,
+                                float maxWidth, D2D1_RECT_F* bounds,
+                                bool* fitCandidate) {
+    if (!app.d2dFactory || !app.wicFactory || !app.renderTarget) return false;
+    std::string key;
+    const merman_engine::Diagram& diagram =
+        renderMerman(source, mermanTheme(app), key);
+    if (!diagram.ok || diagram.width <= 0.0f || diagram.height <= 0.0f) {
+        return false;
+    }
+    float scale = app.contentScale * app.zoomFactor;
+    float naturalW = diagram.width * scale;
+    bool wide = naturalW > maxWidth + 1.0f;
+    if (fitCandidate) *fitCandidate = wide;
+    float pixelScale = scale;
+    if (wide && fitBlockEnabled(app, fitKey)) pixelScale *= maxWidth / naturalW;
+
+    // The screen gets one pixel per pixel. Print and PDF place the same
+    // rectangle with 300 dpi worth of pixels per CSS pixel (96 dpi), within
+    // the largest bitmap the target allows
+    float rasterScale = pixelScale;
+    if (app.printLayout) {
+        float largest = std::max(diagram.width, diagram.height);
+        float allowed = (float)app.renderTarget->GetMaximumBitmapSize() / largest;
+        rasterScale = std::max(pixelScale, std::min(300.0f / 96.0f, allowed));
+    }
+    char rasterKey[96];
+    std::snprintf(rasterKey, sizeof rasterKey, "merman:%s:%.4f", key.c_str(),
+                  rasterScale);
+    auto it = app.imageCache.find(rasterKey);
+    if (it == app.imageCache.end()) {
+        App::ImageEntry entry;
+        entry.failed = true;
+        rasterizeSvg(app, diagram.svg, diagram.width, diagram.height,
+                     rasterScale, entry);
+        app.storeImageCacheEntry(rasterKey, std::move(entry));
+        it = app.imageCache.find(rasterKey);
+    } else {
+        app.touchImageCacheEntry(it->second);
+    }
+    if (it == app.imageCache.end() || it->second.failed || !it->second.bitmap) {
+        return false;
+    }
+
+    float top = y + 10.0f * scale;
+    float w = diagram.width * pixelScale;
+    float h = diagram.height * pixelScale;
+    // Centred in the column like native diagrams; a wide one starts at the
+    // margin and scrolls sideways
+    float left = indent + std::max(0.0f, (maxWidth - w) * 0.5f);
+    D2D1_RECT_F rect = D2D1::RectF(left, top, left + w, top + h);
+    app.layoutBitmaps.push_back({it->second.bitmap, rect});
+    if (bounds) *bounds = rect;
+    y = rect.bottom + 24.0f * scale;
+    return true;
+}
+#endif
 
 static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     auto it = app.imageCache.find(src);
@@ -3192,6 +3416,25 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
             layoutCodeBlock(app, elem, y, indent, maxWidth);
             break;
         case ElementType::MermaidDiagram:
+#ifdef TINTA_MERMAN
+            {
+                unsigned fitKey = 0x80000000u | app.layoutDiagramSeq++;
+                D2D1_RECT_F bounds{};
+                bool fitCandidate = false;
+                if (layoutMermanDiagram(app, elem->text, fitKey, y, indent,
+                                        maxWidth, &bounds, &fitCandidate)) {
+                    App::CodeBlockInfo info;
+                    info.bounds = bounds;
+                    info.codeText = toWide(elem->text);
+                    info.isDiagram = true;
+                    info.fitKey = fitKey;
+                    info.fitActive = fitBlockEnabled(app, fitKey);
+                    info.fitCandidate = fitCandidate || info.fitActive;
+                    app.codeBlocks.push_back(std::move(info));
+                    break;
+                }
+            }
+#endif
             if (!layoutMermaidDiagram(
                     app, elem->text, elem->sourceOffset, y, indent, maxWidth)) {
                 app.focusMermaidOnNextLayout = false;
