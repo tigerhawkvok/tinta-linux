@@ -1090,7 +1090,20 @@ render_document:
                    TINTA_VERSION_MAJOR, TINTA_VERSION_MINOR,
                    TINTA_VERSION_PATCH, statsLine1, statsLine2, statsLine3);
 
+        // As wide as its longest line: the diagram line outruns 600 px
+        IDWriteTextFormat* statsFmt = app.statsFormat ? app.statsFormat : app.codeFormat;
         float statsWidth = dpi(app, 600.0f);
+        IDWriteTextLayout* measure = nullptr;
+        if (app.dwriteFactory &&
+            SUCCEEDED(app.dwriteFactory->CreateTextLayout(stats, (UINT32)wcslen(stats), statsFmt,
+                                                          100000.0f, 1000.0f, &measure))) {
+            DWRITE_TEXT_METRICS tm{};
+            if (SUCCEEDED(measure->GetMetrics(&tm))) {
+                statsWidth = std::max(statsWidth, tm.widthIncludingTrailingWhitespace + dpi(app, 20.0f));
+            }
+            measure->Release();
+        }
+        statsWidth = std::min(statsWidth, (float)app.width - dpi(app, 20.0f));
         float statsHeight = statsOverlayHeight(app);
 
         app.brush->SetColor(D2D1::ColorF(0, 0, 0, 0.8f));
@@ -1100,8 +1113,7 @@ render_document:
             app.brush);
 
         app.brush->SetColor(D2D1::ColorF(0.7f, 0.9f, 0.7f));
-        app.renderTarget->DrawText(stats, (UINT32)wcslen(stats),
-            app.statsFormat ? app.statsFormat : app.codeFormat,
+        app.renderTarget->DrawText(stats, (UINT32)wcslen(stats), statsFmt,
             D2D1::RectF(app.width - statsWidth - dpi(app, 5.0f), app.height - statsHeight - dpi(app, 5.0f),
                        app.width - dpi(app, 15.0f), app.height - dpi(app, 15.0f)),
             app.brush);
