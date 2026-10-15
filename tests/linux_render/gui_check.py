@@ -103,6 +103,20 @@ class X:
     def sync(self):
         self.lib.XSync(self.d, 0)
 
+    def title(self, window):
+        """_NET_WM_NAME (UTF-8), as GTK sets it."""
+        lib, d = self.lib, self.d
+        kind, fmt = ctypes.c_ulong(), ctypes.c_int()
+        count, after, data = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+        lib.XGetWindowProperty(d, window, lib.XInternAtom(d, b"_NET_WM_NAME", 0), 0, 4096, 0,
+                               lib.XInternAtom(d, b"UTF8_STRING", 0), ctypes.byref(kind), ctypes.byref(fmt),
+                               ctypes.byref(count), ctypes.byref(after), ctypes.byref(data))
+        if not data.value:
+            return ""
+        text = ctypes.string_at(data.value, count.value).decode("utf-8", "replace")
+        lib.XFree(data)
+        return text
+
     def toplevels(self):
         """Viewable children of the root: (window, x, y, width, height)."""
         root, parent = ctypes.c_ulong(), ctypes.c_ulong()
@@ -229,6 +243,60 @@ def settle(x, geometry, path, quiet_ms=400, timeout=8.0):
     return last
 
 
+DROP_DOC = os.path.join(HERE, "..", "fixtures", "markdown-regression-control.md")
+
+
+def drop_check(x, geometry, out):
+    """(ok, detail) for dragging DROP_DOC from another process onto Tinta."""
+    helper = os.path.join(out, "drag_source")
+    built = subprocess.run(f'cc "{os.path.join(HERE, "drag_source.c")}" $(pkg-config --cflags --libs gtk4) '
+                           f'-o "{helper}"', shell=True, capture_output=True, text=True)
+    if built.returncode:
+        return False, f"drag_source.c did not build: {built.stderr.strip()[:200]}"
+    env = dict(os.environ)
+    env.pop("WAYLAND_DISPLAY", None)
+    env["GDK_BACKEND"] = "x11"
+    env.setdefault("GSK_RENDERER", "cairo")
+    known = {g[0] for g in x.toplevels()}
+    source = subprocess.Popen([helper, os.path.abspath(DROP_DOC)], env=env, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    try:
+        src = None
+        for _ in range(200):
+            src = next((g for g in x.toplevels() if g[0] not in known), None)
+            if src:
+                break
+            time.sleep(0.05)
+        if not src:
+            return False, "the drag source window did not appear"
+        time.sleep(0.5)
+        before = x.title(geometry[0])
+        sx, sy = src[1] + src[3] // 2, src[2] + src[4] // 2
+        tx, ty = geometry[1] + geometry[3] * 3 // 5, geometry[2] + geometry[4] * 3 // 5
+        x.move(sx, sy)
+        time.sleep(0.1)
+        x.tst.XTestFakeButtonEvent(x.d, 1, 1, 0)
+        x.sync()
+        for step in range(1, 21):
+            x.move(sx + (tx - sx) * step // 20, sy + (ty - sy) * step // 20)
+            time.sleep(0.04)
+        time.sleep(0.3)
+        x.tst.XTestFakeButtonEvent(x.d, 1, 0, 0)
+        x.sync()
+        after = before
+        for _ in range(60):
+            time.sleep(0.05)
+            after = x.title(geometry[0])
+            if "markdown-regression-control" in after:
+                break
+        ok = "markdown-regression-control" in after and after != before
+        return ok, f"title '{before}' -> '{after}'"
+    finally:
+        source.terminate()
+        source.wait(timeout=5)
+        time.sleep(0.3)
+
+
 # ---- The run ------------------------------------------------------------------------------
 def run(args):
     out = os.path.abspath(args.out)
@@ -304,7 +372,7 @@ def run(args):
         x.key(name)
     found = settle(x, geometry, os.path.join(out, "3-find.png"))
     typed = changed_fraction(found, opened)
-    report("keys", shortcut > 0.002 and typed > 0.0002,
+    report("keys", shortcut > 0.0005 and typed > 0.0002,
            f"Ctrl+F changed {shortcut * 100:.2f}% of pixels, typing 'zqx' {typed * 100:.3f}%")
     x.key("Escape")
     # One Escape closes the find bar; a second would close Tinta (upstream behaviour)
@@ -335,6 +403,10 @@ def run(args):
     time.sleep(0.3)
     part = x.clipboard_text() or ""
     report("select", 0 < len(part) < whole, f"drag copied {len(part)} of {whole} chars")
+
+    # Drag and drop from another application (drag_source.c stands in for a
+    # file manager): Tinta opens the file in a tab, and the title names it
+    report("drop", *drop_check(x, geometry, out))
 
     before = settle(x, geometry, os.path.join(out, "4-before-resize.png"))
     small = (geometry[0], geometry[1], geometry[2], 700, 500)

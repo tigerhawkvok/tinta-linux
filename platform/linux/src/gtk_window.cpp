@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <set>
 #include <string>
@@ -100,6 +101,10 @@ void resized(GtkDrawingArea*, int width, int height, gpointer data) {
     }
     int px = static_cast<int>(std::ceil(width * n->scale)), py = static_cast<int>(std::ceil(height * n->scale));
     n->hwnd->rect = {0, 0, px, py};
+    if (g_getenv("TINTA_TRACE_GTK")) {
+        std::fprintf(stderr, "tinta-gtk: resize %dx%d logical, scale %.3f, %dx%d pixels\n", width, height, n->scale,
+                     px, py);
+    }
     WPARAM kind = gtk_window_is_maximized(n->window) ? SIZE_MAXIMIZED : SIZE_RESTORED;
     if (g_modal) postFromUi(n->hwnd, WM_SIZE, kind, MAKELPARAM(px, py));
     else SendMessageW(n->hwnd, WM_SIZE, kind, MAKELPARAM(px, py));
@@ -234,6 +239,28 @@ void left(GtkEventControllerMotion*, gpointer data) {
     if (n->buttons) return;  // the drag still owns the pointer
     postFromUi(n->hwnd, n->overClient ? WM_MOUSELEAVE : WM_NCMOUSELEAVE, 0, 0);
     n->overClient = false;
+}
+
+// Files dropped from a file manager: WM_DROPFILES, as for a window with
+// WS_EX_ACCEPTFILES on Windows (Tinta opens them in tabs)
+gboolean dropped(GtkDropTarget*, const GValue* value, double, double, gpointer data) {
+    auto* n = static_cast<Native*>(data);
+    if (g_modal || !G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) return FALSE;
+    auto* drop = new HDROP__();
+    GSList* files = gdk_file_list_get_files(static_cast<GdkFileList*>(g_value_get_boxed(value)));
+    for (GSList* f = files; f; f = f->next) {
+        if (char* path = g_file_get_path(G_FILE(f->data))) {  // local files only
+            drop->files.push_back(toWide(std::string(path)));
+            g_free(path);
+        }
+    }
+    g_slist_free(files);
+    if (drop->files.empty()) {
+        delete drop;
+        return FALSE;
+    }
+    postFromUi(n->hwnd, WM_DROPFILES, reinterpret_cast<WPARAM>(drop), 0);
+    return TRUE;
 }
 
 gboolean scrolled(GtkEventControllerScroll* controller, double dx, double dy, gpointer data) {
@@ -400,6 +427,29 @@ GtkWindow* parentWindow(HWND hwnd) {
 
 GdkClipboard* clipboard() { return gdk_display_get_clipboard(gdk_display_get_default()); }
 
+// The desktop switched light/dark: Windows announces that as
+// WM_SETTINGCHANGE("ImmersiveColorSet"), and Tinta re-reads the scheme
+// (RegGetValueW AppsUseLightTheme, from the same portal)
+void colorSchemeChanged(GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*,
+                        GVariant* parameters, gpointer) {
+    const gchar* ns = nullptr;
+    const gchar* key = nullptr;
+    g_variant_get(parameters, "(&s&sv)", &ns, &key, nullptr);
+    if (g_strcmp0(ns, "org.freedesktop.appearance") != 0 || g_strcmp0(key, "color-scheme") != 0) return;
+    static const wchar_t kImmersiveColorSet[] = L"ImmersiveColorSet";
+    for (Native* n : g_natives) {
+        postFromUi(n->hwnd, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(kImmersiveColorSet));
+    }
+}
+
+void watchColorScheme() {
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+    if (!bus) return;  // kept for the process's lifetime with the subscription
+    g_dbus_connection_signal_subscribe(bus, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Settings",
+                                       "SettingChanged", "/org/freedesktop/portal/desktop", nullptr,
+                                       G_DBUS_SIGNAL_FLAGS_NONE, colorSchemeChanged, nullptr, nullptr);
+}
+
 }  // namespace
 
 bool active() { return g_active; }
@@ -407,6 +457,13 @@ bool active() { return g_active; }
 bool start() {
     g_set_prgname("tinta");  // Wayland app id / WM_CLASS: matches tinta.desktop
     g_active = gtk_init_check();
+    // TINTA_TRACE_GTK=1: which display server (GdkWaylandDisplay or
+    // GdkX11Display) and, per resize, the scale and size in pixels
+    if (g_active && g_getenv("TINTA_TRACE_GTK")) {
+        std::fprintf(stderr, "tinta-gtk: display %s (%s)\n", G_OBJECT_TYPE_NAME(gdk_display_get_default()),
+                     gdk_display_get_name(gdk_display_get_default()));
+    }
+    if (g_active) watchColorScheme();
     return g_active;
 }
 
@@ -442,6 +499,12 @@ void createWindow(HWND hwnd) {
     GtkEventController* scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
     g_signal_connect(scroll, "scroll", G_CALLBACK(scrolled), n);
     gtk_widget_add_controller(n->area, scroll);
+
+    if (hwnd->exStyle & WS_EX_ACCEPTFILES) {
+        GtkDropTarget* drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
+        g_signal_connect(drop, "drop", G_CALLBACK(dropped), n);
+        gtk_widget_add_controller(n->area, GTK_EVENT_CONTROLLER(drop));
+    }
 
     // Capture phase: ahead of GtkWindow's own keys (Tab moves focus)
     GtkEventController* keys = gtk_event_controller_key_new();

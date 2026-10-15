@@ -26,6 +26,11 @@ struct HWND__ {
     void* native = nullptr;  // the GTK side (gtk_window.cpp), when interactive
 };
 
+// WM_DROPFILES' handle: the paths, in drop order; DragFinish frees it
+struct HDROP__ {
+    std::vector<std::wstring> files;
+};
+
 namespace tinta {
 
 // Posts a message without waking anything (the caller is the GTK main

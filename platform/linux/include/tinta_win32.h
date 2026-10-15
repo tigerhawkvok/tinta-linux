@@ -570,6 +570,7 @@ LONG ImmGetCompositionStringW(HIMC imc, DWORD index, void* buffer, DWORD length)
 #define FILE_NAME_NORMALIZED 0x0
 #define ERROR_SUCCESS 0L
 #define ERROR_FILE_NOT_FOUND 2L
+#define ERROR_MORE_DATA 234L
 #define ERROR_PATH_NOT_FOUND 3L
 #define ERROR_ACCESS_DENIED 5L
 #define ERROR_ALREADY_EXISTS 183L

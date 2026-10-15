@@ -1060,6 +1060,32 @@ BOOL ShellExecuteExW(SHELLEXECUTEINFOW* info) {
 void SHChangeNotify(LONG, UINT, const void*, const void*) {}
 
 // ---- Registry: nothing is stored there on Linux ----------------------------------------------------
+namespace tinta {
+
+// The desktop's light/dark preference (org.freedesktop.appearance
+// color-scheme, through the XDG desktop portal: KDE and GNOME both serve
+// it): 0 no preference, 1 dark, 2 light; -1 without a portal
+int portalColorScheme() {
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+    if (!bus) return -1;
+    int scheme = -1;
+    GVariant* reply = g_dbus_connection_call_sync(
+        bus, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings",
+        "ReadOne", g_variant_new("(ss)", "org.freedesktop.appearance", "color-scheme"), G_VARIANT_TYPE("(v)"),
+        G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, nullptr, nullptr);
+    if (reply) {
+        GVariant* value = nullptr;
+        g_variant_get(reply, "(v)", &value);
+        if (g_variant_is_of_type(value, G_VARIANT_TYPE_UINT32)) scheme = static_cast<int>(g_variant_get_uint32(value));
+        g_variant_unref(value);
+        g_variant_unref(reply);
+    }
+    g_object_unref(bus);
+    return scheme;
+}
+
+}  // namespace tinta
+
 LONG RegOpenKeyExW(HKEY, LPCWSTR, DWORD, REGSAM, HKEY* result) {
     if (result) *result = nullptr;
     return ERROR_FILE_NOT_FOUND;
@@ -1073,7 +1099,24 @@ LONG RegCreateKeyExW(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM, SECURITY_ATTRI
 LONG RegCloseKey(HKEY) { return ERROR_SUCCESS; }
 LONG RegSetValueExW(HKEY, LPCWSTR, DWORD, DWORD, const BYTE*, DWORD) { return ERROR_ACCESS_DENIED; }
 LONG RegQueryValueExW(HKEY, LPCWSTR, DWORD*, DWORD*, BYTE*, DWORD*) { return ERROR_FILE_NOT_FOUND; }
-LONG RegGetValueW(HKEY, LPCWSTR, LPCWSTR, DWORD, DWORD*, void*, DWORD*) { return ERROR_FILE_NOT_FOUND; }
+// Windows' "apps use light theme" answers from the desktop's color scheme
+// (dark is 0; light and no preference are 1); nothing else is stored
+LONG RegGetValueW(HKEY, LPCWSTR subKey, LPCWSTR valueName, DWORD, DWORD* type, void* data, DWORD* size) {
+    if (!subKey || !valueName || wcscmp(valueName, L"AppsUseLightTheme") != 0 ||
+        !wcsstr(subKey, L"Themes\\Personalize")) {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    int scheme = tinta::portalColorScheme();
+    if (scheme < 0) return ERROR_FILE_NOT_FOUND;
+    if (type) *type = REG_DWORD;
+    if (size && *size < sizeof(DWORD)) {
+        *size = sizeof(DWORD);
+        return ERROR_MORE_DATA;
+    }
+    if (size) *size = sizeof(DWORD);
+    if (data) *static_cast<DWORD*>(data) = scheme == 1 ? 0 : 1;
+    return ERROR_SUCCESS;
+}
 LONG RegDeleteTreeW(HKEY, LPCWSTR) { return ERROR_FILE_NOT_FOUND; }
 
 LONG GetCurrentPackageFullName(UINT32* length, LPWSTR) {

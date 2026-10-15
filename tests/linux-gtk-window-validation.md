@@ -106,22 +106,86 @@ The checker's screenshots are in `build/gui-check*/`:
 - the 700×500 relayout, with its "Copied" notification bell
 - the 2× frame, with crisp text at twice the size
 
+## On a real compositor (later on 2026-10-14)
+
+Philip's desktop turned out to be KDE Plasma 6.4.5 on Wayland (KWin, one
+3440×1440 monitor at scale 1), not GNOME. He allowed headed runs while he
+was away and unlocked the session for them.
+
+- **`tests/linux_render/desktop_check.py TINTA DOC`** drives Tinta on the
+  live session. It uses uinput virtual devices (an absolute pointer and a
+  keyboard, which KWin treats as hardware), queries window state through
+  KWin scripting and captures with spectacle.
+  - Every key and click first checks that KWin's active window is Tinta and
+    that the point lies inside its frame. It aborts otherwise.
+  - It refuses to run while the session is locked, and it puts the user's
+    Klipper clipboard back afterwards.
+  - **The AppImage passes 14/14:**
+
+    | Check | Result |
+    |---|---|
+    | backend | `GdkWaylandDisplay (wayland-0)`: native Wayland, not XWayland |
+    | frame | identical to the headless capture |
+    | caption move | moved exactly (−200, +120) |
+    | edge resize | +150 px, laid out again |
+    | maximize / restore | a caption double-click fills the 3440×1396 work area; a second one restores |
+    | wheel, keys | work |
+    | clipboard | Klipper receives the copy |
+    | paste | from Klipper into the find bar |
+    | minimize, close | from Tinta's caption buttons |
+- **`tests/linux_render/scale_check.py TINTA DOC --scale N`** checks
+  fractional scales. It runs a nested KWin on a virtual output, with its
+  own socket, D-Bus session and XDG folders.
+  - The scale is set with `kscreen-doctor`, because the virtual backend
+    ignores `--scale`.
+  - Its first version shared the user's XDG folders. KWin then wrote
+    `~/.config/kwinoutputconfig.json` and `kwinrc` and applied a stored
+    `Virtual-0` output at scale 1. The live displays' entries were
+    unaffected. Backups taken afterwards are at
+    `~/.config/{kwinoutputconfig.json,kwinrc}.bak-nested-kwin-20261014-2121`,
+    and the check has used private folders since.
+  - **At 1.25, 1.5 and 2 it passes 3/3 each.** Tinta is on
+    `GdkWaylandDisplay`, GTK reports the exact scale (800×560, 666×466 and
+    500×350 logical), and the window is pixel-identical to a headless
+    `--render-png` at that scale, so nothing resamples it.
+  - Checker check: the same 1.5× capture holds no match for 2× or 1.25×
+    renders of the same size.
+- **Dark-mode follow** (`tests/linux_render/follow_system_check.py`).
+  - How it works:
+    - `RegGetValueW(...Themes\Personalize, AppsUseLightTheme)` answers from
+      the XDG desktop portal's `org.freedesktop.appearance color-scheme`,
+      which both KDE and GNOME serve.
+    - The portal's `SettingChanged` signal becomes
+      `WM_SETTINGCHANGE("ImmersiveColorSet")`, which Tinta already handles.
+  - The test runs a fake portal on a private bus and Tinta on Xvfb, with
+    `followSystemTheme=1`, light = Paper and dark = Wombat.
+    - Dark at launch opens in Wombat (36,36,36).
+    - Switching to light repaints in Paper (245,241,232).
+    - Switching back to dark returns to Wombat.
+    - 3/3 pass.
+  - Mutations: without the portal read, start-dark and to-dark fail;
+    without the subscription, to-light fails.
+- **Files dropped from another application.** A `GtkDropTarget` for file
+  lists on `WS_EX_ACCEPTFILES` windows posts `WM_DROPFILES`, with an HDROP
+  serving `DragQueryFileW` and `DragFinish`. Tinta opens the files in tabs.
+  - `gui_check.py` builds `drag_source.c` (a GTK file-manager stand-in) and
+    drags `markdown-regression-control.md` onto Tinta over XDND. The title
+    goes from "Tinta - gtk-window.md" to
+    "Tinta - markdown-regression-control.md". `gui_check` is now 9/9.
+  - With the drop target disabled, that check fails.
+- **`TINTA_TRACE_GTK=1`** logs the GDK display type and, per resize, the
+  scale and pixel size. The desktop and scale checks rely on it.
+
 ## Not covered yet
 
-- **Philip's GNOME/Wayland session.** Nothing was opened there, by design.
-  Untested on a real compositor:
-  - caption drag and edge resize (`gdk_toplevel_begin_move/resize` needs a
-    window manager; Xvfb has none)
-  - fractional scales (1.25, 1.5)
-  - real-GPU time to first frame
-  - the `wayland,x11` backend choice
+- **Real-GPU time to first frame on Plasma.** The desktop check's map time
+  includes KWin queries.
 - **IME and compose/dead keys.** Keys map to text with
   `gdk_keyval_to_unicode`; there is no `GtkIMContext` yet (phase 3).
 - **Clipboard:** only text crosses to the desktop, not HTML, PNG or TSV.
   OLE clipboard snapshots stay in-process.
-- **Not wired yet:** drag-and-drop of files into the window, the tab-drag
-  ghost and tear-off windows (phase 4), single instance (each launch is a
-  new process), print dialogs, and dark-mode follow.
+- **Not wired yet:** the tab-drag ghost and tear-off windows (phase 4),
+  single instance (each launch is a new process), and print dialogs.
 - **GtkFileDialog and GtkAlertDialog** are written but not driven by the
   checker (no MessageBox path in the fixture, and Xvfb has no portal).
 - **The AppImage's system floor**, measured with `objdump -T` over every

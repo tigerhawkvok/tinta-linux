@@ -1005,8 +1005,21 @@ UINT RegisterClipboardFormatW(LPCWSTR name) {
     return id;
 }
 
-UINT DragQueryFileW(HDROP, UINT, LPWSTR, UINT) { return 0; }
-void DragFinish(HDROP) {}
+// WM_DROPFILES' HDROP: the dropped paths (gtk_window.cpp makes them)
+UINT DragQueryFileW(HDROP drop, UINT index, LPWSTR file, UINT size) {
+    if (!drop) return 0;
+    if (index == 0xFFFFFFFF) return static_cast<UINT>(drop->files.size());
+    if (index >= drop->files.size()) return 0;
+    const std::wstring& path = drop->files[index];
+    if (!file) return static_cast<UINT>(path.size());
+    if (size == 0) return 0;
+    UINT n = std::min(static_cast<UINT>(path.size()), size - 1);
+    wmemcpy(file, path.c_str(), n);
+    file[n] = 0;
+    return n;
+}
+
+void DragFinish(HDROP drop) { delete drop; }
 void DragAcceptFiles(HWND, BOOL) {}
 
 // ---- IME --------------------------------------------------------------------------------------

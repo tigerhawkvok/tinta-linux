@@ -59,6 +59,8 @@ cairo_surface_t* targetSurface(ID2D1RenderTarget* target);
 cairo_surface_t* windowSurface(HWND hwnd);
 // A window target finished a frame (EndDraw): the window layer shows it
 void presentWindow(HWND hwnd);
+// The desktop portal's color-scheme: 0 no preference, 1 dark, 2 light, -1 none
+int portalColorScheme();
 
 // Headless runs (main_linux.cpp): no display; `renderPng` captures the
 // window once its startup work has settled, then quits
