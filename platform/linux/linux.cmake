@@ -219,6 +219,10 @@ if(BUILD_TESTING)
         target_compile_definitions(merman_layout_tests PRIVATE
             TINTA_MERMAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-merman.md")
         add_test(NAME merman_layout COMMAND merman_layout_tests)
+        add_test(NAME linux_merman_exports COMMAND ${CMAKE_COMMAND} -DTINTA=$<TARGET_FILE:tinta>
+            -DDOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-merman.md
+            -DHOME_DIR=${CMAKE_BINARY_DIR}/linux-render/.merman-exports
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/merman_export_check.cmake)
     endif()
 
     add_executable(document_tests

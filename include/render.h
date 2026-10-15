@@ -27,4 +27,14 @@ void discardAsyncImage(void* asyncResult);
 D2D1_COLOR_F resolveDiagramRole(const App& app, const mermaidext::Prim& prim,
                                 mermaidext::Role role);
 
+#ifdef TINTA_MERMAN
+// A Mermaid diagram through merman in the active theme, for the exports
+// (docs/linux-port/PLAN.md §6): the SVG (Mermaid's own "parity" SVG for
+// browsers, else the resvg-safe one) and its size in CSS pixels. False when
+// merman rejects the source; the native renderer is then the fallback.
+#include <string>
+bool mermanDiagramSvg(App& app, const std::string& source, bool forBrowsers, std::string& svg, float& width,
+                      float& height);
+#endif
+
 #endif // TINTA_RENDER_H

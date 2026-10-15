@@ -453,21 +453,36 @@ std::string liftFormulas(const std::string& safe, const std::string& parity,
 
 std::string optionsJson(const Theme& theme) { return optionsJson(theme, "resvg-safe"); }
 
-Diagram renderSvg(std::string_view source, const Theme& theme) {
+namespace {
+// One engine for every caller, used one request at a time
+std::mutex& engineMutex() {
     static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-    static Engine engine;
-    Diagram diagram = engine.svg(source, optionsJson(theme, "resvg-safe"));
+    return mutex;
+}
+Engine& engine() {
+    static Engine instance;
+    return instance;
+}
+}  // namespace
+
+Diagram renderSvg(std::string_view source, const Theme& theme) {
+    std::lock_guard<std::mutex> lock(engineMutex());
+    Diagram diagram = engine().svg(source, optionsJson(theme, "resvg-safe"));
 #ifdef TINTA_MERMAN_MATH
     // Mermaid math is $$...$$ only
     if (diagram.ok && source.find("$$") != std::string_view::npos) {
-        Diagram parity = engine.svg(source, optionsJson(theme, "parity"));
+        Diagram parity = engine().svg(source, optionsJson(theme, "parity"));
         if (parity.ok) {
             diagram.svg = liftFormulas(diagram.svg, parity.svg, themeTextColour(theme));
         }
     }
 #endif
     return diagram;
+}
+
+Diagram renderParitySvg(std::string_view source, const Theme& theme) {
+    std::lock_guard<std::mutex> lock(engineMutex());
+    return engine().svg(source, optionsJson(theme, "parity"));
 }
 
 }  // namespace merman_engine

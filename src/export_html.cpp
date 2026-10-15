@@ -947,6 +947,17 @@ namespace {
 std::string diagramSvg(App& app, const std::string& sourceUtf8,
                        const std::string& bodyFontCss,
                        const std::string& monoFontCss) {
+#ifdef TINTA_MERMAN
+    // Mermaid's own SVG for the browser (HTML labels, math), sized like the
+    // viewer's; the native renderer below is the fallback
+    {
+        std::string svg;
+        float width = 0.0f, height = 0.0f;
+        if (mermanDiagramSvg(app, sourceUtf8, true, svg, width, height)) {
+            return "<div style=\"max-width:" + num(width) + "px;margin:0 auto\">" + svg + "</div>";
+        }
+    }
+#endif
     mermaidext::Built built = buildDiagramPrims(app, sourceUtf8, 1.0f);
     if (!built.ok || built.prims.empty()) return {};
 

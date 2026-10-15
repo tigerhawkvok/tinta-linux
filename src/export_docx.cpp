@@ -530,6 +530,41 @@ void drawPrims(App& app, RasterTarget& rt, const mermaidext::Built& built,
 // Diagram source -> PNG at 2x plus its logical (1x) size
 bool diagramToPng(App& app, const std::string& source, std::string& png,
                   float& logicalWidth, float& logicalHeight) {
+#ifdef TINTA_MERMAN
+    // merman's diagram on the theme background, as native ones are drawn;
+    // the native renderer below is the fallback
+    {
+        std::string svg;
+        float width = 0.0f, height = 0.0f;
+        RasterTarget rt;
+        ID2D1DeviceContext5* dc = nullptr;
+        if (mermanDiagramSvg(app, source, false, svg, width, height) &&
+            rt.open(app, width * kRasterScale, height * kRasterScale) &&
+            SUCCEEDED(rt.target->QueryInterface(IID_PPV_ARGS(&dc))) && dc) {
+            IStream* stream = SHCreateMemStream(
+                reinterpret_cast<const BYTE*>(svg.data()), (UINT)svg.size());
+            ID2D1SvgDocument* doc = nullptr;
+            bool drawn = false;
+            if (stream && SUCCEEDED(dc->CreateSvgDocument(
+                              stream, D2D1::SizeF(width, height), &doc)) && doc) {
+                dc->BeginDraw();
+                dc->Clear(app.theme.background);
+                dc->SetTransform(D2D1::Matrix3x2F::Scale(kRasterScale, kRasterScale));
+                dc->DrawSvgDocument(doc);
+                drawn = SUCCEEDED(dc->EndDraw());
+                doc->Release();
+            }
+            if (stream) stream->Release();
+            dc->Release();
+            if (drawn) {
+                png = encodeWicPng(app, rt.bitmap, rt.width, rt.height);
+                logicalWidth = width;
+                logicalHeight = height;
+                if (!png.empty()) return true;
+            }
+        }
+    }
+#endif
     mermaidext::Built built = buildDiagramPrims(app, source, kRasterScale);
     if (!built.ok || built.prims.empty()) return false;
     RasterTarget rt;

@@ -36,6 +36,10 @@ struct Diagram {
 // Renders on a lazily created engine shared by all callers (serialized).
 Diagram renderSvg(std::string_view source, const Theme& theme);
 
+// For browsers (the HTML export): Mermaid's own SVG, with HTML labels in
+// foreignObject and math as browsers draw it
+Diagram renderParitySvg(std::string_view source, const Theme& theme);
+
 // The per-request options document: resvg-safe SVG (no foreignObject), no
 // drop shadows (100x faster through librsvg), the host theme
 std::string optionsJson(const Theme& theme);

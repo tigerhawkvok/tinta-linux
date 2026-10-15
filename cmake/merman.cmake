@@ -8,11 +8,14 @@
 include(FetchContent)
 
 # merman has no CMakeLists.txt: populate only
+# The commit's source tarball, checked by hash: a shallow git clone only
+# reaches a pinned commit while it is a branch tip. (Should GitHub ever
+# re-encode archives again, the hash check fails loudly; refresh it.)
 FetchContent_Declare(
     merman
-    GIT_REPOSITORY https://github.com/Latias94/merman.git
-    GIT_TAG 3a4b8c393939b69372a8f05a2b971f7cdf6ae529  # 0.9.0, pinned by commit
-    GIT_SHALLOW TRUE
+    URL https://github.com/Latias94/merman/archive/3a4b8c393939b69372a8f05a2b971f7cdf6ae529.tar.gz  # 0.9.0
+    URL_HASH SHA256=6bcca122c432f86efa17fbe07d56aada0420d185f4d774b261c032f700b85c2c
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(merman)
 

@@ -3526,6 +3526,27 @@ static size_t countElements(const ElementPtr& elem) {
 
 } // namespace
 
+#ifdef TINTA_MERMAN
+bool mermanDiagramSvg(App& app, const std::string& source, bool forBrowsers,
+                      std::string& svg, float& width, float& height) {
+    merman_engine::Theme theme = mermanTheme(app);
+    merman_engine::Diagram diagram;
+    if (forBrowsers) {
+        diagram = merman_engine::renderParitySvg(source, theme);
+    } else {
+        std::string key;
+        diagram = renderMerman(source, theme, key);
+    }
+    if (!diagram.ok || diagram.width <= 0.0f || diagram.height <= 0.0f) {
+        return false;
+    }
+    svg = diagram.svg;
+    width = diagram.width;
+    height = diagram.height;
+    return true;
+}
+#endif
+
 namespace {
 
 // Reset layout state and prepare for laying out blocks. Returns false when
