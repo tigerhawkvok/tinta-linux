@@ -424,7 +424,7 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
 |---|---|---|
 | MM1 | CMake + merman build + `merman_engine` wrapper + tests; corpus harness gains a merman mode as the regression gate | **done** (`2a8ad90`, `tests/mermaid-merman-validation.md`) |
 | MM2 | Pango text-measurement callback | nothing; Pango works headless |
-| MM3 | Hook into `layoutCodeBlock`, HTML and DOCX export behind `TINTA_MERMAN`, with merman → native → code fallback | **viewer, print and PDF done** (2026-10-14); HTML and DOCX exports still native |
+| MM3 | Hook into `layoutCodeBlock`, HTML and DOCX export behind `TINTA_MERMAN`, with merman → native → code fallback | **done** (2026-10-14): viewer, print, PDF, HTML (parity SVG) and DOCX (PNG) |
 | MM4 | Search and selection rects from the SVG labels | MM3 |
 | MM5 | Windows: MSVC build of merman, DirectWrite measurement, async PNG | a Windows machine |
 

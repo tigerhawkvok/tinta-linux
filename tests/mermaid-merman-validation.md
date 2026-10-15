@@ -175,7 +175,19 @@ Checked:
   Mermaid 11 flowchart (`n@{ shape: ... }`, `A & B`, `<-->`), the
   top-to-bottom git graph and the class namespaces all render. Before, the
   native parser showed all four as code. The invalid source shows as code.
-- ctest 46/46 with merman on.
+- **Exports.**
+  - HTML inlines Mermaid's own parity SVG (`merman_engine::renderParitySvg`;
+    HTML labels in `foreignObject`, math as browsers draw it).
+  - DOCX embeds merman's diagram as a PNG at 2x on the theme background.
+  - Both fall back to native.
+  - ctest `linux_merman_exports`: on `mermaid-merman.md` the HTML holds 4
+    inline SVGs with `foreignObject` labels and the DOCX 4 PNGs, where the
+    native build exports none. Disabling either exporter's merman path fails
+    the check.
+- **The merman pin** is now the commit's source tarball, checked by SHA-256.
+  A shallow git clone only reaches a pinned commit while it is a branch tip,
+  so fresh build trees had stopped configuring.
+- ctest 47/47 with merman on.
 
 ## Not checked
 
@@ -184,7 +196,6 @@ Checked:
   tight against their boxes.
 - **Search and selection over diagram labels (MM4).** Native flowchart
   labels are in `docText`; merman diagrams are images.
-- **HTML and DOCX exports** still use the native renderer.
 - **Windows (MM5).** merman is off in the cross-built exe.
 - Shipping the OFL-1.1 KaTeX font notice, which is packaging work for
   phase 6.
