@@ -442,6 +442,82 @@ void colorSchemeChanged(GDBusConnection*, const gchar*, const gchar*, const gcha
     }
 }
 
+// ---- Single instance: WM_COPYDATA across processes ------------------------------------
+const char kInstanceName[] = "org.tinta.Instance";
+const char kInstancePath[] = "/org/tinta/Instance";
+const char kInstanceXml[] =
+    "<node><interface name='org.tinta.Instance'><method name='CopyData'>"
+    "<arg type='t' name='kind' direction='in'/><arg type='ay' name='data' direction='in'/>"
+    "<arg type='s' name='activation' direction='in'/><arg type='b' name='handled' direction='out'/>"
+    "</method></interface></node>";
+
+GDBusConnection* g_bus = nullptr;
+std::string g_startupId;  // the sender's activation token, for present()
+
+struct RemoteCopy {
+    guint64 kind;
+    std::vector<unsigned char> data;
+    std::string activation;
+};
+std::vector<RemoteCopy> g_pendingCopies;
+
+HWND primaryWindow() { return g_natives.empty() ? nullptr : g_natives.front()->hwnd; }
+
+LRESULT deliverCopy(const RemoteCopy& copy) {
+    HWND hwnd = primaryWindow();
+    if (!hwnd) return FALSE;
+    COPYDATASTRUCT data{};
+    data.dwData = static_cast<ULONG_PTR>(copy.kind);
+    data.cbData = static_cast<DWORD>(copy.data.size());
+    data.lpData = const_cast<unsigned char*>(copy.data.data());
+    g_startupId = copy.activation;
+    LRESULT handled = SendMessageW(hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data));
+    g_startupId.clear();
+    return handled;
+}
+
+// Copies that arrived inside a dialog's nested loop or before the window
+gboolean drainCopies(gpointer) {
+    if (g_modal || !primaryWindow()) return G_SOURCE_CONTINUE;
+    std::vector<RemoteCopy> pending;
+    pending.swap(g_pendingCopies);
+    for (const RemoteCopy& copy : pending) deliverCopy(copy);
+    return G_SOURCE_REMOVE;
+}
+
+void instanceCall(GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*, GVariant* parameters,
+                  GDBusMethodInvocation* invocation, gpointer) {
+    guint64 kind = 0;
+    GVariant* bytes = nullptr;
+    const gchar* activation = nullptr;
+    g_variant_get(parameters, "(t@ay&s)", &kind, &bytes, &activation);
+    gsize size = 0;
+    const auto* raw = static_cast<const unsigned char*>(g_variant_get_fixed_array(bytes, &size, 1));
+    RemoteCopy copy{kind, std::vector<unsigned char>(raw, raw + size), activation ? activation : ""};
+    g_variant_unref(bytes);
+    gboolean handled = TRUE;
+    if (g_modal || !primaryWindow()) {  // app code is on the stack, or no window yet
+        if (g_pendingCopies.empty()) g_timeout_add(100, drainCopies, nullptr);
+        g_pendingCopies.push_back(std::move(copy));
+    } else {
+        handled = deliverCopy(copy) != 0;
+    }
+    g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", handled));
+}
+
+// Every interactive Tinta queues for the name: the first owns it, and when
+// it exits the next one takes over
+void ownInstanceName() {
+    g_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+    if (!g_bus) return;
+    GDBusNodeInfo* info = g_dbus_node_info_new_for_xml(kInstanceXml, nullptr);
+    static const GDBusInterfaceVTable vtable = {instanceCall, nullptr, nullptr, {}};
+    g_dbus_connection_register_object(g_bus, kInstancePath, info->interfaces[0], &vtable, nullptr, nullptr, nullptr);
+    g_dbus_node_info_unref(info);
+    g_bus_own_name_on_connection(g_bus, kInstanceName, G_BUS_NAME_OWNER_FLAGS_NONE, nullptr, nullptr, nullptr,
+                                 nullptr);
+}
+
 void watchColorScheme() {
     GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
     if (!bus) return;  // kept for the process's lifetime with the subscription
@@ -463,8 +539,49 @@ bool start() {
         std::fprintf(stderr, "tinta-gtk: display %s (%s)\n", G_OBJECT_TYPE_NAME(gdk_display_get_default()),
                      gdk_display_get_name(gdk_display_get_default()));
     }
-    if (g_active) watchColorScheme();
+    if (g_active) {
+        watchColorScheme();
+        ownInstanceName();
+    }
     return g_active;
+}
+
+bool remoteInstanceExists() {
+    if (!g_bus) return false;
+    GVariant* reply = g_dbus_connection_call_sync(
+        g_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
+        g_variant_new("(s)", kInstanceName), G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr);
+    if (!reply) return false;  // nobody owns it yet
+    const gchar* owner = nullptr;
+    g_variant_get(reply, "(&s)", &owner);
+    bool remote = g_strcmp0(owner, g_dbus_connection_get_unique_name(g_bus)) != 0;
+    g_variant_unref(reply);
+    return remote;
+}
+
+// The launcher's activation token lets the receiving window take focus
+// (xdg-activation on Wayland, startup notification on X11)
+LRESULT sendRemoteCopyData(const COPYDATASTRUCT& data) {
+    if (!g_bus) return FALSE;
+    const char* token = g_getenv("XDG_ACTIVATION_TOKEN");
+    if (!token) token = g_getenv("DESKTOP_STARTUP_ID");
+    GVariant* bytes = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, data.lpData, data.lpData ? data.cbData : 0, 1);
+    GVariant* reply = g_dbus_connection_call_sync(
+        g_bus, kInstanceName, kInstancePath, "org.tinta.Instance", "CopyData",
+        g_variant_new("(t@ays)", static_cast<guint64>(data.dwData), bytes, token ? token : ""), G_VARIANT_TYPE("(b)"),
+        G_DBUS_CALL_FLAGS_NO_AUTO_START, 15000, nullptr, nullptr);
+    if (!reply) return FALSE;
+    gboolean handled = FALSE;
+    g_variant_get(reply, "(b)", &handled);
+    g_variant_unref(reply);
+    return handled;
+}
+
+void present(HWND hwnd) {
+    Native* n = nativeOf(hwnd);
+    if (!n) return;
+    if (!g_startupId.empty()) gtk_window_set_startup_id(n->window, g_startupId.c_str());
+    gtk_window_present(n->window);
 }
 
 void createWindow(HWND hwnd) {

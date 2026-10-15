@@ -459,7 +459,10 @@ def main():
         env = dict(os.environ)
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("DISPLAY", None)
-        cmd = [xvfb, "-a", "-s", "-screen 0 1600x1200x24", sys.executable, os.path.abspath(__file__),
+        # A private session bus too: Tinta is single-instance over D-Bus, and
+        # must neither join nor host the user's own Tinta
+        env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        cmd = ["dbus-run-session", "--", xvfb, "-a", "-s", "-screen 0 1600x1200x24", sys.executable, os.path.abspath(__file__),
                args.tinta, args.doc, "--out", args.out, "--size", args.size, "--scale", str(args.scale), "--marker", args.marker, "--inner"]
         return subprocess.run(cmd, env=env).returncode
     results = run(args)

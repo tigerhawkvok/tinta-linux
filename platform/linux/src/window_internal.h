@@ -24,6 +24,7 @@ struct HWND__ {
     bool destroyed = false;
     bool dirty = false;    // needs WM_PAINT (InvalidateRect until BeginPaint)
     void* native = nullptr;  // the GTK side (gtk_window.cpp), when interactive
+    bool remote = false;     // another process's Tinta window (single instance)
 };
 
 // WM_DROPFILES' handle: the paths, in drop order; DragFinish frees it
@@ -75,6 +76,13 @@ bool clipboardHasText();
 bool clipboardIsLocal();  // this process set the current clipboard
 bool fileDialog(OPENFILENAMEW* ofn, bool save);
 int messageBox(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type);
+
+// Single instance across processes: the first interactive Tinta owns a
+// session-bus name; FindWindow in later ones returns a stand-in HWND whose
+// WM_COPYDATA travels there (with the launcher's activation token)
+bool remoteInstanceExists();
+LRESULT sendRemoteCopyData(const COPYDATASTRUCT& data);
+void present(HWND hwnd);  // raise and focus (SetForegroundWindow)
 
 }  // namespace gtk
 }  // namespace tinta

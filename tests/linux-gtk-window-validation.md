@@ -175,6 +175,44 @@ was away and unlocked the session for them.
   - With the drop target disabled, that check fails.
 - **`TINTA_TRACE_GTK=1`** logs the GDK display type and, per resize, the
   scale and pixel size. The desktop and scale checks rely on it.
+- **Single instance** (`tests/linux_render/instance_check.py`, on a private
+  bus and Xvfb).
+  - How it works:
+    - Every interactive Tinta queues for `org.tinta.Instance` on the session
+      bus.
+    - In a later process, `FindWindowW(L"Tinta")` returns a stand-in `HWND`
+      (invisible, without a rectangle) whose `WM_COPYDATA` becomes a D-Bus
+      call. The owner re-sends it to its window.
+    - The launcher's `XDG_ACTIVATION_TOKEN` comes along so the window may
+      take focus. The desktop file now says `StartupNotify=true`.
+    - Copies that arrive inside a dialog's nested loop wait for it to end.
+  - Results, 4/4:
+    - A second launch exits 0 in 64 ms, and the first window's title names
+      the new file.
+    - A `--render-png` run while a window is up is not routed.
+    - `--cascade` still opens its own window.
+    - After the owner exits, the next launch takes over.
+  - Mutation: without the remote detection, the second launch opens its own
+    window and "joins" fails.
+  - `gui_check.py` now runs under `dbus-run-session` too, so that tests
+    never join, or host, the user's Tinta.
+- **`--register` and the first-run "default viewer?" prompt**
+  (`desktop_integration.cpp`; ctest `linux_register`, in private XDG
+  folders). They write:
+  - `applications/tinta.desktop`, whose Exec is the AppImage (`$APPIMAGE`)
+    or the binary, quoted per the Desktop Entry spec
+  - hicolor icons
+  - a `text/vnd.mermaid` package for `*.mmd`, then refresh the MIME and
+    desktop databases
+  - Tinta as the default for `text/markdown`, `text/x-markdown` and
+    `text/vnd.mermaid` in `mimeapps.list`, keeping the user's other entries
+    and comments
+
+  The check passes, and GLib's `gio mime text/markdown` names
+  `tinta.desktop`. Without the `mimeapps.list` write it fails. The prompt
+  and confirmation use Linux wording (`fileassoc.linux.*`, in English,
+  Chinese, Japanese, Korean, German, French and Italian), and the Windows
+  "open Settings" step is skipped.
 
 ## Not covered yet
 
@@ -184,8 +222,8 @@ was away and unlocked the session for them.
   `gdk_keyval_to_unicode`; there is no `GtkIMContext` yet (phase 3).
 - **Clipboard:** only text crosses to the desktop, not HTML, PNG or TSV.
   OLE clipboard snapshots stay in-process.
-- **Not wired yet:** the tab-drag ghost and tear-off windows (phase 4),
-  single instance (each launch is a new process), and print dialogs.
+- **Not wired yet:** the tab-drag ghost and tear-off windows (phase 4), and
+  print dialogs.
 - **GtkFileDialog and GtkAlertDialog** are written but not driven by the
   checker (no MessageBox path in the fixture, and Xvfb has no portal).
 - **The AppImage's system floor**, measured with `objdump -T` over every

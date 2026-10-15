@@ -34,6 +34,7 @@ add_library(tinta_compat STATIC
     ${TINTA_LINUX_DIR}/src/win32_window.cpp
     ${TINTA_LINUX_DIR}/src/gtk_window.cpp
     ${TINTA_LINUX_DIR}/src/win32_system.cpp
+    ${TINTA_LINUX_DIR}/src/desktop_integration.cpp
 )
 target_include_directories(tinta_compat PUBLIC ${TINTA_LINUX_DIR}/include)
 target_compile_definitions(tinta_compat PUBLIC UNICODE _UNICODE NOMINMAX)
@@ -42,7 +43,8 @@ target_link_libraries(tinta_compat PUBLIC PkgConfig::GLIB PkgConfig::PANGOCAIRO 
 # Bundled fonts (Selawik for Segoe UI): found beside an installed binary in
 # share/tinta/fonts, or in the source tree when run from a build
 target_compile_definitions(tinta_compat PRIVATE
-    TINTA_SOURCE_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts")
+    TINTA_SOURCE_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts"
+    TINTA_SOURCE_ICON_DIR="${TINTA_LINUX_DIR}/data/icons")
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/ DESTINATION share/tinta/fonts COMPONENT tinta)
 # Desktop integration; the icons come from resources/tinta.ico. The desktop
 # file name matches the GTK program name (Wayland app id, WM_CLASS)
@@ -147,6 +149,12 @@ if(BUILD_TESTING)
             --exportpdf ${CMAKE_BINARY_DIR}/linux-render/ctest-math.pdf)
     set_tests_properties(linux_headless_pdf PROPERTIES
         ENVIRONMENT "XDG_CONFIG_HOME=${TINTA_SMOKE_HOME}/config;XDG_CACHE_HOME=${TINTA_SMOKE_HOME}/cache;XDG_DATA_HOME=${TINTA_SMOKE_HOME}/data")
+
+    # --register: desktop entry, icons, .mmd MIME type and mimeapps.list,
+    # all in private XDG folders
+    add_test(NAME linux_register COMMAND ${CMAKE_COMMAND} -DTINTA=$<TARGET_FILE:tinta>
+        -DHOME_DIR=${CMAKE_BINARY_DIR}/linux-render/.register-home
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/register_check.cmake)
 
     # The GTK window driven with real X input on a private Xvfb server
     # (tests/linux_render/gui_check.py): needs xvfb-run and a Python with Pillow

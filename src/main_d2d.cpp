@@ -2087,8 +2087,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     if (forceRegister) {
         if (registerFileAssociation()) {
             MessageBoxW(nullptr,
-                       tr(app, "fileassoc.done_body"),
-                       tr(app, "fileassoc.done_title"),
+                       tr(app, TINTA_FILEASSOC_DONE_BODY),
+                       tr(app, TINTA_FILEASSOC_DONE_TITLE),
                        MB_OK | MB_ICONINFORMATION);
             openDefaultAppsSettings();
         } else {

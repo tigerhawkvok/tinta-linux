@@ -489,6 +489,11 @@ static bool hasRegisteredFileAssociation(std::wstring_view extension) {
 }
 
 bool registerFileAssociation() {
+#ifndef _WIN32
+    // Linux: a desktop entry, icons, the .mmd MIME type and the defaults in
+    // mimeapps.list instead of these registry keys
+    return tintaRegisterDesktopApp();
+#else
     // Get the path to the current executable
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -574,10 +579,14 @@ bool registerFileAssociation() {
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 
     return true;
+#endif
 }
 
+// Linux: registering already made Tinta the default; nothing to open
 void openDefaultAppsSettings() {
+#ifdef _WIN32
     ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps", nullptr, nullptr, SW_SHOWNORMAL);
+#endif
 }
 
 void askAndRegisterFileAssociation(Settings& settings) {
@@ -619,7 +628,7 @@ void askAndRegisterFileAssociation(Settings& settings) {
 
     int result = MessageBoxW(
         nullptr,
-        tr(lang, "fileassoc.ask_body"),
+        tr(lang, TINTA_FILEASSOC_ASK_BODY),
         tr(lang, "fileassoc.title"),
         MB_YESNO | MB_ICONQUESTION
     );
@@ -627,8 +636,8 @@ void askAndRegisterFileAssociation(Settings& settings) {
     if (result == IDYES) {
         if (registerFileAssociation()) {
             MessageBoxW(nullptr,
-                       tr(lang, "fileassoc.done_body"),
-                       tr(lang, "fileassoc.done_title"),
+                       tr(lang, TINTA_FILEASSOC_DONE_BODY),
+                       tr(lang, TINTA_FILEASSOC_DONE_TITLE),
                        MB_OK | MB_ICONINFORMATION);
             openDefaultAppsSettings();
         } else {

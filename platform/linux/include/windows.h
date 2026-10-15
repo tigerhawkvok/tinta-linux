@@ -233,6 +233,10 @@ ULONGLONG GetTickCount64();
 SHORT GetKeyState(int virtualKey);
 void tintaSetKeyState(int virtualKey, bool down);
 
+// Linux's registerFileAssociation: a desktop entry, icons, the .mmd MIME
+// type and Tinta as the default viewer (desktop_integration.cpp)
+bool tintaRegisterDesktopApp();
+
 // Windows, GDI, files, clipboard, dialogs, shell, registry
 #include "tinta_win32.h"
 // COM, OLE and the shell (no-op while tinta_com.h is including this file)

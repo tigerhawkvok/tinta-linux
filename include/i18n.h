@@ -59,4 +59,16 @@ void loadLanguageOverrides();
 // with its English text) on first use, then opens the file
 void openLanguagesIniFile();
 
+// File-association texts: Windows hands the choice to Settings, Linux makes
+// Tinta the default directly (platform/linux/src/desktop_integration.cpp)
+#ifdef _WIN32
+#define TINTA_FILEASSOC_ASK_BODY "fileassoc.ask_body"
+#define TINTA_FILEASSOC_DONE_TITLE "fileassoc.done_title"
+#define TINTA_FILEASSOC_DONE_BODY "fileassoc.done_body"
+#else
+#define TINTA_FILEASSOC_ASK_BODY "fileassoc.linux.ask_body"
+#define TINTA_FILEASSOC_DONE_TITLE "fileassoc.title"
+#define TINTA_FILEASSOC_DONE_BODY "fileassoc.linux.done_body"
+#endif
+
 #endif // TINTA_I18N_H

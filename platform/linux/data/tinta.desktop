@@ -10,3 +10,4 @@ Categories=Office;Viewer;
 MimeType=text/markdown;text/x-markdown;
 Keywords=markdown;md;mermaid;viewer;editor;
 StartupWMClass=tinta
+StartupNotify=true

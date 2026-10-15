@@ -469,6 +469,7 @@ BOOL IsWindow(HWND hwnd) { return hwnd && !hwnd->destroyed; }
 
 BOOL SetForegroundWindow(HWND hwnd) {
     state().foreground = hwnd;
+    if (hwnd && hwnd->native) tinta::gtk::present(hwnd);
     return TRUE;
 }
 
@@ -477,20 +478,43 @@ HWND SetFocus(HWND hwnd) { return hwnd; }
 HWND GetFocus() { return state().foreground; }
 HWND GetAncestor(HWND hwnd, UINT) { return hwnd; }
 
-// Windows of this process only: other Tinta processes are reached over
-// D-Bus once the window layer exists (PLAN.md section 3)
-HWND FindWindowExW(HWND, HWND after, LPCWSTR className, LPCWSTR windowName) {
-    std::lock_guard<std::mutex> lock(state().mutex);
-    bool passed = after == nullptr;
-    for (HWND w : state().windows) {
-        if (!passed) {
-            passed = w == after;
-            continue;
-        }
-        if (w->destroyed) continue;
-        if (className && w->className != className) continue;
-        if (windowName && w->title != windowName) continue;
+namespace {
+// The Tinta window of another (interactive) process, reached over D-Bus:
+// invisible and without a rectangle, so only WM_COPYDATA does anything
+HWND__* remoteTinta() {
+    static HWND__ window = [] {
+        HWND__ w;
+        w.className = L"Tinta";
+        w.title = L"Tinta";
+        w.rect = {0, 0, 0, 0};
+        w.remote = true;
         return w;
+    }();
+    return &window;
+}
+}  // namespace
+
+// This process's windows, then (for the "Tinta" class) the single-instance
+// owner in another process, if one is running
+HWND FindWindowExW(HWND, HWND after, LPCWSTR className, LPCWSTR windowName) {
+    if (after && after->remote) return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        bool passed = after == nullptr;
+        for (HWND w : state().windows) {
+            if (!passed) {
+                passed = w == after;
+                continue;
+            }
+            if (w->destroyed) continue;
+            if (className && w->className != className) continue;
+            if (windowName && w->title != windowName) continue;
+            return w;
+        }
+    }
+    if (className && wcscmp(className, L"Tinta") == 0 && !windowName && tinta::gtk::active() &&
+        tinta::gtk::remoteInstanceExists()) {
+        return remoteTinta();
     }
     return nullptr;
 }
@@ -664,6 +688,10 @@ BOOL PostMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 LRESULT SendMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (hwnd && hwnd->remote) {
+        if (msg != WM_COPYDATA || !lParam) return 0;
+        return tinta::gtk::sendRemoteCopyData(*reinterpret_cast<const COPYDATASTRUCT*>(lParam));
+    }
     if (!hwnd || !hwnd->proc) return 0;
     return hwnd->proc(hwnd, msg, wParam, lParam);
 }
