@@ -2342,6 +2342,29 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     y += blockHeight + 14 * scale;
 }
 
+// The lowest drawn content laid out since `since` (text, rectangles, lines,
+// shapes, connectors, bitmaps), or `startY` when there is none
+static float contentBottomSince(const App& app, const LayoutSnapshot& since, float startY) {
+    float bottom = startY;
+    for (size_t i = since.textRuns; i < app.layoutTextRuns.size(); ++i)
+        bottom = std::max(bottom, app.layoutTextRuns[i].bounds.bottom);
+    for (size_t i = since.textRects; i < app.textRects.size(); ++i)
+        bottom = std::max(bottom, app.textRects[i].rect.bottom);
+    for (size_t i = since.rects; i < app.layoutRects.size(); ++i)
+        bottom = std::max(bottom, app.layoutRects[i].rect.bottom);
+    for (size_t i = since.lines; i < app.layoutLines.size(); ++i) {
+        const auto& line = app.layoutLines[i];
+        bottom = std::max(bottom, std::max(line.p1.y, line.p2.y) + line.stroke / 2);
+    }
+    for (size_t i = since.shapes; i < app.layoutShapes.size(); ++i)
+        bottom = std::max(bottom, app.layoutShapes[i].rect.bottom);
+    for (size_t i = since.connectors; i < app.layoutConnectors.size(); ++i)
+        bottom = std::max(bottom, app.layoutConnectors[i].bounds.bottom);
+    for (size_t i = since.bitmaps; i < app.layoutBitmaps.size(); ++i)
+        bottom = std::max(bottom, app.layoutBitmaps[i].destRect.bottom);
+    return bottom;
+}
+
 static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     float quoteIndent = 20.0f * scale;
@@ -2387,23 +2410,7 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     // Child layout advances y past its trailing margin. Keep that spacing
     // outside the bar, without moving the next block. Use retained content
     // bounds so nested quotes, code padding, tables and math stay covered.
-    float contentBottom = startY;
-    for (size_t i = contentStart.textRuns; i < app.layoutTextRuns.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutTextRuns[i].bounds.bottom);
-    for (size_t i = contentStart.textRects; i < app.textRects.size(); ++i)
-        contentBottom = std::max(contentBottom, app.textRects[i].rect.bottom);
-    for (size_t i = contentStart.rects; i < app.layoutRects.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutRects[i].rect.bottom);
-    for (size_t i = contentStart.lines; i < app.layoutLines.size(); ++i) {
-        const auto& line = app.layoutLines[i];
-        contentBottom = std::max(contentBottom, std::max(line.p1.y, line.p2.y) + line.stroke / 2);
-    }
-    for (size_t i = contentStart.shapes; i < app.layoutShapes.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutShapes[i].rect.bottom);
-    for (size_t i = contentStart.connectors; i < app.layoutConnectors.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutConnectors[i].bounds.bottom);
-    for (size_t i = contentStart.bitmaps; i < app.layoutBitmaps.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutBitmaps[i].destRect.bottom);
+    float contentBottom = contentBottomSince(app, contentStart, startY);
 
     app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
 }
@@ -2412,9 +2419,17 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
     int itemNum = elem->start;
+    // Items stand apart: at least half a body line between them, so a list
+    // of one-liners advances 1.5 lines per item while an item's own wrapped
+    // lines keep the paragraph pitch. Space an item already leaves below its
+    // content (a paragraph's, quote's or code block's margin) counts toward
+    // it, so loose lists and block-ending items are not spaced twice.
+    float itemGap = 0.5f * app.textFormat->GetFontSize() * 1.7f;
+    float trailingMargin = -1.0f;  // after the previous item; < 0 before the first
 
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
+        if (trailingMargin >= 0.0f) y += std::max(0.0f, itemGap - trailingMargin);
 
         if (child->isTask) {
             // Task item: a clickable checkbox replaces the bullet
@@ -2470,6 +2485,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         }
 
         float itemStartY = y;
+        const LayoutSnapshot itemStart = takeSnapshot(app);
         if (hasBlockChildren) {
             std::vector<ElementPtr> inlineElements, blockElements;
             for (const auto& itemChild : child->children) {
@@ -2501,6 +2517,8 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         if (y < itemStartY + 28 * scale) {
             y = itemStartY + 28 * scale;
         }
+        // The space the item already leaves below its content
+        trailingMargin = std::max(0.0f, y - contentBottomSince(app, itemStart, itemStartY));
     }
     y += 8 * scale;
 }

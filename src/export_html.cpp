@@ -1413,6 +1413,9 @@ std::string themeCss(const App& app, const std::string& bodyFont,
            ";margin:24px 0;}";
     css += "img{max-width:100%;}";
     css += "li.task{list-style:none;margin-left:-20px;}";
+    // As in the viewer: half a line (of 1.6em) between list items; a loose
+    // item's paragraph margin collapses into it rather than adding
+    css += "li+li{margin-top:0.8em;}";
     css += ".diagram{text-align:center;margin:1em 0;overflow-x:auto;}";
     css += ".math-display{text-align:center;margin:1em 0;}";
     css += ".math-inline svg{vertical-align:middle;}";

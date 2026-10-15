@@ -184,6 +184,12 @@ if(BUILD_TESTING)
             ENVIRONMENT "GDK_BACKEND=x11;WAYLAND_DISPLAY=;GSK_RENDERER=cairo" TIMEOUT 60)
     endif()
 
+    # List items stand apart (render.cpp layoutList)
+    add_executable(list_spacing_tests tests/list_spacing_tests.cpp)
+    target_include_directories(list_spacing_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(list_spacing_tests PRIVATE tinta_core)
+    add_test(NAME list_spacing COMMAND list_spacing_tests)
+
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     target_link_libraries(keymap_tests PRIVATE tinta_compat)
