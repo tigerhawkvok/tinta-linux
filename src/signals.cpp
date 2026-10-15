@@ -359,7 +359,7 @@ void renderSignalChips(App& app) {
     IDWriteTextFormat* fmt = app.folderBrowserFormat;
     float margin = dpi(app, 14.0f);
     float bottom = (float)app.height - margin -
-                   (app.showStats ? dpi(app, 55.0f) : 0.0f);
+                   (app.showStats ? statsOverlayHeight(app) + dpi(app, 5.0f) : 0.0f);
     float right = (float)app.width - margin;
 
     // The unsaved-exit / create-file prompt chip owns the corner slot

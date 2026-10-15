@@ -78,14 +78,14 @@ def isolated_env(home, theme, themes_ini):
 
 
 def render(tinta, doc, out_png, size, scale, theme, settle_ms, trace=False, repaint=0, env_extra=None,
-           themes_ini=""):
+           themes_ini="", stats=False):
     home = os.path.join(os.path.dirname(out_png), ".home", os.path.splitext(os.path.basename(out_png))[0])
     env = isolated_env(home, theme, themes_ini)
     if trace:
         env["TINTA_TRACE_WIC"] = "1"
     env.update(env_extra or {})
     args = [tinta, doc, f"--render-png={out_png}", f"--size={size}", f"--scale={scale}",
-            f"--settle-ms={settle_ms}", f"--repaint={repaint}"]
+            f"--settle-ms={settle_ms}", f"--repaint={repaint}"] + (["--stats"] if stats else [])
     start = time.monotonic()
     proc = subprocess.run(args, env=env, cwd=home, capture_output=True, text=True, timeout=120)
     wall = (time.monotonic() - start) * 1000
@@ -106,6 +106,7 @@ def main():
     parser.add_argument("--env", action="append", default=[], help="NAME=VALUE for Tinta")
     parser.add_argument("--themes-ini", default="", help="custom themes; --theme may name one")
     parser.add_argument("--pdf", action="store_true", help="also export each document with --exportpdf")
+    parser.add_argument("--stats", action="store_true", help="show the stats overlay (timings)")
     args = parser.parse_args()
 
     tinta = os.path.join(os.path.abspath(args.build), "tinta")
@@ -126,7 +127,7 @@ def main():
         code, wall, stderr = render(tinta, os.path.abspath(doc), out_png, args.size, args.scale, args.theme,
                                     args.settle_ms, args.trace, args.repaint,
                                     dict(e.split("=", 1) for e in args.env), os.path.abspath(args.themes_ini)
-                                    if args.themes_ini else "")
+                                    if args.themes_ini else "", args.stats)
         ok = code == 0 and os.path.exists(out_png)
         failures += not ok
         settle = next((l for l in stderr.splitlines() if l.startswith("render-png: settled")), "")

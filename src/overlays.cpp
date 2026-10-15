@@ -3259,7 +3259,7 @@ void renderConfirmExitDialog(App& app) {
     float h = dpi(app, 72.0f);
     float right = (float)app.width - dpi(app, 14.0f);
     float bottom = (float)app.height - dpi(app, 14.0f) -
-                   (app.showStats ? dpi(app, 55.0f) : 0.0f);
+                   (app.showStats ? statsOverlayHeight(app) + dpi(app, 5.0f) : 0.0f);
     D2D1_RECT_F r = D2D1::RectF(right - w, bottom - h, right, bottom);
 
     promptChipShadow(app, r, dpi(app, 10.0f));
@@ -3404,7 +3404,7 @@ void renderCreateRefDialog(App& app) {
     float h = dpi(app, 88.0f);
     float right = (float)app.width - dpi(app, 14.0f);
     float bottom = (float)app.height - dpi(app, 14.0f) -
-                   (app.showStats ? dpi(app, 55.0f) : 0.0f);
+                   (app.showStats ? statsOverlayHeight(app) + dpi(app, 5.0f) : 0.0f);
     D2D1_RECT_F r = D2D1::RectF(right - w, bottom - h, right, bottom);
 
     promptChipShadow(app, r, dpi(app, 10.0f));

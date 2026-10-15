@@ -2878,7 +2878,8 @@ std::unordered_map<std::string, MermanRender>& mermanRenders() {
 
 const merman_engine::Diagram& renderMerman(const std::string& source,
                                            const merman_engine::Theme& theme,
-                                           std::string& key) {
+                                           std::string& key,
+                                           DiagramMetrics* metrics = nullptr) {
     static unsigned long long clock = 0;
     key = std::to_string(std::hash<std::string>{}(
         source + '\n' + merman_engine::optionsJson(theme)));
@@ -2892,11 +2893,47 @@ const merman_engine::Diagram& renderMerman(const std::string& source,
             }
             renders.erase(oldest);
         }
+        auto t0 = Clock::now();
         it = renders.emplace(key, MermanRender{merman_engine::renderSvg(source, theme), 0}).first;
+        if (metrics) {
+            metrics->layouts++;
+            metrics->layoutUs += usElapsed(t0);
+        }
     }
     it->second.lastUsed = ++clock;
     return it->second.diagram;
 }
+
+#ifdef TINTA_MERMAN_PNG
+// merman's PNG per raster key (diagram, theme, scale). Recreating the render
+// target (the switch to the GPU after startup, a DPI change) drops every
+// device bitmap; decoding the PNG again is cheap, rendering it is not.
+// Rendered on a miss; `rendered` says whether this call did
+const std::string& mermanPng(const std::string& rasterKey, const std::string& source,
+                             const merman_engine::Theme& theme, float scale, bool& rendered) {
+    struct Entry {
+        std::string png;
+        unsigned long long lastUsed = 0;
+    };
+    static std::unordered_map<std::string, Entry> pngs;
+    static unsigned long long clock = 0;
+    auto it = pngs.find(rasterKey);
+    rendered = it == pngs.end();
+    if (rendered) {
+        if (pngs.size() >= 32) {  // drop the least recently used
+            auto oldest = pngs.begin();
+            for (auto i = pngs.begin(); i != pngs.end(); ++i) {
+                if (i->second.lastUsed < oldest->second.lastUsed) oldest = i;
+            }
+            pngs.erase(oldest);
+        }
+        std::string error;
+        it = pngs.emplace(rasterKey, Entry{merman_engine::renderPng(source, theme, scale, "", error), 0}).first;
+    }
+    it->second.lastUsed = ++clock;
+    return it->second.png;
+}
+#endif
 
 }  // namespace
 
@@ -2910,7 +2947,7 @@ static bool layoutMermanDiagram(App& app, const std::string& source,
     if (!app.d2dFactory || !app.wicFactory || !app.renderTarget) return false;
     std::string key;
     const merman_engine::Diagram& diagram =
-        renderMerman(source, mermanTheme(app), key);
+        renderMerman(source, mermanTheme(app), key, &app.diagramMetrics);
     if (!diagram.ok || diagram.width <= 0.0f || diagram.height <= 0.0f) {
         return false;
     }
@@ -2918,8 +2955,9 @@ static bool layoutMermanDiagram(App& app, const std::string& source,
     float naturalW = diagram.width * scale;
     bool wide = naturalW > maxWidth + 1.0f;
     if (fitCandidate) *fitCandidate = wide;
+    bool fitted = wide && fitBlockEnabled(app, fitKey);
     float pixelScale = scale;
-    if (wide && fitBlockEnabled(app, fitKey)) pixelScale *= maxWidth / naturalW;
+    if (fitted) pixelScale *= maxWidth / naturalW;
 
     // The screen gets one pixel per pixel. Print and PDF place the same
     // rectangle with 300 dpi worth of pixels per CSS pixel (96 dpi), within
@@ -2937,17 +2975,28 @@ static bool layoutMermanDiagram(App& app, const std::string& source,
     if (it == app.imageCache.end()) {
         App::ImageEntry entry;
         entry.failed = true;
+        DiagramMetrics& metrics = app.diagramMetrics;
+        auto t0 = Clock::now();
 #ifdef TINTA_MERMAN_PNG
-        std::string error;
-        std::string png = merman_engine::renderPng(source, mermanTheme(app),
-                                                   rasterScale, "", error);
+        bool rendered = false;
+        const std::string& png = mermanPng(rasterKey, source, mermanTheme(app),
+                                           rasterScale, rendered);
+        int64_t rasterUs = usElapsed(t0);
+        auto t1 = Clock::now();
         if (!png.empty()) decodePngBitmap(app, png, entry);
+        metrics.decodeUs += usElapsed(t1);
         entry.width = (int)diagram.width;
         entry.height = (int)diagram.height;
 #else
+        const bool rendered = true;
         rasterizeSvg(app, diagram.svg, diagram.width, diagram.height,
                      rasterScale, entry);
+        int64_t rasterUs = usElapsed(t0);
 #endif
+        if (rendered) {
+            if (metrics.rasters++ == 0) metrics.firstRasterUs = rasterUs;
+            metrics.rasterUs += rasterUs;
+        }
         app.storeImageCacheEntry(rasterKey, std::move(entry));
         it = app.imageCache.find(rasterKey);
     } else {
@@ -2963,9 +3012,24 @@ static bool layoutMermanDiagram(App& app, const std::string& source,
     // Centred in the column like native diagrams; a wide one starts at the
     // margin and scrolls sideways
     float left = indent + std::max(0.0f, (maxWidth - w) * 0.5f);
+    if (!app.printLayout) {
+        // On screen the bitmap is the device pixels it covers: give it its
+        // exact size on whole pixels, so nothing resamples (blurs) it
+        D2D1_SIZE_U px = it->second.bitmap->GetPixelSize();
+        w = (float)px.width;
+        h = (float)px.height;
+        left = std::round(left);
+        top = std::round(top);
+    }
     D2D1_RECT_F rect = D2D1::RectF(left, top, left + w, top + h);
     app.layoutBitmaps.push_back({it->second.bitmap, rect});
     if (bounds) *bounds = rect;
+    // A wide diagram the reader has not fitted scrolls sideways, as native
+    // ones do. A fitted or narrower one stays in the column: its raster may
+    // overshoot by a pixel, which the page margin absorbs
+    if (wide && !fitted) {
+        app.contentWidth = std::max(app.contentWidth, rect.right + 40.0f * scale);
+    }
     y = rect.bottom + 24.0f * scale;
     return true;
 }

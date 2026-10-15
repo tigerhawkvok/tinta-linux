@@ -39,15 +39,18 @@ int diagramCount(const App& app) {
     return n;
 }
 
-// Every diagram bitmap is drawn 1:1: its pixels match its rectangle
+// Every diagram bitmap is drawn 1:1: its pixels exactly fill its rectangle,
+// which starts on a whole pixel (anything else resamples and blurs it)
 bool drawnOneToOne(const App& app, std::string& detail) {
     for (const auto& item : app.layoutBitmaps) {
         D2D1_SIZE_U px = item.bitmap->GetPixelSize();
-        float w = item.destRect.right - item.destRect.left;
-        float h = item.destRect.bottom - item.destRect.top;
-        if (std::fabs(px.width - w) > 1.0f || std::fabs(px.height - h) > 1.0f) {
+        const D2D1_RECT_F& r = item.destRect;
+        float w = r.right - r.left;
+        float h = r.bottom - r.top;
+        if (px.width != w || px.height != h || r.left != std::round(r.left) || r.top != std::round(r.top)) {
             detail = std::to_string(px.width) + "x" + std::to_string(px.height) + " bitmap in a " +
-                     std::to_string(w) + "x" + std::to_string(h) + " rectangle";
+                     std::to_string(w) + "x" + std::to_string(h) + " rectangle at " + std::to_string(r.left) +
+                     "," + std::to_string(r.top);
             return false;
         }
     }
@@ -107,6 +110,23 @@ int main() {
     ID2D1Bitmap* after = app.layoutBitmaps.empty() ? nullptr : app.layoutBitmaps[0].bitmap.Get();
     check(before && after && before != after, "a theme change draws the diagram again");
 
+    // Recreating the render target (the switch to the GPU after startup, a
+    // DPI change) drops every device bitmap. The diagrams come back; on the
+    // PNG path from merman's cached PNG, not a second merman render
+    size_t rendersBefore = app.diagramMetrics.rasters;
+    check(createRenderTarget(app), "the render target is recreated");
+    layoutDocument(app);
+    check(app.layoutBitmaps.size() == 4,
+          "diagrams drawn again on the new render target, got " + std::to_string(app.layoutBitmaps.size()));
+#ifdef TINTA_MERMAN_PNG
+    check(app.diagramMetrics.rasters == rendersBefore,
+          "no merman render for a new render target, got " +
+              std::to_string(app.diagramMetrics.rasters - rendersBefore));
+    std::cout << "merman PNG path: render target recreation checked\n";
+#else
+    (void)rendersBefore;
+#endif
+
     // Narrow window: a wide diagram may overflow, and fit-to-width (the
     // reader's toggle) shrinks it into the column
     app.width = 420;
@@ -120,9 +140,15 @@ int main() {
     }
     check(wide != nullptr, "a diagram wider than a 420 px window offers fit-to-width");
     if (wide) {
+        // Unfitted, the page scrolls sideways to its right edge
+        check(app.contentWidth >= wide->bounds.right,
+              "a wide diagram scrolls sideways: content " + std::to_string(app.contentWidth) +
+                  " px, diagram right edge " + std::to_string(wide->bounds.right));
         float natural = wide->bounds.right - wide->bounds.left;
         unsigned key = wide->fitKey;
-        app.fitBlocks.push_back(key);
+        for (const auto& block : app.codeBlocks) {
+            if (block.isDiagram && block.fitCandidate && !block.fitActive) app.fitBlocks.push_back(block.fitKey);
+        }
         layoutDocument(app);
         const App::CodeBlockInfo* fitted = nullptr;
         for (const auto& block : app.codeBlocks) {
@@ -134,6 +160,9 @@ int main() {
                   std::to_string(width));
         oneToOne = drawnOneToOne(app, detail);
         check(oneToOne, "fitted diagrams rasterized at their device size: " + detail);
+        // With every wide diagram fitted, nothing scrolls sideways
+        check(app.contentWidth <= app.width,
+              "fitted, the page does not scroll sideways: content " + std::to_string(app.contentWidth) + " px");
     }
 
     // "Copy diagram as image" (the hover button): the first diagram is one

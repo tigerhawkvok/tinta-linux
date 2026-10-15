@@ -565,11 +565,26 @@ render_document:
             bmp.destRect.top > viewportBottom + cullMargin) continue;
         if (bmp.destRect.right < viewportLeft - cullMargin ||
             bmp.destRect.left > viewportRight + cullMargin) continue;
-        app.renderTarget->DrawBitmap(bmp.bitmap.Get(),
-            D2D1::RectF(bmp.destRect.left - app.scrollX,
-                         bmp.destRect.top - app.scrollY,
-                         bmp.destRect.right - app.scrollX,
-                         bmp.destRect.bottom - app.scrollY));
+        D2D1_RECT_F dest = D2D1::RectF(bmp.destRect.left - app.scrollX,
+                                       bmp.destRect.top - app.scrollY,
+                                       bmp.destRect.right - app.scrollX,
+                                       bmp.destRect.bottom - app.scrollY);
+        // A bitmap made for its device pixels (a diagram) is copied onto
+        // whole pixels: a fractional scroll or viewport offset, or linear
+        // filtering, would resample and blur it. Photos scale smoothly.
+        D2D1_SIZE_U px = bmp.bitmap->GetPixelSize();
+        if (std::fabs((dest.right - dest.left) - px.width) < 0.5f &&
+            std::fabs((dest.bottom - dest.top) - px.height) < 0.5f) {
+            D2D1_MATRIX_3X2_F m;
+            app.renderTarget->GetTransform(&m);
+            float x = std::round(dest.left + m._31) - m._31;
+            float y = std::round(dest.top + m._32) - m._32;
+            dest = D2D1::RectF(x, y, x + px.width, y + px.height);
+            app.renderTarget->DrawBitmap(bmp.bitmap.Get(), dest, 1.0f,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        } else {
+            app.renderTarget->DrawBitmap(bmp.bitmap.Get(), dest);
+        }
         app.drawCalls++;
     }
 
@@ -1050,9 +1065,10 @@ render_document:
     renderLinkPeek(app);
 
     if (app.showStats) {
-        wchar_t stats[768];
+        wchar_t stats[1024];
         wchar_t statsLine1[256];
         wchar_t statsLine2[512];
+        wchar_t statsLine3[256] = L"";
         swprintf_s(statsLine1, _countof(statsLine1), tr(app, "stats.line1"),
             app.parseTimeUs,
             app.layoutTimeUs,
@@ -1063,12 +1079,19 @@ render_document:
             app.metrics.d2dInitUs / 1000.0,
             app.metrics.dwriteInitUs / 1000.0,
             app.metrics.fileLoadUs / 1000.0);
-        swprintf_s(stats, _countof(stats), L"Tinta v%d.%d.%d  |  %ls\n%ls",
+        const DiagramMetrics& dm = app.diagramMetrics;
+        if (dm.layouts > 0) {
+            swprintf_s(statsLine3, _countof(statsLine3),
+                L"\nmerman \u00D7%zu: SVG %.1f ms | raster \u00D7%zu %.1f ms (1st %.1f) | decode %.1f ms",
+                dm.layouts, dm.layoutUs / 1000.0, dm.rasters, dm.rasterUs / 1000.0,
+                dm.firstRasterUs / 1000.0, dm.decodeUs / 1000.0);
+        }
+        swprintf_s(stats, _countof(stats), L"Tinta v%d.%d.%d  |  %ls\n%ls%ls",
                    TINTA_VERSION_MAJOR, TINTA_VERSION_MINOR,
-                   TINTA_VERSION_PATCH, statsLine1, statsLine2);
+                   TINTA_VERSION_PATCH, statsLine1, statsLine2, statsLine3);
 
         float statsWidth = dpi(app, 600.0f);
-        float statsHeight = dpi(app, 50.0f);
+        float statsHeight = statsOverlayHeight(app);
 
         app.brush->SetColor(D2D1::ColorF(0, 0, 0, 0.8f));
         app.renderTarget->FillRectangle(

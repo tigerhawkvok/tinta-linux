@@ -82,6 +82,16 @@ struct StartupMetrics {
     int64_t totalStartupUs = 0;
 };
 
+// Time spent on Mermaid diagrams since the window opened (stats overlay)
+struct DiagramMetrics {
+    size_t layouts = 0;         // merman SVG renders (diagram layout)
+    int64_t layoutUs = 0;
+    size_t rasters = 0;         // renders: merman PNG (Windows), librsvg (Linux)
+    int64_t rasterUs = 0;
+    int64_t firstRasterUs = 0;  // includes merman's one-time system font scan
+    int64_t decodeUs = 0;       // merman's PNG into a bitmap (Windows)
+};
+
 // Syntax highlighting token types
 enum class SyntaxTokenType { Plain, Keyword, String, Comment, Number, Function, TypeName, Operator, ControlFlow };
 
@@ -1383,6 +1393,7 @@ struct App {
 
     // Metrics
     StartupMetrics metrics;
+    DiagramMetrics diagramMetrics;
     size_t drawCalls = 0;
 
     ~App() { shutdown(); }
@@ -1500,6 +1511,13 @@ struct App {
 
 inline float dpi(const App& app, float value) {
     return value * app.contentScale;
+}
+
+// Height of the stats overlay box (0 when hidden): two lines, three once
+// diagrams have been drawn
+inline float statsOverlayHeight(const App& app) {
+    if (!app.showStats) return 0.0f;
+    return dpi(app, app.diagramMetrics.layouts > 0 ? 66.0f : 50.0f);
 }
 
 // Width of the editor pane in edit mode (full window when preview is hidden)
