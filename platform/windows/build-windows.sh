@@ -10,6 +10,8 @@
 #
 # Fetched into CACHE when missing, at pinned versions with SHA-256 checks:
 #   - llvm-mingw, for its LLVM (clang in cl mode, lld-link, llvm-lib, llvm-rc)
+#   - merman (Mermaid; set TINTA_MERMAN=OFF to skip), with rustup adding the
+#     x86_64-pc-windows-msvc target to merman's pinned toolchain
 #   - xwin, which downloads the MSVC CRT and Windows SDK from Microsoft.
 #     That download means accepting Microsoft's license terms, hence
 #     TINTA_ACCEPT_MSVC_LICENSE=1.
@@ -17,7 +19,7 @@
 # there instead of %APPDATA%\Tinta.
 set -eu
 
-[ $# -ge 1 ] || { sed -n '2,18p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,19p' "$0"; exit 2; }
 SRC=$(realpath "$(dirname "$0")/../..")
 mkdir -p "$1"
 OUT=$(realpath "$1")
@@ -65,9 +67,21 @@ if [ ! -d "$CACHE/msvc-sdk/sdk/include/um" ]; then
     rm -rf "$CACHE/xwin-cache"  # the downloaded packages; the splat is what builds use
 fi
 
+# Mermaid through merman (Rust): merman's pinned toolchain needs the MSVC
+# target's standard library (a static library: no Rust linker involved)
+MERMAN=ON
+if [ "${TINTA_MERMAN:-ON}" = OFF ]; then
+    MERMAN=OFF
+elif ! command -v rustup > /dev/null; then
+    echo "rustup not found: building without merman (TINTA_MERMAN=OFF)" >&2
+    MERMAN=OFF
+else
+    rustup target add x86_64-pc-windows-msvc --toolchain 1.95.0
+fi
+
 cmake -S "$SRC" -B "$OUT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     -DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/toolchains/clang-cl-xwin.cmake" \
-    -DTINTA_LLVM_BIN="$CACHE/bin" -DTINTA_XWIN_SDK="$CACHE/msvc-sdk"
+    -DTINTA_LLVM_BIN="$CACHE/bin" -DTINTA_XWIN_SDK="$CACHE/msvc-sdk" -DTINTA_MERMAN=$MERMAN
 cmake --build "$OUT/build" --target tinta
 cp "$OUT/build/tinta.exe" "$OUT/tinta.exe"
 

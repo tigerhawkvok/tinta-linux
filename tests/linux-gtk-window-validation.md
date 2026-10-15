@@ -232,8 +232,12 @@ was away and unlocked the session for them.
   dead_acute + e into the find field and reads back `é`. Without the input
   method step it reads `e`. Not driven here: an IBus or Fcitx session for
   CJK, and inline preedit drawing (Tinta shows the text once committed).
-- **Clipboard:** only text crosses to the desktop, not HTML, PNG or TSV.
-  OLE clipboard snapshots stay in-process.
+- **Clipboard:** text and images (copy diagram as image: its "PNG" goes out
+  as a `GdkTexture`, offered as image/png and the other image types) cross
+  to the desktop; `compat_clipboard_bridge` (Xvfb) checks both, and it fails
+  without the image publish. Pasting a desktop image into the editor
+  (`CF_BITMAP`) and TSV/HTML formats do not cross; OLE clipboard snapshots
+  stay in-process.
 - **Not wired yet:** the tab-drag ghost and tear-off windows (phase 4), and
   print dialogs.
 - **GtkFileDialog and GtkAlertDialog** are written but not driven by the

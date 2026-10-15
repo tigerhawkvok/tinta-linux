@@ -4,6 +4,8 @@
 // Fixture: tests/fixtures/mermaid-merman.md (four diagrams the native
 // parser rejects, then one invalid source).
 #include "d2d_init.h"
+#include "editor.h"  // toUtf8
+#include "export.h"
 #include "render.h"
 
 #include <cmath>
@@ -132,6 +134,26 @@ int main() {
                   std::to_string(width));
         oneToOne = drawnOneToOne(app, detail);
         check(oneToOne, "fitted diagrams rasterized at their device size: " + detail);
+    }
+
+    // "Copy diagram as image" (the hover button): the first diagram is one
+    // only merman draws; the clipboard gets its PNG and a CF_DIB
+    const App::CodeBlockInfo* first = nullptr;
+    for (const auto& block : app.codeBlocks) {
+        if (block.isDiagram) {
+            first = &block;
+            break;
+        }
+    }
+    check(first && copyDiagramImage(app, app.hwnd, toUtf8(first->codeText)), "copy diagram as image");
+    if (OpenClipboard(app.hwnd)) {
+        HANDLE png = GetClipboardData(RegisterClipboardFormatW(L"PNG"));
+        const auto* bytes = png ? static_cast<const unsigned char*>(GlobalLock(png)) : nullptr;
+        check(bytes && GlobalSize(png) > 1000 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G',
+              "the clipboard holds the diagram as PNG");
+        if (bytes) GlobalUnlock(png);
+        check(IsClipboardFormatAvailable(CF_DIB), "and as CF_DIB");
+        CloseClipboard();
     }
 
     DestroyWindow(app.hwnd);

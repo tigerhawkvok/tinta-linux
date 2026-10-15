@@ -49,3 +49,6 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 
 # xwin fetches release libraries only (no msvcrtd.lib)
 set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
+
+# merman (TINTA_MERMAN) builds for the same target through Corrosion
+set(Rust_CARGO_TARGET x86_64-pc-windows-msvc)

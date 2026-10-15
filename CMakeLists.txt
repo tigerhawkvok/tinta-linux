@@ -162,6 +162,16 @@ target_compile_definitions(tinta PRIVATE UNICODE _UNICODE
     TINTA_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     TINTA_VERSION_PATCH=${PROJECT_VERSION_PATCH})
 
+# Mermaid through merman (docs/linux-port/PLAN.md §6, MM5): needs rustup and
+# the x86_64-pc-windows-msvc target; drawn from merman's PNG on Windows.
+# platform/windows/build-windows.sh turns it on for the cross build.
+option(TINTA_MERMAN "Render Mermaid with merman (needs rustup)" OFF)
+if(TINTA_MERMAN)
+    include(cmake/merman.cmake)
+    target_sources(tinta PRIVATE src/merman_engine.cpp)
+    target_link_libraries(tinta PRIVATE tinta_merman)
+endif()
+
 if(BUILD_TESTING)
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)

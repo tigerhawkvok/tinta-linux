@@ -172,6 +172,18 @@ if(BUILD_TESTING)
         set_tests_properties(linux_gtk_window PROPERTIES TIMEOUT 120)
     endif()
 
+    # Win32 clipboard -> GdkClipboard (text, and PNG as an image), on Xvfb
+    add_executable(clipboard_bridge_tests ${TINTA_LINUX_DIR}/tests/clipboard_bridge_tests.cpp)
+    target_include_directories(clipboard_bridge_tests PRIVATE ${TINTA_LINUX_DIR}/src)
+    target_link_libraries(clipboard_bridge_tests PRIVATE tinta_compat)
+    if(TINTA_XVFB_RUN)
+        add_test(NAME compat_clipboard_bridge
+            COMMAND ${TINTA_XVFB_RUN} -a $<TARGET_FILE:clipboard_bridge_tests>)
+        # X11 only: the user's own Wayland session must never be touched
+        set_tests_properties(compat_clipboard_bridge PROPERTIES
+            ENVIRONMENT "GDK_BACKEND=x11;WAYLAND_DISPLAY=;GSK_RENDERER=cairo" TIMEOUT 60)
+    endif()
+
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     target_link_libraries(keymap_tests PRIVATE tinta_compat)

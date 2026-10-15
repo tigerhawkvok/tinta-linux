@@ -852,6 +852,16 @@ bool charForKey(const MSG& msg, std::vector<wchar_t>& out) {
 // ---- Clipboard -------------------------------------------------------------------------------
 void publishClipboardText(const std::wstring& text) { gdk_clipboard_set_text(clipboard(), toUtf8(text).c_str()); }
 
+// As a texture: GDK offers it as image/png and the other image types
+void publishClipboardImage(const std::string& png) {
+    GBytes* bytes = g_bytes_new(png.data(), png.size());
+    GdkTexture* texture = gdk_texture_new_from_bytes(bytes, nullptr);
+    g_bytes_unref(bytes);
+    if (!texture) return;
+    gdk_clipboard_set_texture(clipboard(), texture);
+    g_object_unref(texture);
+}
+
 bool clipboardIsLocal() { return gdk_clipboard_is_local(clipboard()); }
 
 bool clipboardHasText() {

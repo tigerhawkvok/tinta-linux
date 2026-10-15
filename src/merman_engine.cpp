@@ -128,6 +128,29 @@ public:
         return diagram;
     }
 
+    // PNG bytes (merman's resvg raster), or empty with `error` set
+    std::string png(std::string_view source, const std::string& options, std::string& error) {
+        if (!engine_) {
+            error = error_;
+            return {};
+        }
+        MermanNativeOperationRequest request{};
+        request.struct_size = MERMAN_NATIVE_STRUCT_SIZE(MermanNativeOperationRequest);
+        request.operation = MERMAN_NATIVE_OPERATION_PNG;
+        request.source = slice(source.data(), source.size());
+        request.uri = slice(nullptr, 0);
+        request.options_json = slice(options.data(), options.size());
+        MermanNativeResult result = MERMAN_NATIVE_RESULT_INIT;
+        std::string bytes;
+        if (api_.execute_collect(engine_, &request, &result) == MERMAN_NATIVE_STATUS_OK) {
+            bytes = bufferText(result.data);
+        } else {
+            error = failureMessage(bufferText(result.metadata_or_error_json));
+        }
+        api_.result_free(&result);
+        return bytes;
+    }
+
 private:
     MermanNativeApi api_{};
     MermanNativeEngineToken engine_ = 0;
@@ -483,6 +506,19 @@ Diagram renderSvg(std::string_view source, const Theme& theme) {
 Diagram renderParitySvg(std::string_view source, const Theme& theme) {
     std::lock_guard<std::mutex> lock(engineMutex());
     return engine().svg(source, optionsJson(theme, "parity"));
+}
+
+std::string renderPng(std::string_view source, const Theme& theme, float scale, const std::string& background,
+                      std::string& error) {
+    std::string options = optionsJson(theme, "resvg-safe");
+    char raster[96];
+    std::snprintf(raster, sizeof raster, "{\"raster\":{\"scale\":%g,\"background\":", scale);
+    std::string group = raster;
+    appendJsonString(group, background.empty() ? std::string("transparent") : background);
+    group += "},";
+    options.replace(0, 1, group);  // into the top-level object
+    std::lock_guard<std::mutex> lock(engineMutex());
+    return engine().png(source, options, error);
 }
 
 }  // namespace merman_engine

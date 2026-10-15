@@ -2708,6 +2708,48 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
     return rasterizeSvg(app, bytes, svgW, svgH, 2.0f, entry);
 }
 
+#ifdef TINTA_MERMAN_PNG
+// PNG bytes into the entry's bitmap (merman's raster: Windows, where
+// Direct2D's SVG renderer draws no <text>)
+static bool decodePngBitmap(App& app, const std::string& png,
+                            App::ImageEntry& entry) {
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    ID2D1Bitmap* bitmap = nullptr;
+    UINT w = 0, h = 0;
+    bool ok =
+        SUCCEEDED(app.wicFactory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(
+            reinterpret_cast<BYTE*>(const_cast<char*>(png.data())),
+            (DWORD)png.size())) &&
+        SUCCEEDED(app.wicFactory->CreateDecoderFromStream(
+            stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+        SUCCEEDED(app.wicFactory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
+                                        WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeMedianCut)) &&
+        SUCCEEDED(converter->GetSize(&w, &h)) &&
+        SUCCEEDED(app.renderTarget->CreateBitmapFromWicBitmap(converter, nullptr,
+                                                              &bitmap)) &&
+        bitmap;
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    if (!ok) {
+        if (bitmap) bitmap->Release();
+        return false;
+    }
+    entry.bitmap.Attach(bitmap);
+    entry.bytes = (size_t)w * h * 4;
+    entry.failed = false;
+    return true;
+}
+#endif
+
 #ifdef TINTA_MERMAN
 // ---- Mermaid through merman (docs/linux-port/PLAN.md §6) --------------------
 namespace {
@@ -2790,7 +2832,14 @@ merman_engine::Theme mermanTheme(App& app) {
                            cssColor(t.syntaxNumber), cssColor(t.syntaxFunction),
                            cssColor(t.syntaxType), cssColor(t.syntaxKeyword),
                            cssColor(t.link), cssColor(t.heading)};
-    theme.fontFamily = installedFamily(app, t.fontFamily);
+    // The theme's face first (unchanged wherever it exists), then faces Tinta
+    // ships or Linux usually has: merman's own raster (Windows) finds only
+    // system fonts, and draws no label in a face it cannot find
+    std::string family = installedFamily(app, t.fontFamily);
+    theme.fontFamily = family;
+    for (const char* fallback : {"Selawik", "Noto Sans", "DejaVu Sans", "sans-serif"}) {
+        if (family != fallback) theme.fontFamily += std::string(", ") + fallback;
+    }
     float scale = app.contentScale * app.zoomFactor;
     theme.fontSize = app.textFormat && scale > 0.0f
                          ? app.textFormat->GetFontSize() / scale
@@ -2870,8 +2919,17 @@ static bool layoutMermanDiagram(App& app, const std::string& source,
     if (it == app.imageCache.end()) {
         App::ImageEntry entry;
         entry.failed = true;
+#ifdef TINTA_MERMAN_PNG
+        std::string error;
+        std::string png = merman_engine::renderPng(source, mermanTheme(app),
+                                                   rasterScale, "", error);
+        if (!png.empty()) decodePngBitmap(app, png, entry);
+        entry.width = (int)diagram.width;
+        entry.height = (int)diagram.height;
+#else
         rasterizeSvg(app, diagram.svg, diagram.width, diagram.height,
                      rasterScale, entry);
+#endif
         app.storeImageCacheEntry(rasterKey, std::move(entry));
         it = app.imageCache.find(rasterKey);
     } else {
@@ -3545,6 +3603,19 @@ bool mermanDiagramSvg(App& app, const std::string& source, bool forBrowsers,
     height = diagram.height;
     return true;
 }
+
+#ifdef TINTA_MERMAN_PNG
+bool mermanDiagramPng(App& app, const std::string& source, float scale,
+                      D2D1_COLOR_F background, std::string& png, float& width,
+                      float& height) {
+    std::string svg;
+    if (!mermanDiagramSvg(app, source, false, svg, width, height)) return false;
+    std::string error;
+    png = merman_engine::renderPng(source, mermanTheme(app), scale,
+                                   cssColor(background), error);
+    return !png.empty();
+}
+#endif
 #endif
 
 namespace {

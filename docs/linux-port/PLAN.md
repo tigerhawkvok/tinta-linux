@@ -426,7 +426,7 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
 | MM2 | Pango text-measurement callback | nothing; Pango works headless |
 | MM3 | Hook into `layoutCodeBlock`, HTML and DOCX export behind `TINTA_MERMAN`, with merman → native → code fallback | **done** (2026-10-14): viewer, print, PDF, HTML (parity SVG) and DOCX (PNG) |
 | MM4 | Search and selection rects from the SVG labels | MM3 |
-| MM5 | Windows: MSVC build of merman, DirectWrite measurement, async PNG | a Windows machine |
+| MM5 | Windows: MSVC build of merman, DirectWrite measurement, async PNG | **cross-built and drawing (PNG path) under Wine** (2026-10-15); measurement, async rendering and a real Windows check remain |
 
 What this supersedes:
 

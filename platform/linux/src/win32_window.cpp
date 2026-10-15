@@ -871,23 +871,37 @@ BOOL OpenClipboard(HWND hwnd) {
     return TRUE;
 }
 
+// What this process put on the clipboard reaches the desktop: an image when
+// there is a "PNG" (Tinta's copy-diagram-as-image), else the text
 BOOL CloseClipboard() {
     if (!tinta::gtk::active()) return TRUE;
     std::wstring text;
+    std::string png;
     bool publish = false;
     {
         std::lock_guard<std::mutex> lock(state().mutex);
+        publish = g_clipboardChanged;
+        g_clipboardChanged = false;
+        auto pngFormat = state().clipboardFormats.find(L"PNG");
+        auto image = pngFormat == state().clipboardFormats.end() ? state().clipboard.end()
+                                                                 : state().clipboard.find(pngFormat->second);
         auto it = state().clipboard.find(CF_UNICODETEXT);
-        publish = g_clipboardChanged && it != state().clipboard.end();
-        if (publish) {
+        if (publish && image != state().clipboard.end()) {
+            if (auto* bytes = static_cast<const char*>(GlobalLock(image->second))) {
+                png.assign(bytes, GlobalSize(image->second));
+                GlobalUnlock(image->second);
+            }
+        } else if (publish && it != state().clipboard.end()) {
             if (auto* chars = static_cast<const wchar_t*>(GlobalLock(it->second))) {
                 text.assign(chars, wcsnlen(chars, GlobalSize(it->second) / sizeof(wchar_t)));
                 GlobalUnlock(it->second);
             }
+        } else {
+            publish = false;
         }
-        g_clipboardChanged = false;
     }
-    if (publish) tinta::gtk::publishClipboardText(text);
+    if (publish && !png.empty()) tinta::gtk::publishClipboardImage(png);
+    else if (publish) tinta::gtk::publishClipboardText(text);
     return TRUE;
 }
 

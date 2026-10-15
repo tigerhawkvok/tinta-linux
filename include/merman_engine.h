@@ -40,6 +40,13 @@ Diagram renderSvg(std::string_view source, const Theme& theme);
 // foreignObject and math as browsers draw it
 Diagram renderParitySvg(std::string_view source, const Theme& theme);
 
+// merman's own raster (resvg; the "png" Cargo feature): for Windows, where
+// Direct2D's SVG renderer draws no <text>. `scale` pixels per CSS pixel on
+// `background` (a CSS colour; empty is transparent). Empty on failure, with
+// `error` set. Math labels are not lifted here (they are in renderSvg).
+std::string renderPng(std::string_view source, const Theme& theme, float scale, const std::string& background,
+                      std::string& error);
+
 // The per-request options document: resvg-safe SVG (no foreignObject), no
 // drop shadows (100x faster through librsvg), the host theme
 std::string optionsJson(const Theme& theme);

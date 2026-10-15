@@ -530,7 +530,13 @@ void drawPrims(App& app, RasterTarget& rt, const mermaidext::Built& built,
 // Diagram source -> PNG at 2x plus its logical (1x) size
 bool diagramToPng(App& app, const std::string& source, std::string& png,
                   float& logicalWidth, float& logicalHeight) {
-#ifdef TINTA_MERMAN
+#ifdef TINTA_MERMAN_PNG
+    // merman's own raster on the theme background (Windows)
+    if (mermanDiagramPng(app, source, kRasterScale, app.theme.background, png,
+                         logicalWidth, logicalHeight)) {
+        return true;
+    }
+#elif defined(TINTA_MERMAN)
     // merman's diagram on the theme background, as native ones are drawn;
     // the native renderer below is the fallback
     {
@@ -1570,25 +1576,45 @@ bool exportDocxFile(App& app, const std::wstring& path) {
     return out.good();
 }
 
-// Rasterizes the diagram exactly like the DOCX path, then hands the pixels
-// to the clipboard as CF_DIB (universal) plus a "PNG" stream (kept by apps
-// that prefer lossless with metadata)
+// The DOCX export's image of the diagram (merman first, then native), as a
+// "PNG" stream (kept by apps that prefer lossless with metadata) plus its
+// pixels as CF_DIB (universal)
 bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
-    mermaidext::Built built = buildDiagramPrims(app, sourceUtf8, kRasterScale);
-    if (!built.ok || built.prims.empty()) return false;
-    RasterTarget rt;
-    if (!rt.open(app, built.width, built.height)) return false;
-    rt.target->BeginDraw();
-    rt.target->Clear(app.theme.background);
-    drawPrims(app, rt, built, kRasterScale);
-    if (FAILED(rt.target->EndDraw())) return false;
-
-    UINT stride = rt.width * 4;
-    std::vector<BYTE> pixels((size_t)stride * rt.height);
-    if (FAILED(rt.bitmap->CopyPixels(nullptr, stride, (UINT)pixels.size(),
-                                     pixels.data()))) {
+    std::string png;
+    float logicalWidth = 0.0f, logicalHeight = 0.0f;
+    if (!app.wicFactory ||
+        !diagramToPng(app, sourceUtf8, png, logicalWidth, logicalHeight)) {
         return false;
     }
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    UINT width = 0, height = 0;
+    std::vector<BYTE> pixels;
+    bool decoded =
+        SUCCEEDED(app.wicFactory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(
+            reinterpret_cast<BYTE*>(png.data()), (DWORD)png.size())) &&
+        SUCCEEDED(app.wicFactory->CreateDecoderFromStream(
+            stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+        SUCCEEDED(app.wicFactory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+                                        WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeMedianCut)) &&
+        SUCCEEDED(converter->GetSize(&width, &height)) && width && height;
+    if (decoded) {
+        pixels.resize((size_t)width * 4 * height);
+        decoded = SUCCEEDED(converter->CopyPixels(
+            nullptr, width * 4, (UINT)pixels.size(), pixels.data()));
+    }
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    if (!decoded) return false;
+    UINT stride = width * 4;
 
     // CF_DIB: header plus bottom-up 32bpp rows (background is opaque, so
     // the ignored alpha byte is 255 everywhere)
@@ -1598,16 +1624,16 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
     if (BYTE* out = (BYTE*)GlobalLock(dib)) {
         BITMAPINFOHEADER hdr{};
         hdr.biSize = sizeof(hdr);
-        hdr.biWidth = (LONG)rt.width;
-        hdr.biHeight = (LONG)rt.height;
+        hdr.biWidth = (LONG)width;
+        hdr.biHeight = (LONG)height;
         hdr.biPlanes = 1;
         hdr.biBitCount = 32;
         hdr.biCompression = BI_RGB;
         hdr.biSizeImage = (DWORD)pixels.size();
         memcpy(out, &hdr, sizeof(hdr));
-        for (UINT row = 0; row < rt.height; row++) {
+        for (UINT row = 0; row < height; row++) {
             memcpy(out + sizeof(hdr) + (size_t)row * stride,
-                   pixels.data() + (size_t)(rt.height - 1 - row) * stride,
+                   pixels.data() + (size_t)(height - 1 - row) * stride,
                    stride);
         }
         GlobalUnlock(dib);
@@ -1616,7 +1642,6 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
         return false;
     }
 
-    std::string png = encodeWicPng(app, rt.bitmap, rt.width, rt.height);
     HGLOBAL pngGlobal = nullptr;
     if (!png.empty()) {
         pngGlobal = GlobalAlloc(GMEM_MOVEABLE, png.size());

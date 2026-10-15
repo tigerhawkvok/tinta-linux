@@ -35,6 +35,12 @@ D2D1_COLOR_F resolveDiagramRole(const App& app, const mermaidext::Prim& prim,
 #include <string>
 bool mermanDiagramSvg(App& app, const std::string& source, bool forBrowsers, std::string& svg, float& width,
                       float& height);
+#ifdef TINTA_MERMAN_PNG
+// merman's own PNG at `scale` pixels per CSS pixel on `background`
+// (Windows: Direct2D cannot draw the SVG's text)
+bool mermanDiagramPng(App& app, const std::string& source, float scale, D2D1_COLOR_F background, std::string& png,
+                      float& width, float& height);
+#endif
 #endif
 
 #endif // TINTA_RENDER_H

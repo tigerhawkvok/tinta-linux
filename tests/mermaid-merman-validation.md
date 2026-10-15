@@ -187,7 +187,13 @@ Checked:
 - **The merman pin** is now the commit's source tarball, checked by SHA-256.
   A shallow git clone only reaches a pinned commit while it is a branch tip,
   so fresh build trees had stopped configuring.
-- ctest 47/47 with merman on.
+- **Copy diagram as image** (the diagram's hover button) used to draw native
+  primitives only, so it silently did nothing for the diagrams only merman
+  draws. It now takes the DOCX path's PNG (merman, then native) and decodes
+  it for `CF_DIB`. `merman_layout` copies the fixture's first diagram and
+  finds a PNG and a DIB on the clipboard; with merman skipped in that path,
+  all three checks fail.
+- ctest 48/48 with merman on.
 
 ## Not checked
 

@@ -52,6 +52,35 @@ toolchain file.
     viewer?" prompt shows (upstream behaviour) and blocks every run,
     exports included.
 
+## Mermaid through merman (MM5, 2026-10-15)
+
+The script builds merman into the exe (`TINTA_MERMAN=ON`; `OFF` skips it).
+Corrosion builds merman-ffi for `x86_64-pc-windows-msvc` with merman's
+pinned Rust 1.95.0:
+- rustup adds that target's standard library. A static library involves no
+  Rust linker.
+- `+crt-static` makes Rust's standard library match the exe's static CRT.
+
+Results:
+- **Imports.** The exe gains three system imports: `ntdll`,
+  `bcryptprimitives` and `api-ms-win-core-synch-l1-2-0`. All ship with
+  Windows 10 and later. There is still no CRT or runtime DLL.
+- **Display.** Direct2D's SVG renderer draws no `<text>`, so on Windows
+  (`TINTA_MERMAN_PNG`) diagrams come from merman's own PNG (resvg), decoded
+  through WIC at the device pixels they cover.
+- **DOCX** embeds that PNG directly. **HTML** inlines the parity SVG, as on
+  Linux.
+- **Fonts.** merman's raster finds system fonts only, and draws no label in
+  a face it cannot find. The diagram font is therefore a stack: the
+  theme's face, then Selawik, Noto Sans, DejaVu Sans and `sans-serif`.
+  - On Linux the stack changes nothing: renders are pixel-identical with and
+    without it.
+  - Under Wine, whose `C:\Windows\Fonts` is empty, labels were blank until
+    Selawik was copied there. Real Windows has Segoe UI.
+- **Under Wine 11**, the window draws the state diagram with its labels.
+  `--exportdocx` writes the four diagrams as PNGs, matching Linux's, and
+  `--exporthtml` the four SVGs.
+
 ## Not checked (needs real Windows)
 
 - **Rendering fidelity, PDF export and `--printpages`.** Under Wine these
@@ -65,4 +94,6 @@ toolchain file.
   `third_party/fonts`, so the default code face falls back to Consolas
   where Monaspace Argon is not installed, and UI text uses the system's
   Segoe UI.
-- **Mermaid** uses the native parsers (merman is off on Windows, MM5).
+- **merman on real Windows:** label fonts (Segoe UI), speed of the
+  synchronous PNG render on large diagrams, and math labels (the PNG path
+  does not lift formulas the way the Linux SVG path does).

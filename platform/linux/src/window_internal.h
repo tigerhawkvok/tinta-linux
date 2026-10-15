@@ -72,6 +72,7 @@ bool charForKey(const MSG& msg, std::vector<wchar_t>& out);
 
 // Clipboard and dialogs, run in a nested main loop
 void publishClipboardText(const std::wstring& text);
+void publishClipboardImage(const std::string& png);
 bool readClipboardText(std::wstring& text);
 bool clipboardHasText();
 bool clipboardIsLocal();  // this process set the current clipboard
