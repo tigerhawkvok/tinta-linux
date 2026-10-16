@@ -1490,6 +1490,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
 
+        case WM_APP_TAB_DRAG_DONE:
+            if (app) tabDragDone(*app, hwnd, (int)wParam);
+            return 0;
+
         case WM_COPYDATA:
             if (app) {
                 COPYDATASTRUCT* data =

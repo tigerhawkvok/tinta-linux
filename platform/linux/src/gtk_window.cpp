@@ -9,10 +9,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <set>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace tinta {
 namespace gtk {
@@ -242,6 +245,185 @@ void left(GtkEventControllerMotion*, gpointer data) {
     if (n->buttons) return;  // the drag still owns the pointer
     postFromUi(n->hwnd, n->overClient ? WM_MOUSELEAVE : WM_NCMOUSELEAVE, 0, 0);
     n->overClient = false;
+}
+
+// ---- Tab drags (tintaBeginTabDrag) ----------------------------------------------------------------
+// The payload: the tab's path (UTF-8), a newline, the source process id
+const char kTabMime[] = "application/x-tinta-tab";
+
+struct OutgoingTabDrag {
+    GdkDrag* drag = nullptr;
+    Native* source = nullptr;
+    UINT message = 0;
+    int stripHeight = 0;    // logical px: the source window's strip
+    bool performed = false;
+    bool returned = false;  // dropped back on its own strip
+} g_tabDrag;
+
+void cairoColour(cairo_t* cr, COLORREF c, double alpha) {
+    cairo_set_source_rgba(cr, GetRValue(c) / 255.0, GetGValue(c) / 255.0, GetBValue(c) / 255.0, alpha);
+}
+
+// The tab as a floating card, drawn at the window's scale
+GdkTexture* tabCardTexture(const TintaTabDragCard& card, double scale) {
+    int width = static_cast<int>(std::ceil(card.width * scale));
+    int height = static_cast<int>(std::ceil(card.height * scale));
+    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    cairo_t* cr = cairo_create(surface);
+    cairo_scale(cr, scale, scale);
+    double w = card.width, h = card.height, r = card.radius;
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, w - r - 0.5, r + 0.5, r, -G_PI / 2, 0);
+    cairo_arc(cr, w - r - 0.5, h - r - 0.5, r, 0, G_PI / 2);
+    cairo_arc(cr, r + 0.5, h - r - 0.5, r, G_PI / 2, G_PI);
+    cairo_arc(cr, r + 0.5, r + 0.5, r, G_PI, 3 * G_PI / 2);
+    cairo_close_path(cr);
+    cairoColour(cr, card.fill, 0.94);
+    cairo_fill_preserve(cr);
+    cairoColour(cr, card.border, 0.35);
+    cairo_set_line_width(cr, 1.0);
+    cairo_stroke(cr);
+    PangoLayout* layout = pango_cairo_create_layout(cr);
+    PangoFontDescription* font = pango_font_description_from_string("Selawik, Segoe UI, Noto Sans, sans-serif");
+    pango_font_description_set_absolute_size(font, 13.0 * PANGO_SCALE);
+    pango_layout_set_font_description(layout, font);
+    pango_font_description_free(font);
+    pango_layout_set_text(layout, utf8(card.title).c_str(), -1);
+    pango_layout_set_width(layout, static_cast<int>((w - 24) * PANGO_SCALE));
+    pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
+    pango_layout_set_single_paragraph_mode(layout, TRUE);
+    int textW = 0, textH = 0;
+    pango_layout_get_pixel_size(layout, &textW, &textH);
+    cairoColour(cr, card.text, 1.0);
+    cairo_move_to(cr, 12, (h - textH) / 2.0);
+    pango_cairo_show_layout(cr, layout);
+    g_object_unref(layout);
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+    int stride = cairo_image_surface_get_stride(surface);
+    GBytes* bytes = g_bytes_new(cairo_image_surface_get_data(surface), static_cast<gsize>(stride) * height);
+    cairo_surface_destroy(surface);
+    // Cairo's ARGB32 is premultiplied BGRA in memory: GDK_MEMORY_DEFAULT
+    GdkTexture* texture = gdk_memory_texture_new(width, height, GDK_MEMORY_DEFAULT, bytes, stride);
+    g_bytes_unref(bytes);
+    return texture;
+}
+
+void tabDragFinished(int outcome) {
+    if (!g_tabDrag.drag) return;
+    if (std::find(g_natives.begin(), g_natives.end(), g_tabDrag.source) != g_natives.end()) {
+        postFromUi(g_tabDrag.source->hwnd, g_tabDrag.message, static_cast<WPARAM>(outcome), 0);
+    }
+    g_object_unref(g_tabDrag.drag);
+    g_tabDrag = OutgoingTabDrag{};
+}
+
+void tabDragPerformed(GdkDrag*, gpointer) { g_tabDrag.performed = true; }
+
+void tabDragDone(GdkDrag* drag, gpointer) {
+    gdk_drag_drop_done(drag, TRUE);
+    bool moved = g_tabDrag.performed && !g_tabDrag.returned;
+    tabDragFinished(moved ? TINTA_TAB_DRAG_MOVED : TINTA_TAB_DRAG_CANCELLED);
+}
+
+bool ownTabDrag(GdkDrop* drop, Native* n) {
+    return g_tabDrag.drag && gdk_drop_get_drag(drop) == g_tabDrag.drag && g_tabDrag.source == n;
+}
+
+void tabDragCancelled(GdkDrag* drag, GdkDragCancelReason reason, gpointer) {
+    // Nowhere to land is a tear-off, so no animation back to the strip
+    bool tearOff = reason == GDK_DRAG_CANCEL_NO_TARGET;
+    gdk_drag_drop_done(drag, tearOff ? TRUE : FALSE);
+    tabDragFinished(tearOff ? TINTA_TAB_DRAG_NO_TARGET : TINTA_TAB_DRAG_CANCELLED);
+}
+
+// Every Tinta window takes tabs. The one a drag came from takes it back
+// only over its strip (the tab stays put); released anywhere else on it,
+// the tab tears off, as on Windows
+gboolean tabDropAccept(GtkDropTargetAsync*, GdkDrop* drop, gpointer) {
+    return !g_modal && gdk_content_formats_contain_mime_type(gdk_drop_get_formats(drop), kTabMime);
+}
+
+GdkDragAction tabDropMotion(GtkDropTargetAsync*, GdkDrop* drop, double, double y, gpointer data) {
+    auto* n = static_cast<Native*>(data);
+    if (ownTabDrag(drop, n) && y > g_tabDrag.stripHeight) return static_cast<GdkDragAction>(0);
+    return GDK_ACTION_MOVE;
+}
+
+struct TabDropRead {
+    Native* n;
+    GdkDrop* drop;
+    double x, y;
+};
+
+// The payload has arrived: hand the tab to the window
+void tabDropDeliver(TabDropRead* read, const std::string& payload) {
+    bool taken = false;
+    std::string path = payload.substr(0, payload.find('\n'));
+    if (!path.empty() && std::find(g_natives.begin(), g_natives.end(), read->n) != g_natives.end()) {
+        // As tabSendDrop does on Windows: the point, in screen pixels, then
+        // the path and its NUL
+        POINT point{static_cast<LONG>(std::lround(read->x * read->n->scale)),
+                    static_cast<LONG>(std::lround(read->y * read->n->scale))};
+        ClientToScreen(read->n->hwnd, &point);
+        std::string bytes(sizeof point, '\0');
+        std::memcpy(bytes.data(), &point, sizeof point);
+        bytes += path;
+        bytes += '\0';
+        COPYDATASTRUCT copy{};
+        copy.dwData = 2;
+        copy.cbData = static_cast<DWORD>(bytes.size());
+        copy.lpData = bytes.data();
+        taken = SendMessageW(read->n->hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&copy)) != FALSE;
+        if (taken) gtk_window_present(read->n->window);
+    }
+    gdk_drop_finish(read->drop, taken ? GDK_ACTION_MOVE : static_cast<GdkDragAction>(0));
+    g_object_unref(read->drop);
+    delete read;
+}
+
+// Read asynchronously: on X11 the bytes arrive through this loop's own
+// events, so a blocking read would wait on itself
+void tabDropSpliced(GObject* source, GAsyncResult* result, gpointer data) {
+    auto* read = static_cast<TabDropRead*>(data);
+    auto* memory = G_MEMORY_OUTPUT_STREAM(source);
+    std::string payload;
+    if (g_output_stream_splice_finish(G_OUTPUT_STREAM(memory), result, nullptr) >= 0) {
+        payload.assign(static_cast<const char*>(g_memory_output_stream_get_data(memory)),
+                       g_memory_output_stream_get_data_size(memory));
+    }
+    g_object_unref(memory);
+    tabDropDeliver(read, payload);
+}
+
+void tabDropRead(GObject* source, GAsyncResult* result, gpointer data) {
+    auto* read = static_cast<TabDropRead*>(data);
+    GInputStream* stream = gdk_drop_read_finish(GDK_DROP(source), result, nullptr, nullptr);
+    if (!stream) {
+        tabDropDeliver(read, std::string());
+        return;
+    }
+    GOutputStream* memory = g_memory_output_stream_new_resizable();
+    g_output_stream_splice_async(
+        memory, stream,
+        static_cast<GOutputStreamSpliceFlags>(G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET),
+        G_PRIORITY_DEFAULT, nullptr, tabDropSpliced, read);
+    g_object_unref(stream);
+}
+
+gboolean tabDropped(GtkDropTargetAsync*, GdkDrop* drop, double x, double y, gpointer data) {
+    auto* n = static_cast<Native*>(data);
+    if (ownTabDrag(drop, n)) {
+        // Back on its own strip: nothing moves
+        if (y > g_tabDrag.stripHeight) return FALSE;
+        g_tabDrag.returned = true;
+        gdk_drop_finish(drop, GDK_ACTION_MOVE);
+        return TRUE;
+    }
+    static const char* mimes[] = {kTabMime, nullptr};
+    auto* read = new TabDropRead{n, GDK_DROP(g_object_ref(drop)), x, y};
+    gdk_drop_read_async(drop, mimes, G_PRIORITY_DEFAULT, nullptr, tabDropRead, read);
+    return TRUE;
 }
 
 // Files dropped from a file manager: WM_DROPFILES, as for a window with
@@ -582,6 +764,36 @@ void watchColorScheme() {
 
 }  // namespace
 
+bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& card, int hotX, int hotY,
+                  UINT doneMessage) {
+    Native* n = nativeOf(hwnd);
+    if (!n || g_tabDrag.drag || g_modal) return false;
+    GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(n->window));
+    GdkSeat* seat = gdk_display_get_default_seat(gtk_widget_get_display(n->area));
+    GdkDevice* pointer = seat ? gdk_seat_get_pointer(seat) : nullptr;
+    if (!surface || !pointer) return false;
+    std::string payload = path + "\n" + std::to_string(getpid());
+    GBytes* bytes = g_bytes_new(payload.data(), payload.size());
+    GdkContentProvider* content = gdk_content_provider_new_for_bytes(kTabMime, bytes);
+    g_bytes_unref(bytes);
+    GdkDrag* drag = gdk_drag_begin(surface, pointer, content, GDK_ACTION_MOVE, 0, 0);
+    g_object_unref(content);
+    if (!drag) return false;
+    // The press now belongs to the drag: no release comes back to us
+    n->buttons = 0;
+    g_tabDrag = OutgoingTabDrag{drag, n, doneMessage, card.stripHeight, false, false};
+    GdkTexture* texture = tabCardTexture(card, surfaceScale(n));
+    GtkWidget* picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+    gtk_widget_set_size_request(picture, card.width, card.height);
+    gtk_drag_icon_set_child(GTK_DRAG_ICON(gtk_drag_icon_get_for_drag(drag)), picture);
+    gdk_drag_set_hotspot(drag, hotX, hotY);
+    g_signal_connect(drag, "drop-performed", G_CALLBACK(tabDragPerformed), nullptr);
+    g_signal_connect(drag, "dnd-finished", G_CALLBACK(tabDragDone), nullptr);
+    g_signal_connect(drag, "cancel", G_CALLBACK(tabDragCancelled), nullptr);
+    return true;
+}
+
 bool active() { return g_active; }
 
 bool start() {
@@ -675,6 +887,15 @@ void createWindow(HWND hwnd) {
         GtkDropTarget* drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
         g_signal_connect(drop, "drop", G_CALLBACK(dropped), n);
         gtk_widget_add_controller(n->area, GTK_EVENT_CONTROLLER(drop));
+    }
+    if (hwnd->className == L"Tinta") {
+        GdkContentFormats* formats = gdk_content_formats_new((const char*[]){kTabMime}, 1);
+        GtkDropTargetAsync* tabs = gtk_drop_target_async_new(formats, GDK_ACTION_MOVE);
+        g_signal_connect(tabs, "accept", G_CALLBACK(tabDropAccept), n);
+        g_signal_connect(tabs, "drag-enter", G_CALLBACK(tabDropMotion), n);
+        g_signal_connect(tabs, "drag-motion", G_CALLBACK(tabDropMotion), n);
+        g_signal_connect(tabs, "drop", G_CALLBACK(tabDropped), n);
+        gtk_widget_add_controller(n->area, GTK_EVENT_CONTROLLER(tabs));
     }
 
     // Capture phase: ahead of GtkWindow's own keys (Tab moves focus)

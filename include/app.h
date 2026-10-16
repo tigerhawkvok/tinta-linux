@@ -74,6 +74,10 @@ inline int64_t usElapsed(Clock::time_point start) {
 // WM_APP_UPDATE_CHECK carries wParam = 1, and every outcome is shown
 #define WM_APP_UPDATE_CHECK_NOW (WM_APP + 7)
 
+// Linux: how a tab drag the desktop carried ended (TINTA_TAB_DRAG_* in
+// wParam); see tabDragDone
+#define WM_APP_TAB_DRAG_DONE (WM_APP + 8)
+
 // Startup metrics
 struct StartupMetrics {
     int64_t windowInitUs = 0;
@@ -582,6 +586,8 @@ struct App {
     // release decides (drop into another window / new window / snap back)
     bool tabDragDetached = false;
     HWND tabGhostWnd = nullptr;
+    // Linux: the path of a tab the desktop's drag carries (tabDragDone)
+    std::string tabDragOutPath;
     // A native move/size loop is in progress; the starting rect tells a
     // pure move (a possible strip drop) apart from a resize on exit
     bool windowMoveTracking = false;

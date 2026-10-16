@@ -1853,6 +1853,26 @@ void tabDragMove(App& app, HWND hwnd, int x, int y) {
         // Keep the cursor on the card even when the tab was wider than it
         int grab = std::min((int)app.tabDragOffsetX,
                             (int)dpi(app, 166.0f));
+#ifndef _WIN32
+        // Linux: the desktop carries the card (no window there knows where
+        // it is, so neither WindowFromPoint nor a placed new window works);
+        // the outcome comes back as WM_APP_TAB_DRAG_DONE
+        if (!app.tabDragDetached) {
+            float scale = app.contentScale > 0.0f ? app.contentScale : 1.0f;
+            TintaTabDragCard card{app.tabs[index].title.c_str(), toColorref(tabStripBackground(app)),
+                                  toColorref(app.theme.text), toColorref(app.theme.text), 190, 34, 8,
+                                  (int)(chromeTopHeight(app) / scale)};
+            int hotX = std::max(12, std::min((int)(grab / scale), 166));
+            if (tintaBeginTabDrag(hwnd, path.c_str(), card, hotX, 17, WM_APP_TAB_DRAG_DONE)) {
+                app.tabDragOutPath = path;
+                app.tabDragIndex = -1;
+                app.tabDragging = false;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return;
+            }
+        }
+#endif
         int ghostX = screen.x - std::max(grab, (int)dpi(app, 12.0f));
         int ghostY = screen.y - (int)dpi(app, 17.0f);
         if (!app.tabDragDetached) {
@@ -1932,6 +1952,41 @@ void tabDragEnd(App& app, HWND hwnd, int x, int y) {
             }
         }
     }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void tabDragDone(App& app, HWND hwnd, int outcome) {
+    std::string path = std::move(app.tabDragOutPath);
+    app.tabDragOutPath.clear();
+    if (path.empty()) return;
+    // The tab may have moved since the drag began: find it by its path
+    int index = -1;
+    for (int i = 0; i < (int)app.tabs.size(); i++) {
+        const std::string& p = i == app.activeTab ? app.currentFile : app.tabs[i].path;
+        if (p == path) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) return;
+#ifndef _WIN32
+    if (outcome == TINTA_TAB_DRAG_MOVED) {
+        dragCloseLocal(app, hwnd, index);
+    } else if (outcome == TINTA_TAB_DRAG_NO_TARGET && app.tabs.size() > 1) {
+        // Released where no Tinta window took it: the tab tears off into a
+        // window of its own (the desktop places it)
+        wchar_t exePath[MAX_PATH];
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH)) {
+            std::wstring args = L"--cascade --tabbed \"" + toWide(path) + L"\"";
+            if ((INT_PTR)ShellExecuteW(nullptr, L"open", exePath, args.c_str(), nullptr, SW_SHOWNORMAL) > 32) {
+                dragCloseLocal(app, hwnd, index);
+            }
+        }
+    }
+#else
+    (void)outcome;
+    (void)hwnd;
+#endif
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 

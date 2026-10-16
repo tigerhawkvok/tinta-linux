@@ -176,6 +176,15 @@ if(BUILD_TESTING)
                 $<TARGET_FILE:tinta> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/gtk-window.md
                 --out ${CMAKE_BINARY_DIR}/linux-render/gui-check)
         set_tests_properties(linux_gtk_window PROPERTIES TIMEOUT 120)
+        # Tabs dragged between windows and torn off, through the desktop's
+        # drag and drop (private D-Bus session, Xvfb)
+        find_program(TINTA_DBUS_RUN_SESSION dbus-run-session)
+        if(TINTA_DBUS_RUN_SESSION)
+            add_test(NAME linux_tab_drag
+                COMMAND ${TINTA_GUI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/tab_drag_check.py
+                    $<TARGET_FILE:tinta> --out ${CMAKE_BINARY_DIR}/linux-render/tab-drag)
+            set_tests_properties(linux_tab_drag PROPERTIES TIMEOUT 180)
+        endif()
     endif()
 
     # Win32 clipboard -> GdkClipboard (text, and PNG as an image), on Xvfb

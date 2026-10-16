@@ -75,6 +75,10 @@ bool tabSwitcherMouseDown(App& app, HWND hwnd, int x, int y);
 // window, spawn a new one, or snap back); Esc/capture loss cancels
 void tabDragMove(App& app, HWND hwnd, int x, int y);
 void tabDragEnd(App& app, HWND hwnd, int x, int y);
+// Linux: a tab drag the desktop carried ended (WM_APP_TAB_DRAG_DONE): moved
+// to another window, released where no window takes it (a new window, as
+// on Windows), or cancelled
+void tabDragDone(App& app, HWND hwnd, int outcome);
 void tabDragCancel(App& app, HWND hwnd);
 // After a native window move: a tabless window dropped onto another
 // Tinta window's strip merges its document there

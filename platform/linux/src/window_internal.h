@@ -76,6 +76,9 @@ void publishClipboardImage(const std::string& png);
 bool readClipboardText(std::wstring& text);
 bool clipboardHasText();
 bool clipboardHasImage();
+// tintaBeginTabDrag (windows.h)
+bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& card, int hotX, int hotY,
+                  UINT doneMessage);
 // Another application's clipboard image, as PNG bytes
 bool readClipboardImagePng(std::string& png);
 bool clipboardIsLocal();  // this process set the current clipboard

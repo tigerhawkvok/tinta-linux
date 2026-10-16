@@ -242,4 +242,22 @@ bool tintaRegisterDesktopApp();
 // COM, OLE and the shell (no-op while tinta_com.h is including this file)
 #include "tinta_com.h"
 
+// A tab pulled clear of the strip, carried by the desktop's drag and drop
+// (Wayland tells no window where it or the pointer is, so WindowFromPoint
+// and a placed new window cannot work). Another Tinta window, in any
+// process, takes `path` (UTF-8) at the drop point through WM_COPYDATA;
+// dropped back on its own window's strip (the top `stripHeight` logical
+// px), the tab stays (CANCELLED). The outcome is posted to `hwnd` as
+// `doneMessage` with a TINTA_TAB_DRAG_* in wParam. False when no drag
+// could start.
+struct TintaTabDragCard {
+    const wchar_t* title;
+    COLORREF fill, border, text;
+    int width, height, radius;  // logical px
+    int stripHeight;            // logical px
+};
+enum { TINTA_TAB_DRAG_MOVED = 1, TINTA_TAB_DRAG_NO_TARGET = 2, TINTA_TAB_DRAG_CANCELLED = 3 };
+bool tintaBeginTabDrag(HWND hwnd, const char* path, const TintaTabDragCard& card, int hotX, int hotY,
+                       UINT doneMessage);
+
 #endif  // TINTA_LINUX_WINDOWS_H

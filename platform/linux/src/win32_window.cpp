@@ -1105,3 +1105,10 @@ LONG ImmGetCompositionStringW(HIMC, DWORD, void*, DWORD) { return 0; }
 BOOL GetOpenFileNameW(OPENFILENAMEW* ofn) { return tinta::gtk::active() && tinta::gtk::fileDialog(ofn, false); }
 BOOL GetSaveFileNameW(OPENFILENAMEW* ofn) { return tinta::gtk::active() && tinta::gtk::fileDialog(ofn, true); }
 BOOL PrintDlgW(PRINTDLGW*) { return FALSE; }
+
+// ---- Tab drags ---------------------------------------------------------------------------------
+bool tintaBeginTabDrag(HWND hwnd, const char* path, const TintaTabDragCard& card, int hotX, int hotY,
+                       UINT doneMessage) {
+    return tinta::gtk::active() && path && *path &&
+           tinta::gtk::beginTabDrag(hwnd, path, card, hotX, hotY, doneMessage);
+}
