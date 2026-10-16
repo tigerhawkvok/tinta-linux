@@ -920,6 +920,10 @@ struct App {
         D2D1_RECT_F bounds;       // Full background rect in document coordinates
         std::wstring codeText;    // The code content (diagram source for diagrams)
         bool isDiagram = false;   // adds the copy-as-image button
+        // Drawn as a picture (merman): search reads codeText, placed at
+        // docPos (where the diagram sits in docText, which it adds nothing to)
+        bool searchSource = false;
+        size_t docPos = 0;
         unsigned fitKey = 0;      // per-layout ordinal for the fit toggle
         bool fitCandidate = false;
         bool fitActive = false;
@@ -997,6 +1001,11 @@ struct App {
         size_t startPos;            // Character offset in text
         size_t length;              // Match length
         D2D1_RECT_F highlightRect;  // Computed highlight bounds
+        // A match in a diagram's Mermaid source (codeBlocks index): an empty
+        // range at the diagram's place in docText, outlined as the diagram
+        int codeBlock = -1;
+        size_t codeOffset = 0;      // where in the source
+        size_t codeLength = 0;
     };
     std::vector<SearchMatch> searchMatches;
     bool overText = false;

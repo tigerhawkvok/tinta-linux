@@ -243,6 +243,36 @@ void performSearch(App& app) {
         pos += app.searchQuery.length();
     }
 
+    // Diagrams drawn as pictures have no text runs: search their Mermaid
+    // source instead, in document order at the diagram's place
+    bool inDiagrams = false;
+    for (size_t b = 0; b < app.codeBlocks.size(); b++) {
+        const App::CodeBlockInfo& block = app.codeBlocks[b];
+        if (!block.searchSource) continue;
+        std::wstring codeLower = toLower(block.codeText);
+        for (size_t at = codeLower.find(queryLower); at != std::wstring::npos;
+             at = codeLower.find(queryLower, at + queryLower.size())) {
+            App::SearchMatch match;
+            match.textRectIndex = kNoTextRect;
+            match.startPos = block.docPos;
+            match.length = 0;
+            match.highlightRect = D2D1::RectF(0, 0, 0, 0);
+            match.codeBlock = (int)b;
+            match.codeOffset = at;
+            match.codeLength = queryLower.size();
+            app.searchMatches.push_back(match);
+            inDiagrams = true;
+        }
+    }
+    if (inDiagrams) {
+        // A diagram's matches come before the text that follows it
+        std::stable_sort(app.searchMatches.begin(), app.searchMatches.end(),
+                         [](const App::SearchMatch& a, const App::SearchMatch& b) {
+                             if (a.startPos != b.startPos) return a.startPos < b.startPos;
+                             return a.codeBlock >= 0 && b.codeBlock < 0;
+                         });
+    }
+
     mapSearchMatchesToLayout(app);
 }
 
@@ -250,6 +280,9 @@ void mapSearchMatchesToLayout(App& app) {
     for (auto& match : app.searchMatches) {
         match.textRectIndex = kNoTextRect;
         match.highlightRect = D2D1::RectF(0, 0, 0, 0);
+        if (match.codeBlock >= 0 && match.codeBlock < (int)app.codeBlocks.size()) {
+            match.highlightRect = app.codeBlocks[match.codeBlock].bounds;
+        }
     }
     if (app.searchMatches.empty()) return;
     if (app.textRects.empty()) return;
@@ -318,7 +351,7 @@ void scrollToCurrentMatch(App& app) {
 
     const auto& match = app.searchMatches[app.searchCurrentIndex];
 
-    bool hasLayoutBounds = match.textRectIndex != kNoTextRect;
+    bool hasLayoutBounds = match.textRectIndex != kNoTextRect || match.codeBlock >= 0;
     float estimatedY = hasLayoutBounds ? match.highlightRect.top : -1.0f;
 
     // Fallback: estimate based on character ratio

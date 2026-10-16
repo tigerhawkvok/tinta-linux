@@ -7,6 +7,7 @@
 #include "editor.h"  // toUtf8
 #include "export.h"
 #include "render.h"
+#include "search.h"
 
 #include <cmath>
 #include <fstream>
@@ -164,6 +165,51 @@ int main() {
         check(app.contentWidth <= app.width,
               "fitted, the page does not scroll sideways: content " + std::to_string(app.contentWidth) + " px");
     }
+
+    // Search reads a diagram's Mermaid source: it is a picture, with no text
+    // runs. "finalizeA" is only in the first diagram's source (3 times)
+    app.searchQuery = L"finalizeA";
+    performSearch(app);
+    int firstDiagram = -1;
+    for (size_t b = 0; b < app.codeBlocks.size() && firstDiagram < 0; b++) {
+        if (app.codeBlocks[b].searchSource) firstDiagram = (int)b;
+    }
+    bool allInDiagram = app.searchMatches.size() == 3 && firstDiagram >= 0;
+    for (const auto& m : app.searchMatches) {
+        allInDiagram = allInDiagram && m.codeBlock == firstDiagram && m.codeLength == 9 &&
+                       m.highlightRect.top == app.codeBlocks[firstDiagram].bounds.top;
+    }
+    check(allInDiagram, "search finds a diagram's source text, placed on the diagram: " +
+                            std::to_string(app.searchMatches.size()) + " matches");
+    // In text and source alike, in reading order: the table and the line
+    // before the diagram say "fork", then the diagram's one <<fork>> line
+    app.searchQuery = L"fork";
+    performSearch(app);
+    size_t inText = 0, inSource = 0;
+    bool ordered = true;
+    for (size_t i = 0; i < app.searchMatches.size(); i++) {
+        const auto& m = app.searchMatches[i];
+        (m.codeBlock >= 0 ? inSource : inText)++;
+        if (i > 0) ordered = ordered && app.searchMatches[i - 1].startPos <= m.startPos;
+        if (m.codeBlock >= 0 && i > 0) {
+            ordered = ordered && app.searchMatches[i - 1].highlightRect.top <= m.highlightRect.top;
+        }
+    }
+    check(inText >= 2 && inSource == 1 && ordered,
+          "text and diagram matches interleave in reading order: " + std::to_string(inText) + " in text, " +
+              std::to_string(inSource) + " in source");
+    for (size_t i = 0; i < app.searchMatches.size(); i++) {
+        if (app.searchMatches[i].codeBlock < 0) continue;
+        app.searchCurrentIndex = (int)i;
+        app.scrollY = app.targetScrollY = 0;
+        scrollToCurrentMatch(app);
+        const D2D1_RECT_F& b = app.codeBlocks[app.searchMatches[i].codeBlock].bounds;
+        check(b.bottom > app.scrollY && b.top < app.scrollY + app.height,
+              "a diagram match scrolls its diagram into view");
+        break;
+    }
+    app.searchQuery.clear();
+    performSearch(app);
 
     // "Copy diagram as image" (the hover button): the first diagram is one
     // only merman draws; the clipboard gets its PNG and a CF_DIB

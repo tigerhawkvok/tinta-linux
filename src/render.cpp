@@ -2164,6 +2164,8 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
             info.bounds = renderedBounds;
             info.codeText = toWide(code);
             info.isDiagram = true;
+            info.searchSource = true;
+            info.docPos = app.docText.size();
             info.fitKey = fitKey;
             info.fitCandidate = fitCandidate || fitActive;
             info.fitActive = fitActive;
@@ -3702,6 +3704,8 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
                     info.bounds = bounds;
                     info.codeText = toWide(elem->text);
                     info.isDiagram = true;
+                    info.searchSource = true;
+                    info.docPos = app.docText.size();
                     info.fitKey = fitKey;
                     info.fitActive = fitBlockEnabled(app, fitKey);
                     info.fitCandidate = fitCandidate || info.fitActive;

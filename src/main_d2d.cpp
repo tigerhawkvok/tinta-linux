@@ -1049,6 +1049,28 @@ render_document:
                 app.brush);
             app.drawCalls++;
         }
+
+        // Matches in a diagram's source outline the diagram (filling it would
+        // hide it): once per diagram, orange when it holds the current match
+        int lastBlock = -1;
+        for (size_t i = 0; i < app.searchMatches.size(); i++) {
+            const auto& m = app.searchMatches[i];
+            if (m.codeBlock < 0 || m.codeBlock >= (int)app.codeBlocks.size()) continue;
+            bool current = (int)i == app.searchCurrentIndex;
+            if (m.codeBlock == lastBlock && !current) continue;
+            lastBlock = m.codeBlock;
+            const D2D1_RECT_F& b = app.codeBlocks[m.codeBlock].bounds;
+            if (b.bottom < viewportTop - cullMargin || b.top > viewportBottom + cullMargin) continue;
+            app.brush->SetColor(current ? D2D1::ColorF(1.0f, 0.6f, 0.0f, 0.95f)
+                                        : D2D1::ColorF(1.0f, 0.82f, 0.0f, 0.75f));
+            float pad = dpi(app, 4.0f);
+            app.renderTarget->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(b.left - pad - app.scrollX, b.top - pad - app.scrollY,
+                                              b.right + pad - app.scrollX, b.bottom + pad - app.scrollY),
+                                  dpi(app, 6.0f), dpi(app, 6.0f)),
+                app.brush, dpi(app, current ? 3.0f : 2.0f));
+            app.drawCalls++;
+        }
     }
 
     renderFrontmatterOverflow(app);
