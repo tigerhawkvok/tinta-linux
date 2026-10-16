@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tigerhawkvok.Tinta</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Tinta</name>
+  <summary>Fast Markdown and Mermaid viewer and editor</summary>
+  <description>
+    <p>
+      Tinta opens Markdown documents instantly and renders Mermaid diagrams, math, tables and
+      code in place. Its source editor sits beside a live preview.
+    </p>
+    <ul>
+      <li>Mermaid diagrams drawn in place, with labels sized in the theme's own face</li>
+      <li>Tabs that tear off into windows and move between them</li>
+      <li>Paste screenshots into a document's assets folder, or inline</li>
+      <li>Export to HTML, PDF and Word</li>
+      <li>Twelve themes, plus your own in themes.ini</li>
+      <li>Windows, Vim and Emacs keyboard shortcuts</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.tigerhawkvok.Tinta.desktop</launchable>
+  <provides>
+    <binary>tinta</binary>
+  </provides>
+  <url type="homepage">https://github.com/tigerhawkvok/tinta-linux</url>
+  <url type="bugtracker">https://github.com/tigerhawkvok/tinta-linux/issues</url>
+  <developer id="io.github.tigerhawkvok">
+    <name>Philip Kahn</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="4.0.5" date="2026-10-16"/>
+  </releases>
+</component>

@@ -32,8 +32,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(merman)
 
 # Corrosion calls the chosen toolchain's cargo directly, which bypasses
-# rust-toolchain.toml, so hand it merman's pinned channel
-if(NOT Rust_TOOLCHAIN)
+# rust-toolchain.toml, so hand it merman's pinned channel. Builds without
+# rustup (the Flatpak SDK's Rust extension) use the cargo on PATH instead.
+option(TINTA_MERMAN_RUSTUP "Build merman with rustup's pinned toolchain" ON)
+if(TINTA_MERMAN_RUSTUP AND NOT Rust_TOOLCHAIN)
     file(STRINGS ${merman_SOURCE_DIR}/rust-toolchain.toml _merman_channel
          REGEX "^channel *= *\"[^\"]+\"")
     string(REGEX REPLACE "^channel *= *\"([^\"]+)\".*" "\\1" _merman_channel "${_merman_channel}")
