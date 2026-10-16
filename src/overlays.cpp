@@ -2591,7 +2591,9 @@ void settingsChip(App& app, float& x, float y, const wchar_t* label, bool active
 
 D2D1_RECT_F settingsPanelRect(const App& app) {
     float w = std::min(dpi(app, app.settingsSection == 3 ? 980.0f : 760.0f), app.width - dpi(app, app.settingsSection == 3 ? 32.0f : 80.0f));
-    float h = std::min(dpi(app, app.settingsSection == 3 ? 650.0f : 590.0f), app.height - dpi(app, 64.0f));
+    // General carries one card more than the others (the default viewer)
+    float h = std::min(dpi(app, app.settingsSection == 3 ? 650.0f : app.settingsSection == 0 ? 658.0f : 590.0f),
+                       app.height - dpi(app, 64.0f));
     float x = (app.width - w) / 2;
     float y = (app.height - h) / 2 + (1 - app.settingsAnimation) * dpi(app, 30.0f);
     return D2D1::RectF(x, y, x + w, y + h);
@@ -2943,6 +2945,19 @@ void renderSettingsOverlay(App& app) {
             float chipY = cy + (rowCardH - dpi(app, 24.0f)) * 0.5f;
             settingsChip(app, bx, chipY, licenses, false, SET_OPEN_LICENSES, anim, fmt);
             settingsChip(app, bx, chipY, check, app.updateCheckRunning, SET_CHECK_UPDATES, anim, fmt);
+        }
+        cy += rowCardH + cardGap;
+        // Default viewer: register the file types and make Tinta Mono their
+        // default (Windows then asks in Settings > Default apps)
+        card(rowCardH);
+        {
+            const wchar_t* setDefault = tr(app, "settings.set_default");
+            float chipW = chipsWidth({setDefault});
+            cardLabel(tr(app, "settings.default_viewer"), tr(app, "settings.default_viewer.hint"),
+                      chipW + dpi(app, 10.0f));
+            float chipY = cy + (rowCardH - dpi(app, 24.0f)) * 0.5f;
+            float bx = cx + cw - cardPad - chipW;
+            settingsChip(app, bx, chipY, setDefault, true, SET_MAKE_DEFAULT, anim, fmt);
         }
     } else if (app.settingsSection == 1) {  // Appearance
         card(sliderCardH);

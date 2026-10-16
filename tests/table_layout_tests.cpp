@@ -136,7 +136,7 @@ void checkTables(App& app) {
         const size_t pos = app.docText.find(text);
         check(pos != std::wstring::npos && app.docText.find(text, pos + 1) == std::wstring::npos,
               "wrapping preserves searchable text exactly once");
-        check(app.tableRects[0].tsv.find(text) != std::wstring::npos, "copy table preserves the full cell value");
+        check(app.tableRects[0].csv.find(text) != std::wstring::npos, "copy table preserves the full cell value");
         if (pos != std::wstring::npos) {
             for (size_t i = pos; i < pos + std::wcslen(text); ++i) {
                 if (app.docText[i] == L' ') continue;
@@ -223,7 +223,7 @@ int runTableLayoutTests() {
         app.root = doc.root;
         app.height = 900;
         app.readingWidthPct = 100;
-        std::vector<std::wstring> originalTsv;
+        std::vector<std::wstring> originalCsv;
         wchar_t outputDir[32768];
         const DWORD outputLen = GetEnvironmentVariableW(L"TINTA_TABLE_RENDER_DIR", outputDir, static_cast<DWORD>(std::size(outputDir)));
         for (int theme : {0, 5}) {
@@ -239,9 +239,9 @@ int runTableLayoutTests() {
                                    "-width" + std::to_string(width) + (fit ? "-fit" : "-auto");
                         layoutDocument(app);
                         checkTables(app);
-                        if (originalTsv.empty()) for (const auto& table : app.tableRects) originalTsv.push_back(table.tsv);
-                        for (size_t i = 0; i < app.tableRects.size() && i < originalTsv.size(); ++i)
-                            check(app.tableRects[i].tsv == originalTsv[i], "layout changes leave TSV unchanged");
+                        if (originalCsv.empty()) for (const auto& table : app.tableRects) originalCsv.push_back(table.csv);
+                        for (size_t i = 0; i < app.tableRects.size() && i < originalCsv.size(); ++i)
+                            check(app.tableRects[i].csv == originalCsv[i], "layout changes leave CSV unchanged");
                         if (outputLen && outputLen < std::size(outputDir) && app.tableRects.size() == 2) {
                             std::filesystem::create_directories(outputDir);
                             check(renderTables(app, std::filesystem::path(outputDir) / (scenario + ".png")), "native table rasterization succeeds");

@@ -49,6 +49,7 @@ set(SOURCES
     src/config_dir.cpp
     src/signals.cpp
     src/tableedit.cpp
+    src/table_format.cpp
     src/d2d_init.cpp
     src/syntax.cpp
     src/syntax_extended.cpp

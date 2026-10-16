@@ -14,6 +14,7 @@
 #endif
 #include "math_render.h"
 #include "image_loader.h"
+#include "table_format.h"
 
 #include <algorithm>
 #include <cctype>
@@ -3540,10 +3541,10 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     std::vector<std::vector<float>> cellNatural(rows.size(), std::vector<float>(colCount, 0.0f));
     std::vector<std::vector<uint8_t>> cellSimple(rows.size(), std::vector<uint8_t>(colCount, 0));
 
-    std::wstring tsv;  // per-cell plain text doubles as the copy payload
+    // Per-cell plain text doubles as the CSV copy payload
+    std::vector<std::vector<std::wstring>> csvCells(rows.size());
     for (size_t r = 0; r < rows.size(); r++) {
         const auto& row = rows[r];
-        if (r > 0) tsv += L"\n";
         for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
             const auto& cell = row->children[c];
             cellAligns[r][c] = cell->align;
@@ -3557,12 +3558,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             };
             for (const auto& ch : cell->children) extract(ch);
 
-            if (c > 0) tsv += L"\t";
-            std::wstring tsvCell = text;
-            for (wchar_t& ch : tsvCell) {
-                if (ch == L'\t' || ch == L'\n' || ch == L'\r') ch = L' ';
-            }
-            tsv += tsvCell;
+            csvCells[r].push_back(text);
 
             // Measure natural width THE WAY THE RENDERER SHAPES IT — same
             // typography and the language-aware font fallback. A raw
@@ -3840,11 +3836,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             if (c < colCount) vx += colWidths[c];
         }
 
-        // Copy-as-TSV hover button hit region
+        // The copy buttons' table
         App::TableInfo info;
         info.bounds =
             D2D1::RectF(indent, tableStartY, indent + totalWidth, tableEndY);
-        info.tsv = std::move(tsv);
+        info.csv = csvQuoteAll(csvCells);
         info.fitKey = fitKey;
         info.fitCandidate = fitCandidate || fitActive;
         info.fitActive = fitActive;

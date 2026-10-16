@@ -96,6 +96,9 @@ void editorReparse(App& app, bool force = false);
 // reparse, used by the preview table cell editor (#148)
 void editorReplaceRangeExternal(App& app, size_t start, size_t end,
                                 const std::wstring& repl);
+// Pads Markdown tables into aligned columns: the table at the caret, or
+// every table when the caret is in none (table_format.cpp)
+void editorAlignTables(App& app, HWND hwnd);
 void editorMarkDirtyAndReparse(App& app);
 
 // Editor search

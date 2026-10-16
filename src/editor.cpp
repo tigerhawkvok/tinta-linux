@@ -18,6 +18,7 @@
 #include "input.h"
 
 #include "export.h"
+#include "table_format.h"
 
 #include <filesystem>
 #include <fstream>
@@ -4389,5 +4390,29 @@ void editorPasteImage(App& app, HWND hwnd, int choice) {
     rebuildLineStarts(app);
     scheduleReparse(app);
     editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// ---- Aligning tables ------------------------------------------------------------
+
+void editorAlignTables(App& app, HWND hwnd) {
+    std::vector<std::pair<size_t, size_t>> spans;
+    size_t start = 0, end = 0;
+    if (tableSpanAt(app.editorText, app.editorCursorPos, start, end)) {
+        spans.push_back({start, end});
+    } else {
+        spans = tableSpans(app.editorText);
+    }
+    int aligned = 0;
+    // Last first, so the earlier spans keep their offsets
+    for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
+        std::wstring before = app.editorText.substr(it->first, it->second - it->first);
+        std::wstring after = alignMarkdownTable(before);
+        if (after == before) continue;
+        editorReplaceRangeExternal(app, it->first, it->second, after);
+        aligned++;
+    }
+    signalHintKey(app, SIGI_CHECK, spans.empty() ? "ectx.aligned_none" : "ectx.aligned");
+    (void)aligned;
     InvalidateRect(hwnd, nullptr, FALSE);
 }

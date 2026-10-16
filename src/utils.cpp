@@ -97,12 +97,12 @@ void updateWindowTitle(App& app) {
         std::wstring wpath = toWide(app.currentFile);
         size_t lastSep = wpath.find_last_of(L"\\/");
         if (lastSep != std::wstring::npos)
-            title = L"Tinta - " + wpath.substr(lastSep + 1);
+            title = L"Tinta Mono - " + wpath.substr(lastSep + 1);
         else
-            title = L"Tinta - " + wpath;
+            title = L"Tinta Mono - " + wpath;
     } else if (app.editMode) {
         // Quick note (Ctrl+N): no backing file until the first save
-        title = L"Tinta - ";
+        title = L"Tinta Mono - ";
         title += tr(app, "title.untitled");
     }
     SetWindowTextW(app.hwnd, title.c_str());

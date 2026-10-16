@@ -940,10 +940,10 @@ struct App {
     std::vector<CodeBlockInfo> codeBlocks;
     int hoveredCodeBlock = -1;
 
-    // Tables - tracked for the copy-as-TSV button
+    // Tables - tracked for the copy buttons (Markdown, CSV)
     struct TableInfo {
         D2D1_RECT_F bounds{};  // document coordinates
-        std::wstring tsv;      // cells joined by tabs, rows by newlines
+        std::wstring csv;      // the cells as CSV, every field quoted
         unsigned fitKey = 0;   // per-layout ordinal for the fit toggle
         bool fitCandidate = false;  // wider than the column at natural size
         bool fitActive = false;
@@ -1751,6 +1751,20 @@ inline float documentViewportWidth(const App& app) {
         if (contentsSlotOpen(app)) width -= tocPanelWidth(app);
     }
     return width > 0.0f ? width : 0.0f;
+}
+
+// The hovered table's buttons in document coordinates: copy as Markdown
+// and as CSV at the top right (clamped into a wide table's visible part),
+// and the fit toggle left of them
+inline void tableButtonRects(const App& app, const App::TableInfo& tb, D2D1_RECT_F& markdown, D2D1_RECT_F& csv,
+                             D2D1_RECT_F& fit) {
+    float scale = app.contentScale * app.zoomFactor;
+    float h = 26.0f * scale, pad = 8.0f * scale, gap = 6.0f * scale;
+    float right = std::min(tb.bounds.right, app.scrollX + documentViewportWidth(app)) - pad;
+    float top = tb.bounds.top + pad;
+    csv = D2D1::RectF(right - 48.0f * scale, top, right, top + h);
+    markdown = D2D1::RectF(csv.left - gap - 88.0f * scale, top, csv.left - gap, top + h);
+    fit = D2D1::RectF(markdown.left - gap - 44.0f * scale, top, markdown.left - gap, top + h);
 }
 
 // Cursor blink runs on a timer instead of per-frame InvalidateRect so the

@@ -740,54 +740,48 @@ render_document:
         }
     }
 
-    // Table copy-as-TSV button on hover (same pattern as code blocks;
-    // wide tables clamp the button into the visible viewport)
+    // Table copy buttons on hover, Markdown and CSV (same pattern as code
+    // blocks; wide tables clamp them into the visible viewport)
     if (app.hoveredTable >= 0 && app.hoveredTable < (int)app.tableRects.size()) {
         const auto& tb = app.tableRects[app.hoveredTable];
         if (tb.bounds.bottom >= viewportTop - cullMargin &&
             tb.bounds.top <= viewportBottom + cullMargin) {
-            float btnW = dpi(app, 88.0f);
-            float btnH = dpi(app, 26.0f);
-            float btnPad = 8.0f * app.contentScale * app.zoomFactor;
-            float rightEdge = std::min(
-                tb.bounds.right, app.scrollX + documentViewportWidth(app));
-            float btnX = rightEdge - btnW - btnPad - app.scrollX;
-            float btnY = tb.bounds.top + btnPad - app.scrollY;
-
-            app.brush->SetColor(D2D1::ColorF(
-                app.theme.isDark ? 0.3f : 0.85f,
-                app.theme.isDark ? 0.3f : 0.85f,
-                app.theme.isDark ? 0.3f : 0.85f,
-                0.9f));
-            app.renderTarget->FillRoundedRectangle(
-                D2D1::RoundedRect(
-                    D2D1::RectF(btnX, btnY, btnX + btnW, btnY + btnH), 4, 4),
-                app.brush);
-
-            app.brush->SetColor(D2D1::ColorF(
-                app.theme.isDark ? 0.9f : 0.15f,
-                app.theme.isDark ? 0.9f : 0.15f,
-                app.theme.isDark ? 0.9f : 0.15f,
-                1.0f));
-            IDWriteTextLayout* btnLayout = nullptr;
-            const wchar_t* copyLabel = tr(app, "table.copy");
-            app.dwriteFactory->CreateTextLayout(
-                copyLabel, (UINT32)wcslen(copyLabel), app.codeFormat, btnW,
-                btnH, &btnLayout);
-            if (btnLayout) {
-                useUiFontFallback(app, btnLayout);
-                btnLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                btnLayout->SetParagraphAlignment(
-                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                app.renderTarget->DrawTextLayout(
-                    D2D1::Point2F(btnX, btnY), btnLayout, app.brush);
-                btnLayout->Release();
+            D2D1_RECT_F mdRect, csvRect, fitRect;
+            tableButtonRects(app, tb, mdRect, csvRect, fitRect);
+            float btnH = mdRect.bottom - mdRect.top;
+            float btnY = mdRect.top - app.scrollY;
+            for (int b = 0; b < 2; b++) {
+                const D2D1_RECT_F& r = b == 0 ? mdRect : csvRect;
+                const wchar_t* label = b == 0 ? L"Markdown" : L"CSV";
+                float bx = r.left - app.scrollX, bw = r.right - r.left;
+                app.brush->SetColor(D2D1::ColorF(
+                    app.theme.isDark ? 0.3f : 0.85f,
+                    app.theme.isDark ? 0.3f : 0.85f,
+                    app.theme.isDark ? 0.3f : 0.85f,
+                    0.9f));
+                app.renderTarget->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(bx, btnY, bx + bw, btnY + btnH), 4, 4), app.brush);
+                app.brush->SetColor(D2D1::ColorF(
+                    app.theme.isDark ? 0.9f : 0.15f,
+                    app.theme.isDark ? 0.9f : 0.15f,
+                    app.theme.isDark ? 0.9f : 0.15f,
+                    1.0f));
+                IDWriteTextLayout* btnLayout = nullptr;
+                app.dwriteFactory->CreateTextLayout(label, (UINT32)wcslen(label), app.codeFormat, bw, btnH,
+                                                    &btnLayout);
+                if (btnLayout) {
+                    useUiFontFallback(app, btnLayout);
+                    btnLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    btnLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    app.renderTarget->DrawTextLayout(D2D1::Point2F(bx, btnY), btnLayout, app.brush);
+                    btnLayout->Release();
+                }
             }
 
             // Oversized tables add the fit-to-width toggle
             if (tb.fitCandidate) {
-                float fitW = dpi(app, 44.0f);
-                float fitX = btnX - fitW - dpi(app, 6.0f);
+                float fitW = fitRect.right - fitRect.left;
+                float fitX = fitRect.left - app.scrollX;
                 app.brush->SetColor(D2D1::ColorF(
                     app.theme.isDark ? 0.3f : 0.85f,
                     app.theme.isDark ? 0.3f : 0.85f,

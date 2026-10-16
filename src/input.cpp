@@ -18,6 +18,7 @@
 #include "search_panel.h"
 #include "d2d_init.h"
 #include "settings.h"
+#include "table_format.h"
 #include "render.h"
 #include "overlays.h"
 #include "sidepanels.h"
@@ -47,7 +48,7 @@ static HCURSOR cursorSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
 
 static const App::TaskRect* taskRectAt(const App& app);
 static void startPageInvoke(App& app, HWND hwnd, int id);
-static bool tableCopyButtonAt(const App& app, int mouseX, int mouseY);
+static int tableCopyButtonAt(const App& app, int mouseX, int mouseY);
 static bool diagramPngButtonAt(const App& app, int mouseX, int mouseY);
 static bool tableFitButtonAt(const App& app, int mouseX, int mouseY);
 static bool diagramFitButtonAt(const App& app, int mouseX, int mouseY);
@@ -739,6 +740,14 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             persistPasteImage(app);
             break;
         }
+        case SET_MAKE_DEFAULT:
+            if (registerFileAssociation()) {
+                openDefaultAppsSettings();
+                signalHintKey(app, SIGI_CHECK, "settings.set_default.done");
+            } else {
+                signalPushKey(app, SIG_WARN, SIGI_WARNING, "settings.set_default.failed");
+            }
+            break;
         case SET_OPEN_LICENSES:
             // The third-party notices open as a document tab
             closeSettings(app, hwnd);
@@ -2671,25 +2680,21 @@ static bool diagramPngButtonAt(const App& app, int mouseX, int mouseY) {
            docY >= btnY && docY <= btnY + btnH;
 }
 
-// True when (mouseX, mouseY) is on the hovered table's copy-as-TSV button
-static bool tableCopyButtonAt(const App& app, int mouseX, int mouseY) {
+// The hovered table's copy button under (mouseX, mouseY): 1 Markdown,
+// 2 CSV, 0 none
+static int tableCopyButtonAt(const App& app, int mouseX, int mouseY) {
     if (app.hoveredTable < 0 ||
         app.hoveredTable >= (int)app.tableRects.size()) {
-        return false;
+        return 0;
     }
-    const auto& tb = app.tableRects[app.hoveredTable];
-    float previewOffsetX = documentViewportX(app);
-    float docX = (mouseX - previewOffsetX) + app.scrollX;
+    float docX = (mouseX - documentViewportX(app)) + app.scrollX;
     float docY = mouseY + app.scrollY;
-    float btnW = dpi(app, 88.0f);
-    float btnH = dpi(app, 26.0f);
-    float btnPad = 8.0f * app.contentScale * app.zoomFactor;
-    float rightEdge =
-        std::min(tb.bounds.right, app.scrollX + documentViewportWidth(app));
-    float btnX = rightEdge - btnW - btnPad;
-    float btnY = tb.bounds.top + btnPad;
-    return docX >= btnX && docX <= btnX + btnW &&
-           docY >= btnY && docY <= btnY + btnH;
+    D2D1_RECT_F md, csv, fit;
+    tableButtonRects(app, app.tableRects[app.hoveredTable], md, csv, fit);
+    auto in = [&](const D2D1_RECT_F& r) {
+        return docX >= r.left && docX <= r.right && docY >= r.top && docY <= r.bottom;
+    };
+    return in(md) ? 1 : in(csv) ? 2 : 0;
 }
 
 // True when (mouseX, mouseY) is on the hovered diagram's fit-to-width
@@ -2728,20 +2733,11 @@ static bool tableFitButtonAt(const App& app, int mouseX, int mouseY) {
     }
     const auto& tb = app.tableRects[app.hoveredTable];
     if (!tb.fitCandidate) return false;
-    float previewOffsetX = documentViewportX(app);
-    float docX = (mouseX - previewOffsetX) + app.scrollX;
+    float docX = (mouseX - documentViewportX(app)) + app.scrollX;
     float docY = mouseY + app.scrollY;
-    float btnW = dpi(app, 88.0f);
-    float btnH = dpi(app, 26.0f);
-    float btnPad = 8.0f * app.contentScale * app.zoomFactor;
-    float rightEdge =
-        std::min(tb.bounds.right, app.scrollX + documentViewportWidth(app));
-    float btnX = rightEdge - btnW - btnPad;
-    float fitW = dpi(app, 44.0f);
-    float fitX = btnX - fitW - dpi(app, 6.0f);
-    float btnY = tb.bounds.top + btnPad;
-    return docX >= fitX && docX <= fitX + fitW &&
-           docY >= btnY && docY <= btnY + btnH;
+    D2D1_RECT_F md, csv, fit;
+    tableButtonRects(app, tb, md, csv, fit);
+    return docX >= fit.left && docX <= fit.right && docY >= fit.top && docY <= fit.bottom;
 }
 
 // Flip a table/diagram between natural size and fit-to-width and relayout
@@ -3356,10 +3352,14 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         toggleFitBlock(app, hwnd,
                        app.tableRects[app.hoveredTable].fitKey);
         app.selecting = false;
-    } else if (tableCopyButtonAt(app, app.mouseX, app.mouseY)) {
-        // Table copy button: cells joined by tabs paste into a
-        // spreadsheet as a grid
-        copyToClipboard(hwnd, app.tableRects[app.hoveredTable].tsv);
+    } else if (int which = tableCopyButtonAt(app, app.mouseX, app.mouseY)) {
+        // Markdown: the table as written. CSV: every field quoted.
+        const auto& table = app.tableRects[app.hoveredTable];
+        std::wstring payload = table.csv;
+        if (which == 1 && app.root && app.root->source) {
+            payload = toWide(tableMarkdownAt(app.root->source->mapped, table.sourceOffset));
+        }
+        copyToClipboard(hwnd, payload);
         {
             D2D1_RECT_F anchor = app.tableRects[app.hoveredTable].bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,

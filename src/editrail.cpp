@@ -375,7 +375,8 @@ struct ECtxItem {
 static const ECtxItem kECtx[] = {
     {100, L"", "ectx.cut", L"Ctrl+X", true, false, false},
     {101, L"", "ectx.copy", L"Ctrl+C", true, false, false},
-    {102, L"", "ectx.paste", L"Ctrl+V", false, false, true},
+    {102, L"", "ectx.paste", L"Ctrl+V", false, false, false},
+    {103, L"\u2261", "ectx.align_tables", L"", false, false, true},
     {0, L"", "ectx.insert", L"", false, false, false},
     {110, L"\u229E", "ectx.table", L"\u25B8", false, true, false},
     {111, L"\u25C8", "ectx.diagram", L"\u25B8", false, true, false},
@@ -805,6 +806,7 @@ bool editCtxMouseDown(App& app, HWND hwnd, int x, int y) {
             case 100: editorClipboardCut(app, hwnd); break;
             case 101: editorClipboardCopy(app, hwnd); break;
             case 102: editorClipboardPaste(app, hwnd); break;
+            case 103: editorAlignTables(app, hwnd); break;
             case 110: app.editCtxSub = 1; InvalidateRect(hwnd, nullptr, FALSE); return true;
             case 111: app.editCtxSub = 2; InvalidateRect(hwnd, nullptr, FALSE); return true;
             case 112: editRailInvoke(app, hwnd, 22); break;
