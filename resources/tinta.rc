@@ -3,6 +3,13 @@
 // remains consistent on all systems.
 IDI_ICON1 ICON "tinta.ico"
 
+// Monaspace Argon, the default code face, loaded privately at startup
+// (src/bundled_fonts.cpp): code renders in it without installing anything
+TINTA_FONT_ARGON_REGULAR    RCDATA "../third_party/fonts/monaspace-argon/MonaspaceArgon-Regular.otf"
+TINTA_FONT_ARGON_BOLD       RCDATA "../third_party/fonts/monaspace-argon/MonaspaceArgon-Bold.otf"
+TINTA_FONT_ARGON_ITALIC     RCDATA "../third_party/fonts/monaspace-argon/MonaspaceArgon-Italic.otf"
+TINTA_FONT_ARGON_BOLDITALIC RCDATA "../third_party/fonts/monaspace-argon/MonaspaceArgon-BoldItalic.otf"
+
 // Version metadata. The numbers come from CMake (project VERSION) via
 // TINTA_VERSION_* compile definitions so the exe always self-describes
 // correctly — executables without version metadata disproportionately

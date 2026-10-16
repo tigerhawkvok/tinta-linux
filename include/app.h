@@ -102,7 +102,7 @@ struct DiagramMetrics {
 enum class SyntaxTokenType { Plain, Keyword, String, Comment, Number, Function, TypeName, Operator, ControlFlow };
 
 // The default code face: OFL-licensed, so the Linux build ships it
-// (third_party/fonts); Windows uses it when installed, else Consolas
+// (third_party/fonts), and the Windows exe carries it (bundled_fonts.cpp)
 inline constexpr const wchar_t* kDefaultCodeFont = L"Monaspace Argon";
 
 // Theme colors
@@ -1552,6 +1552,11 @@ struct App {
 inline float dpi(const App& app, float value) {
     return value * app.contentScale;
 }
+
+// The collection a text format for `family` is created from: Tinta's
+// bundled faces where the family is not installed (Windows), else nullptr,
+// the system collection (bundled_fonts.cpp)
+IDWriteFontCollection* fontCollectionFor(const App& app, const wchar_t* family);
 
 // Height of the stats overlay box (0 when hidden): two lines, three once
 // diagrams have been drawn

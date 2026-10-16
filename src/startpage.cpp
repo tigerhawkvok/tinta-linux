@@ -246,7 +246,7 @@ static IDWriteTextLayout* spLayout(App& app, const std::wstring& text,
                                    float trackingDip = 0.0f) {
     IDWriteTextFormat* fmt = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        L"Segoe UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+        L"Segoe UI", fontCollectionFor(app, L"Segoe UI"), weight, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, dpi(app, sizeDip), L"en-us", &fmt);
     if (!fmt) return nullptr;
     useUiFontFallback(app, fmt);

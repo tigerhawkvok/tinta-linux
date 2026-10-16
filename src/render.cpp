@@ -1865,7 +1865,7 @@ struct DiagramFormats {
         float size = (style.mono ? 13.0f : 14.0f) * scale * style.scale;
         IDWriteTextFormat* format = nullptr;
         app.dwriteFactory->CreateTextFormat(
-            family, nullptr,
+            family, fontCollectionFor(app, family),
             style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                        : DWRITE_FONT_WEIGHT_NORMAL,
             style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,

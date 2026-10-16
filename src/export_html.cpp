@@ -170,7 +170,7 @@ WrappedLines wrapLines(App& app, const std::wstring& text, float wrapWidth,
     constexpr float kHuge = 100000.0f;
     IDWriteTextFormat* format = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        style.mono ? app.theme.codeFontFamily : app.theme.fontFamily, nullptr,
+        style.mono ? app.theme.codeFontFamily : app.theme.fontFamily, fontCollectionFor(app, style.mono ? app.theme.codeFontFamily : app.theme.fontFamily),
         style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
         style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, diagramFontSize(style, scale), L"en-us",
@@ -915,7 +915,7 @@ mermaidext::Built buildDiagramPrims(App& app, const std::string& sourceUtf8,
         const wchar_t* family =
             style.mono ? app.theme.codeFontFamily : app.theme.fontFamily;
         app.dwriteFactory->CreateTextFormat(
-            family, nullptr,
+            family, fontCollectionFor(app, family),
             style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                        : DWRITE_FONT_WEIGHT_NORMAL,
             style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,

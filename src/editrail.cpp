@@ -40,7 +40,7 @@ static IDWriteTextLayout* railLayout(App& app, const std::wstring& text,
     if (!family) family = app.uiCodeFont;
     IDWriteTextFormat* fmt = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        family, nullptr, weight, style, DWRITE_FONT_STRETCH_NORMAL,
+        family, fontCollectionFor(app, family), weight, style, DWRITE_FONT_STRETCH_NORMAL,
         dpi(app, sizeDip), L"en-us", &fmt);
     if (!fmt) return nullptr;
     fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);

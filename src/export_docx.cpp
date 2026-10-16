@@ -480,7 +480,8 @@ void drawPrims(App& app, RasterTarget& rt, const mermaidext::Built& built,
                 app.dwriteFactory->CreateTextFormat(
                     prim.style.mono ? app.theme.codeFontFamily
                                     : app.theme.fontFamily,
-                    nullptr,
+                    fontCollectionFor(app, prim.style.mono ? app.theme.codeFontFamily
+                                    : app.theme.fontFamily),
                     prim.style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                                     : DWRITE_FONT_WEIGHT_NORMAL,
                     prim.style.italic ? DWRITE_FONT_STYLE_ITALIC

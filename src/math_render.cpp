@@ -99,7 +99,7 @@ IDWriteTextLayout* makeRunLayout(App& app, const std::wstring& text,
                                  float& outBaseline, Metrics& m) {
     IDWriteTextFormat* fmt = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        mathFontFamily(app), nullptr,
+        mathFontFamily(app), fontCollectionFor(app, mathFontFamily(app)),
         bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
         italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", &fmt);

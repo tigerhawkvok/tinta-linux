@@ -2360,10 +2360,10 @@ void renderPrintPreview(App& app) {
 
     IDWriteTextFormat* uiFmt = nullptr;
     IDWriteTextFormat* btnFmt = nullptr;
-    app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
+    app.dwriteFactory->CreateTextFormat(L"Segoe UI", fontCollectionFor(app, L"Segoe UI"),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         13.0f * ui, L"en-us", &uiFmt);
-    app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
+    app.dwriteFactory->CreateTextFormat(L"Segoe UI", fontCollectionFor(app, L"Segoe UI"),
         DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         13.0f * ui, L"en-us", &btnFmt);
     useUiFontFallback(app, uiFmt);
@@ -3922,13 +3922,13 @@ void renderThemeEditor(App& app) {
             ? L"Segoe UI" : app.themeEditorFont.c_str();
         IDWriteTextFormat* h = nullptr; IDWriteTextFormat* b = nullptr;
         IDWriteTextFormat* m = nullptr;
-        app.dwriteFactory->CreateTextFormat(fam, nullptr, DWRITE_FONT_WEIGHT_BOLD,
+        app.dwriteFactory->CreateTextFormat(fam, fontCollectionFor(app, fam), DWRITE_FONT_WEIGHT_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 20.0f),
             L"en-us", &h);
-        app.dwriteFactory->CreateTextFormat(fam, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        app.dwriteFactory->CreateTextFormat(fam, fontCollectionFor(app, fam), DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 13.5f),
             L"en-us", &b);
-        app.dwriteFactory->CreateTextFormat(app.uiCodeFont, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        app.dwriteFactory->CreateTextFormat(app.uiCodeFont, fontCollectionFor(app, app.uiCodeFont), DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 12.5f),
             L"en-us", &m);
         float sx = spec.left + dpi(app, 18.0f);
@@ -4006,7 +4006,7 @@ void renderThemeEditor(App& app) {
                     D2D1::RectF(list.left + 1, ry, list.right - 1, ry + fontRowHeight), app.brush);
             }
             IDWriteTextFormat* ff = nullptr;
-            app.dwriteFactory->CreateTextFormat(fam.c_str(), nullptr,
+            app.dwriteFactory->CreateTextFormat(fam.c_str(), fontCollectionFor(app, fam.c_str()),
                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL, dpi(app, 14.0f), L"en-us", &ff);
             D2D1_COLOR_F tc = base.text; tc.a = selected ? 1.0f : 0.8f;
