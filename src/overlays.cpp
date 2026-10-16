@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "signals.h"
 #include "i18n.h"
+#include "fs_path.h"
 
 // Prompt-chip helpers defined with the dialogs below; the floating panels
 // share their surface, shadow, and keycap language (t13)
@@ -3074,6 +3075,51 @@ void renderSettingsOverlay(App& app) {
             settingsChip(app, bx, chipY, tr(app, "settings.browse"), false,
                          SET_LOCATE_PANDOC, anim, fmt);
         }
+        cy += rowCardH + cardGap;
+        // Pasted images: ask, the assets folder, inline, or off
+        card(rowCardH);
+        {
+            const wchar_t* labels[4] = {tr(app, "settings.paste.ask"), tr(app, "settings.paste.assets"),
+                                        tr(app, "paste.inline"), tr(app, "settings.paste.off")};
+            const char* modes[4] = {"ask", "assets", "inline", "off"};
+            const int actions[4] = {SET_PASTE_ASK, SET_PASTE_ASSETS, SET_PASTE_INLINE, SET_PASTE_OFF};
+            float segH = dpi(app, 26.0f);
+            // Each segment as wide as its label: "Eingebettet" beside "Aus"
+            // left the card's own label no room in a narrow window
+            float segW[4], segsW = 0.0f;
+            for (int s = 0; s < 4; s++) segsW += segW[s] = measureText(app, labels[s], fmt) + dpi(app, 20.0f);
+            float inset = dpi(app, 3.0f);
+            float segRight = cx + cw - cardPad - inset;
+            float segY = cy + (rowCardH - segH) * 0.5f;
+            cardLabel(tr(app, "settings.paste_images"), tr(app, "settings.paste_images.hint"),
+                      segsW + inset * 5 + dpi(app, 10.0f));
+            D2D1_RECT_F container = D2D1::RectF(segRight - segsW - inset * 4, segY - inset,
+                                                segRight + inset, segY + segH + inset);
+            D2D1_COLOR_F well = app.theme.isDark ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.22f * anim)
+                                                 : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.07f * anim);
+            app.brush->SetColor(well);
+            app.renderTarget->FillRoundedRectangle(
+                D2D1::RoundedRect(container, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
+            float sx = container.left + inset;
+            for (int s = 0; s < 4; s++) {
+                D2D1_RECT_F sr = D2D1::RectF(sx, segY, sx + segW[s], segY + segH);
+                bool active = app.pasteImageMode == modes[s];
+                if (active) {
+                    app.brush->SetColor(settingsLift(app, 0.22f, 1.0f, anim));
+                    app.renderTarget->FillRoundedRectangle(
+                        D2D1::RoundedRect(sr, dpi(app, 6.0f), dpi(app, 6.0f)), app.brush);
+                }
+                D2D1_COLOR_F tc = app.theme.text;
+                tc.a = (active ? 0.95f : 0.55f) * anim;
+                app.brush->SetColor(tc);
+                float tw = measureText(app, labels[s], fmt);
+                app.renderTarget->DrawText(labels[s], (UINT32)wcslen(labels[s]), fmt,
+                    D2D1::RectF(sx + (segW[s] - tw) * 0.5f, segY + dpi(app, 4.0f), sx + segW[s], segY + segH),
+                    app.brush);
+                app.settingsHits.push_back({sr, actions[s]});
+                sx += segW[s] + inset;
+            }
+        }
     }
 
     // Shortcut profile popup, drawn last so it sits above the rows
@@ -3432,6 +3478,144 @@ void renderConfirmExitDialog(App& app) {
 // Same shell as the unsaved-changes dialog: a clicked ghost reference
 // offers to create the file and start typing. The body line shows the
 // resolved target path.
+void renderPasteImagePrompt(App& app) {
+    IDWriteTextFormat* fmt = app.folderBrowserFormat;
+    if (!fmt) return;
+    app.pasteImageHits.clear();
+    const D2DTheme& base = app.theme;
+    bool hasFolder = !app.currentFile.empty();
+
+    std::wstring title = tr(app, "paste.title");
+    std::wstring detail = tr(app, "paste.no_folder");
+    if (hasFolder) {
+        std::wstring target = editorPasteImageAssetPath(app);
+        std::filesystem::path doc = fsPath(toWide(app.currentFile));
+        std::filesystem::path relative = fsPath(target).lexically_relative(doc.parent_path());
+        detail = relative.empty() ? target : relative.generic_wstring();
+    }
+    struct Button {
+        std::wstring label;
+        int choice;
+        bool primary;
+    };
+    std::vector<Button> buttons;
+    if (hasFolder) buttons.push_back({tr(app, "paste.assets"), kPasteAssets, true});
+    buttons.push_back({tr(app, "paste.inline"), kPasteInline, !hasFolder});
+    buttons.push_back({tr(app, "paste.saveas"), kPasteSaveAs, false});
+    std::wstring remember = tr(app, "paste.remember");
+
+    float pad = dpi(app, 12.0f);
+    float btnH = dpi(app, 23.0f);
+    float buttonsW = 0.0f;
+    for (const auto& b : buttons) buttonsW += measureText(app, b.label, fmt) + dpi(app, 20.0f) + dpi(app, 6.0f);
+    float boxSide = dpi(app, 13.0f);
+    float rememberW = boxSide + dpi(app, 6.0f) + measureText(app, remember, fmt);
+    float w = std::max(dpi(app, 380.0f), pad + buttonsW + dpi(app, 10.0f) + rememberW + pad);
+    w = std::min(w, (float)app.width - dpi(app, 28.0f));
+    float h = dpi(app, 88.0f);
+    float right = (float)app.width - dpi(app, 14.0f);
+    float bottom = (float)app.height - dpi(app, 14.0f) -
+                   (app.showStats ? statsOverlayHeight(app) + dpi(app, 5.0f) : 0.0f);
+    D2D1_RECT_F r = D2D1::RectF(right - w, bottom - h, right, bottom);
+
+    promptChipShadow(app, r, dpi(app, 10.0f));
+    app.brush->SetColor(promptChipSurface(app));
+    app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(r, dpi(app, 10.0f), dpi(app, 10.0f)), app.brush);
+    D2D1_COLOR_F border = base.accent;
+    border.a = 0.4f;
+    app.brush->SetColor(border);
+    app.renderTarget->DrawRoundedRectangle(D2D1::RoundedRect(r, dpi(app, 10.0f), dpi(app, 10.0f)), app.brush,
+                                           1.0f);
+
+    // Row 1: title, keycap, cross (= cancel)
+    float row1cy = r.top + dpi(app, 10.0f) + dpi(app, 11.0f);
+    float kx = r.right - pad;
+    {
+        D2D1_COLOR_F c = base.text;
+        c.a = 0.45f;
+        app.brush->SetColor(c);
+        float s = dpi(app, 3.6f);
+        float ccx = kx - dpi(app, 5.0f);
+        app.renderTarget->DrawLine(D2D1::Point2F(ccx - s, row1cy - s), D2D1::Point2F(ccx + s, row1cy + s),
+                                   app.brush, 1.3f);
+        app.renderTarget->DrawLine(D2D1::Point2F(ccx - s, row1cy + s), D2D1::Point2F(ccx + s, row1cy - s),
+                                   app.brush, 1.3f);
+        app.pasteImageHits.push_back({D2D1::RectF(kx - dpi(app, 12.0f), r.top, r.right, r.top + dpi(app, 26.0f)),
+                                      kPasteCancel});
+        kx -= dpi(app, 18.0f);
+    }
+    kx -= promptKeycap(app, L"Esc", kx, row1cy);
+    {
+        D2D1_COLOR_F c = base.text;
+        c.a = 0.95f;
+        app.brush->SetColor(c);
+        app.renderTarget->DrawText(title.c_str(), (UINT32)title.size(), fmt,
+                                   D2D1::RectF(r.left + pad, row1cy - dpi(app, 9.0f), kx, row1cy + dpi(app, 9.0f)),
+                                   app.brush);
+    }
+    // Row 2: where the assets folder puts it, quiet
+    if (app.signalSmallFormat) {
+        D2D1_COLOR_F c = base.text;
+        c.a = 0.5f;
+        app.brush->SetColor(c);
+        app.renderTarget->DrawText(detail.c_str(), (UINT32)detail.size(), app.signalSmallFormat,
+                                   D2D1::RectF(r.left + pad, r.top + dpi(app, 34.0f), r.right - pad,
+                                               r.top + dpi(app, 50.0f)),
+                                   app.brush);
+    }
+    // Row 3: the choices, then "Remember"
+    float by = r.bottom - dpi(app, 10.0f) - btnH;
+    float bx = r.left + pad;
+    for (const auto& b : buttons) {
+        float bw = measureText(app, b.label, fmt) + dpi(app, 20.0f);
+        D2D1_RECT_F br = D2D1::RectF(bx, by, bx + bw, by + btnH);
+        D2D1_COLOR_F c = b.primary ? base.accent : base.text;
+        if (b.primary) {
+            c.a = 0.94f;
+            app.brush->SetColor(c);
+            app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(br, dpi(app, 6.0f), dpi(app, 6.0f)), app.brush);
+            app.brush->SetColor(D2D1::ColorF(1, 1, 1, 0.97f));
+        } else {
+            c.a = 0.3f;
+            app.brush->SetColor(c);
+            app.renderTarget->DrawRoundedRectangle(D2D1::RoundedRect(br, dpi(app, 6.0f), dpi(app, 6.0f)), app.brush,
+                                                   1.0f);
+            c.a = 0.85f;
+            app.brush->SetColor(c);
+        }
+        app.renderTarget->DrawText(b.label.c_str(), (UINT32)b.label.size(), fmt,
+                                   D2D1::RectF(br.left + dpi(app, 10.0f), br.top + dpi(app, 3.0f), br.right, br.bottom),
+                                   app.brush);
+        app.pasteImageHits.push_back({br, b.choice});
+        bx = br.right + dpi(app, 6.0f);
+    }
+    {
+        float rx = r.right - pad - rememberW;
+        float cy = by + btnH * 0.5f;
+        D2D1_RECT_F box = D2D1::RectF(rx, cy - boxSide * 0.5f, rx + boxSide, cy + boxSide * 0.5f);
+        D2D1_COLOR_F c = base.text;
+        c.a = 0.5f;
+        app.brush->SetColor(c);
+        app.renderTarget->DrawRoundedRectangle(D2D1::RoundedRect(box, dpi(app, 3.0f), dpi(app, 3.0f)), app.brush, 1.0f);
+        if (app.pasteImageRemember) {
+            app.brush->SetColor(base.accent);
+            app.renderTarget->DrawLine(D2D1::Point2F(box.left + boxSide * 0.22f, cy),
+                                       D2D1::Point2F(box.left + boxSide * 0.42f, box.bottom - boxSide * 0.25f),
+                                       app.brush, 1.6f);
+            app.renderTarget->DrawLine(D2D1::Point2F(box.left + boxSide * 0.42f, box.bottom - boxSide * 0.25f),
+                                       D2D1::Point2F(box.right - boxSide * 0.2f, box.top + boxSide * 0.25f),
+                                       app.brush, 1.6f);
+        }
+        c.a = 0.8f;
+        app.brush->SetColor(c);
+        app.renderTarget->DrawText(remember.c_str(), (UINT32)remember.size(), fmt,
+                                   D2D1::RectF(box.right + dpi(app, 6.0f), by + dpi(app, 3.0f), r.right - pad, by + btnH),
+                                   app.brush);
+        app.pasteImageHits.push_back({D2D1::RectF(rx, by, r.right - pad, by + btnH), 9});
+    }
+    app.promptChipRect = r;
+}
+
 void renderCreateRefDialog(App& app) {
     IDWriteTextFormat* fmt = app.folderBrowserFormat;
     if (!fmt) return;

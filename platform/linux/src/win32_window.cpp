@@ -924,6 +924,22 @@ HANDLE desktopClipboardText() {
     return memory;
 }
 
+// Its image, as the "PNG" format (the clipboard keeps the handle)
+HANDLE desktopClipboardPng(UINT format) {
+    std::string png;
+    if (!tinta::gtk::readClipboardImagePng(png)) return nullptr;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, png.size());
+    if (void* to = GlobalLock(memory)) {
+        std::memcpy(to, png.data(), png.size());
+        GlobalUnlock(memory);
+    }
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto& slot = state().clipboard[format];
+    if (slot) GlobalFree(slot);
+    slot = memory;
+    return memory;
+}
+
 bool desktopOwnsClipboard() { return tinta::gtk::active() && !tinta::gtk::clipboardIsLocal(); }
 
 }  // namespace
@@ -1025,14 +1041,21 @@ HANDLE SetClipboardData(UINT format, HANDLE memory) {
 }
 
 HANDLE GetClipboardData(UINT format) {
-    if (desktopOwnsClipboard()) return format == CF_UNICODETEXT ? desktopClipboardText() : nullptr;
+    if (desktopOwnsClipboard()) {
+        if (format == CF_UNICODETEXT) return desktopClipboardText();
+        if (format == RegisterClipboardFormatW(L"PNG")) return desktopClipboardPng(format);
+        return nullptr;
+    }
     std::lock_guard<std::mutex> lock(state().mutex);
     auto it = state().clipboard.find(format);
     return it == state().clipboard.end() ? nullptr : it->second;
 }
 
 BOOL IsClipboardFormatAvailable(UINT format) {
-    if (desktopOwnsClipboard()) return format == CF_UNICODETEXT && tinta::gtk::clipboardHasText();
+    if (desktopOwnsClipboard()) {
+        if (format == CF_UNICODETEXT) return tinta::gtk::clipboardHasText();
+        return format == RegisterClipboardFormatW(L"PNG") && tinta::gtk::clipboardHasImage();
+    }
     std::lock_guard<std::mutex> lock(state().mutex);
     return state().clipboard.count(format) ? TRUE : FALSE;
 }

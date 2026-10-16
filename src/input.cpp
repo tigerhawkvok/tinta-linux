@@ -730,6 +730,15 @@ static void settingsAction(App& app, HWND hwnd, int action) {
         case SET_CHECK_UPDATES:
             if (!app.updateCheckRunning) PostMessageW(hwnd, WM_APP_UPDATE_CHECK_NOW, 0, 0);
             break;
+        case SET_PASTE_ASK:
+        case SET_PASTE_ASSETS:
+        case SET_PASTE_INLINE:
+        case SET_PASTE_OFF: {
+            static const char* modes[] = {"ask", "assets", "inline", "off"};
+            app.pasteImageMode = modes[action - SET_PASTE_ASK];
+            persistPasteImage(app);
+            break;
+        }
         case SET_OPEN_LICENSES:
             // The third-party notices open as a document tab
             closeSettings(app, hwnd);
@@ -1742,7 +1751,8 @@ void handleContextMenu(App& app, HWND hwnd, LPARAM lParam) {
     // App panels own both mouse buttons in either reading or editing mode.
     if (app.showSettings || app.showHelp || app.showThemeChooser ||
         app.showThemeEditor || app.showShortcutEditor || app.showPrintPreview ||
-        app.confirmExitPending || app.createRefPending || app.showLightbox) return;
+        app.confirmExitPending || app.createRefPending || app.pasteImagePending ||
+        app.showLightbox) return;
     closeContextMenu(app);
     POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     bool fromKeyboard = pt.x == -1 && pt.y == -1;
@@ -1854,6 +1864,19 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         }
         return;
     }
+    // The paste-image card belongs to this document's editor: a press
+    // anywhere else (the tab strip included) cancels it and does nothing
+    // more, so no tab switch or menu leaves it pending over another
+    // document. Its own buttons act on the release.
+    if (app.pasteImagePending) {
+        const D2D1_RECT_F& card = app.promptChipRect;
+        float px = (float)GET_X_LPARAM(lParam), py = (float)GET_Y_LPARAM(lParam);
+        if (px < card.left || px > card.right || py < card.top || py > card.bottom) {
+            editorPasteImage(app, hwnd, kPasteCancel);
+            app.swallowNextMouseUp = true;
+        }
+        return;
+    }
     if (appMenuButtonAt(app, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam))) {
         if (appMenuAvailable(app)) {
             app.appMenuPressed = true;
@@ -1939,7 +1962,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     if (app.editMode && app.confirmExitPending) return;
     // Create-missing-reference dialog: buttons act on the release; the
     // press must not start a document selection underneath it
-    if (app.createRefPending) return;
+    if (app.createRefPending || app.pasteImagePending) return;
 
     // Print preview: controls act on the release
     if (app.showPrintPreview) return;
@@ -2788,6 +2811,29 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         return;
     }
 
+    // Paste-image card: its buttons and box act; a release on the card's
+    // blank space keeps it, one off it (a press that slid away) cancels
+    if (app.pasteImagePending) {
+        float mx = (float)GET_X_LPARAM(lParam);
+        float my = (float)GET_Y_LPARAM(lParam);
+        for (const auto& hit : app.pasteImageHits) {
+            if (mx >= hit.first.left && mx <= hit.first.right && my >= hit.first.top && my <= hit.first.bottom) {
+                if (hit.second == 9) {
+                    app.pasteImageRemember = !app.pasteImageRemember;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else {
+                    editorPasteImage(app, hwnd, hit.second);
+                }
+                return;
+            }
+        }
+        const D2D1_RECT_F& card = app.promptChipRect;
+        if (mx < card.left || mx > card.right || my < card.top || my > card.bottom) {
+            editorPasteImage(app, hwnd, kPasteCancel);
+        }
+        return;
+    }
+
     // Create-missing-reference dialog: buttons act, clicks elsewhere
     // cancel (unlike unsaved-changes, nothing is at stake)
     if (app.createRefPending) {
@@ -3487,6 +3533,25 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             createRefAction(app, hwnd, 2);
         }
         return false;
+    }
+
+    // Pasting an image: A(ssets), I(nline), S(ave as), R(emember), Enter
+    // takes the first choice, Esc cancels; nothing types
+    if (app.pasteImagePending) {
+        bool hasFolder = !app.currentFile.empty();
+        switch (wParam) {
+            case VK_ESCAPE: editorPasteImage(app, hwnd, kPasteCancel); break;
+            case VK_RETURN: editorPasteImage(app, hwnd, hasFolder ? kPasteAssets : kPasteInline); break;
+            case 'A': if (hasFolder) editorPasteImage(app, hwnd, kPasteAssets); break;
+            case 'I': editorPasteImage(app, hwnd, kPasteInline); break;
+            case 'S': editorPasteImage(app, hwnd, kPasteSaveAs); break;
+            case 'R':
+                app.pasteImageRemember = !app.pasteImageRemember;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                break;
+        }
+        app.swallowCharsUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+        return true;
     }
 
     // Print preview captures the whole keyboard while open

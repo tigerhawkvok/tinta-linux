@@ -141,6 +141,8 @@ void tabActivate(App& app, HWND hwnd, int index) {
     // Leaving an embedded Learn document: an empty tab activated later
     // shows the launcher again
     app.startPageEmbeddedOpen = false;
+    // A paste-image card is the leaving document's
+    app.pasteImagePending = false;
 
     syncActiveTab(app);
     parkActiveEditBuffer(app);
@@ -1061,7 +1063,8 @@ const App::TabHit* tabHitFor(const App& app, int tab) {
 // Menus, dialogs and drags own the pointer: no card over them
 bool tabHoverCardBlocked(const App& app) {
     return app.showTabSwitcher || app.showTabMenu || app.showContextMenu ||
-           app.confirmExitPending || app.createRefPending || app.showHelp ||
+           app.confirmExitPending || app.createRefPending || app.pasteImagePending ||
+           app.showHelp ||
            app.showSettings || app.showThemeChooser || app.showThemeEditor ||
            app.showShortcutEditor || app.showLightbox ||
            app.showPrintPreview || app.tabDragIndex >= 0;

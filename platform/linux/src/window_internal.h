@@ -75,6 +75,9 @@ void publishClipboardText(const std::wstring& text);
 void publishClipboardImage(const std::string& png);
 bool readClipboardText(std::wstring& text);
 bool clipboardHasText();
+bool clipboardHasImage();
+// Another application's clipboard image, as PNG bytes
+bool readClipboardImagePng(std::string& png);
 bool clipboardIsLocal();  // this process set the current clipboard
 bool fileDialog(OPENFILENAMEW* ofn, bool save);
 int messageBox(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type);

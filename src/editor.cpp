@@ -2590,40 +2590,11 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                     return;
                 }
                 std::wstring paste = editorGetClipboard(hwnd);
-                // A bitmap without text (a screenshot) saves as PNG beside
-                // the document and pastes as its markdown link
-                if (paste.empty() && !app.currentFile.empty() &&
-                    IsClipboardFormatAvailable(CF_BITMAP)) {
-                    namespace fs = std::filesystem;
-                    fs::path doc = fsPath(toWide(app.currentFile));
-                    std::wstring stem = doc.stem().wstring();
-                    std::wstring name;
-                    fs::path target;
-                    for (int i = 1; i < 100; i++) {
-                        wchar_t suffix[24];
-                        swprintf_s(suffix, _countof(suffix),
-                                   L"-img-%02d.png", i);
-                        std::wstring candidate = stem + suffix;
-                        fs::path p = doc.parent_path() / candidate;
-                        std::error_code ec;
-                        if (!fs::exists(p, ec)) {
-                            name = candidate;
-                            target = p;
-                            break;
-                        }
-                    }
-                    if (!name.empty() &&
-                        clipboardImageToPngFile(app, hwnd,
-                                                target.wstring())) {
-                        std::wstring linkName = name;
-                        size_t sp = 0;  // spaces break the link target
-                        while ((sp = linkName.find(L' ', sp)) !=
-                               std::wstring::npos) {
-                            linkName.replace(sp, 1, L"%20");
-                            sp += 3;
-                        }
-                        paste = L"![image](" + linkName + L")";
-                    }
+                // An image without text (a screenshot): the user's choice
+                // of where it goes, or the remembered one
+                if (paste.empty() && clipboardHasImage()) {
+                    editorPasteImageRequest(app, hwnd);
+                    return;
                 }
                 if (!paste.empty()) {
                     if (app.editorHasSelection) editorDeleteSelection(app);
@@ -2729,7 +2700,7 @@ bool editorAltArrowKey(App& app, HWND hwnd, WPARAM wParam) {
     if (wParam != VK_UP && wParam != VK_DOWN) return false;
     if (!(GetKeyState(VK_MENU) & 0x8000) || (GetKeyState(VK_SHIFT) & 0x8000)) return false;
     if (!sourceEditorHasFocus(app) || app.confirmExitPending || app.createRefPending ||
-        app.editCtxOpen || app.showSettings || app.showHelp || app.showThemeChooser ||
+        app.pasteImagePending || app.editCtxOpen || app.showSettings || app.showHelp || app.showThemeChooser ||
         app.showThemeEditor || app.showShortcutEditor || app.showPrintPreview ||
         app.showContextMenu || app.showTabMenu || app.showTabSwitcher) {
         return false;
@@ -4262,5 +4233,161 @@ void editorEmacsQuit(App& app, HWND hwnd) {
     app.editorHasSelection = false;
     editorClearExtraCarets(app);
     if (app.editCtxOpen) closeEditCtxMenu(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// ---- Pasting an image ---------------------------------------------------------
+
+static std::string pasteBase64(const std::string& data) {
+    static const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((data.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < data.size(); i += 3) {
+        unsigned n = (unsigned char)data[i] << 16;
+        if (i + 1 < data.size()) n |= (unsigned char)data[i + 1] << 8;
+        if (i + 2 < data.size()) n |= (unsigned char)data[i + 2];
+        out += alphabet[(n >> 18) & 63];
+        out += alphabet[(n >> 12) & 63];
+        out += i + 1 < data.size() ? alphabet[(n >> 6) & 63] : '=';
+        out += i + 2 < data.size() ? alphabet[n & 63] : '=';
+    }
+    return out;
+}
+
+// A path as a Markdown link destination: forward slashes, inside <...>
+// when it holds a space or a parenthesis (CommonMark allows them there,
+// and the reader takes the path as written, where %20 would not resolve)
+static std::wstring pasteLinkTarget(const std::wstring& path) {
+    std::wstring out;
+    bool bracket = false;
+    for (wchar_t c : path) {
+        if (c == L'\\') {
+            out += L'/';
+            continue;
+        }
+        if (c == L' ' || c == L'(' || c == L')' || c == L'<' || c == L'>') bracket = true;
+        if (c == L'<' || c == L'>') out += L'\\';
+        out += c;
+    }
+    return bracket ? L"<" + out + L">" : out;
+}
+
+std::wstring editorPasteImageAssetPath(const App& app) {
+    if (app.currentFile.empty()) return L"";
+    namespace fs = std::filesystem;
+    fs::path doc = fsPath(toWide(app.currentFile));
+    std::wstring stem = doc.stem().wstring();
+    fs::path dir = doc.parent_path() / fsPath(stem + L".assets");
+    for (int i = 1; i < 1000; i++) {
+        wchar_t suffix[24];
+        swprintf_s(suffix, _countof(suffix), L"-img-%02d.png", i);
+        fs::path candidate = dir / fsPath(stem + suffix);
+        std::error_code ec;
+        if (!fs::exists(candidate, ec)) return candidate.wstring();
+    }
+    return L"";
+}
+
+void editorPasteImageRequest(App& app, HWND hwnd) {
+    const std::string& mode = app.pasteImageMode;
+    if (mode == "off") {
+        signalHintKey(app, SIGI_INFO, "paste.off");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    if (mode == "inline") {
+        editorPasteImage(app, hwnd, kPasteInline);
+        return;
+    }
+    // "assets" needs the document's folder: an unsaved note asks instead
+    if (mode == "assets" && !app.currentFile.empty()) {
+        editorPasteImage(app, hwnd, kPasteAssets);
+        return;
+    }
+    app.pasteImagePending = true;
+    app.pasteImageRemember = false;
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void editorPasteImage(App& app, HWND hwnd, int choice) {
+    namespace fs = std::filesystem;
+    bool remember = app.pasteImageRemember;
+    app.pasteImagePending = false;
+    app.pasteImageRemember = false;
+    InvalidateRect(hwnd, nullptr, FALSE);
+    if (choice == kPasteCancel) return;
+    if (choice == kPasteAssets && app.currentFile.empty()) return;
+    // "Remember" makes this the setting (Settings > Editor > Pasted images)
+    if (remember && (choice == kPasteAssets || choice == kPasteInline)) {
+        app.pasteImageMode = choice == kPasteAssets ? "assets" : "inline";
+        persistPasteImage(app);
+    }
+    std::string png;
+    if (!clipboardImagePng(app, hwnd, png)) {
+        signalPushKey(app, SIG_WARN, SIGI_WARNING, "paste.none");
+        return;
+    }
+    std::wstring target;
+    if (choice == kPasteInline) {
+        target = L"data:image/png;base64," + toWide(pasteBase64(png));
+    } else {
+        std::wstring path = editorPasteImageAssetPath(app);
+        if (choice == kPasteSaveAs) {
+            // Proposed: the assets folder's next name, in that folder (or
+            // the document's, until the folder exists)
+            wchar_t file[MAX_PATH] = L"image.png";
+            std::wstring folder;
+            if (!path.empty()) {
+                fs::path proposed = fsPath(path);
+                wcsncpy_s(file, proposed.filename().wstring().c_str(), _TRUNCATE);
+                std::error_code ec;
+                folder = fs::is_directory(proposed.parent_path(), ec)
+                             ? proposed.parent_path().wstring()
+                             : proposed.parent_path().parent_path().wstring();
+            }
+            OPENFILENAMEW ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"PNG image (*.png)\0*.png\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrInitialDir = folder.empty() ? nullptr : folder.c_str();
+            ofn.lpstrDefExt = L"png";
+            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+            if (!runSaveFileDialog(ofn)) return;
+            path = file;
+        }
+        if (path.empty()) return;
+        std::error_code ec;
+        fs::create_directories(fsPath(path).parent_path(), ec);
+        {
+            std::ofstream out(fsPath(path), std::ios::binary | std::ios::trunc);
+            out.write(png.data(), (std::streamsize)png.size());
+            if (!out) {
+                signalPushKey(app, SIG_ERROR, SIGI_WARNING, "paste.write_failed", fsPath(path).filename().wstring());
+                return;
+            }
+        }
+        // Relative to the document where it can be (the document and its
+        // images move together), else the absolute path
+        if (!app.currentFile.empty()) {
+            fs::path docDir = fsPath(toWide(app.currentFile)).parent_path();
+            fs::path relative = fsPath(path).lexically_relative(docDir);
+            if (!relative.empty() && relative.native().rfind(fsPath(L"..").native(), 0) != 0) {
+                target = pasteLinkTarget(relative.wstring());
+            }
+        }
+        if (target.empty()) target = pasteLinkTarget(path);
+        signalHintKey(app, SIGI_FILE, "paste.saved");
+    }
+    std::wstring link = L"![image](" + target + L")";
+    if (app.editorHasSelection) editorDeleteSelection(app);
+    size_t before = app.editorCursorPos;
+    app.editorText.insert(before, link);
+    app.editorCursorPos += link.size();
+    pushUndo(app, App::EditAction::Insert, before, link, before, app.editorCursorPos);
+    rebuildLineStarts(app);
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
     InvalidateRect(hwnd, nullptr, FALSE);
 }

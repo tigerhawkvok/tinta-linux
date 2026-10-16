@@ -871,6 +871,37 @@ bool clipboardHasText() {
                        gdk_content_formats_contain_mime_type(formats, "text/plain"));
 }
 
+bool clipboardHasImage() {
+    GdkContentFormats* formats = gdk_clipboard_get_formats(clipboard());
+    return formats && (gdk_content_formats_contain_gtype(formats, GDK_TYPE_TEXTURE) ||
+                       gdk_content_formats_contain_mime_type(formats, "image/png"));
+}
+
+bool readClipboardImagePng(std::string& png) {
+    struct Read {
+        bool done = false;
+        GdkTexture* texture = nullptr;
+    } read;
+    gdk_clipboard_read_texture_async(
+        clipboard(), nullptr,
+        [](GObject* source, GAsyncResult* result, gpointer data) {
+            auto* r = static_cast<Read*>(data);
+            r->texture = gdk_clipboard_read_texture_finish(GDK_CLIPBOARD(source), result, nullptr);
+            r->done = true;
+        },
+        &read);
+    runUntil(read.done);
+    if (!read.texture) return false;
+    GBytes* bytes = gdk_texture_save_to_png_bytes(read.texture);
+    g_object_unref(read.texture);
+    if (!bytes) return false;
+    gsize size = 0;
+    const void* data = g_bytes_get_data(bytes, &size);
+    png.assign(static_cast<const char*>(data), size);
+    g_bytes_unref(bytes);
+    return !png.empty();
+}
+
 bool readClipboardText(std::wstring& text) {
     struct Read {
         bool done = false;

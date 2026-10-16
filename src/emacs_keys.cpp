@@ -68,7 +68,8 @@ bool send(App& app, HWND hwnd, WPARAM vk, bool ctrl = false, bool shift = false)
 // The keyboard belongs to a dialog, a menu or a text field: only C-g
 // (as Esc) reaches it
 bool keyboardCaptured(const App& app) {
-    return app.showLightbox || app.annotEditorOpen || app.createRefPending || app.showPrintPreview ||
+    return app.showLightbox || app.annotEditorOpen || app.createRefPending || app.pasteImagePending ||
+           app.showPrintPreview ||
            app.showContextMenu || app.showShortcutEditor || app.showThemeEditor || app.showSettings ||
            app.showHelp || app.showThemeChooser || app.confirmExitPending || app.appMenuPressed ||
            app.panelResize.panel != SidePanel::None || app.tableEditActive || app.editCtxOpen ||

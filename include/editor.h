@@ -31,6 +31,15 @@ void editorClearExtraCarets(App& app);
 std::wstring editorCaretSelectionsText(const App& app);
 void editorPasteAtCarets(App& app, HWND hwnd, const std::wstring& paste);
 
+// Pasting an image (Ctrl+V with an image and no text on the clipboard):
+// the user's choice, or the remembered one (App::pasteImageMode)
+enum PasteImageChoice { kPasteCancel = 0, kPasteAssets = 1, kPasteInline = 2, kPasteSaveAs = 3 };
+void editorPasteImageRequest(App& app, HWND hwnd);
+void editorPasteImage(App& app, HWND hwnd, int choice);
+// Where "assets folder" saves the next image:
+// <doc dir>/<stem>.assets/<stem>-img-NN.png; empty for an unsaved note
+std::wstring editorPasteImageAssetPath(const App& app);
+
 // Emacs profile commands on the source editor (emacs_keys.cpp dispatches)
 enum class EmacsKill { Line, WordForward, WordBackward };
 void editorEmacsKill(App& app, HWND hwnd, EmacsKill kind);

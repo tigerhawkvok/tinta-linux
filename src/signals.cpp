@@ -363,7 +363,7 @@ void renderSignalChips(App& app) {
     float right = (float)app.width - margin;
 
     // The unsaved-exit / create-file prompt chip owns the corner slot
-    if (!app.confirmExitPending && !app.createRefPending) {
+    if (!app.confirmExitPending && !app.createRefPending && !app.pasteImagePending) {
         app.promptChipRect = D2D1_RECT_F{};
     } else if (app.promptChipRect.right > app.promptChipRect.left) {
         bottom = std::min(bottom, app.promptChipRect.top - dpi(app, 8.0f));

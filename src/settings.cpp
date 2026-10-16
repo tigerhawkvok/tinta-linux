@@ -49,6 +49,7 @@ void saveSettings(const Settings& settings) {
     file << "editorAssists=" << (settings.editorAssists ? 1 : 0) << "\n";
     file << "showWordCount=" << (settings.showWordCount ? 1 : 0) << "\n";
     file << "closeKeepsDrafts=" << (settings.closeKeepsDrafts ? 1 : 0) << "\n";
+    file << "pasteImage=" << settings.pasteImage << "\n";
     file << "printMarginMm=" << settings.printMarginMm << "\n";
     if (!settings.pandocPath.empty()) {
         file << "pandocPath=" << settings.pandocPath << "\n";
@@ -172,6 +173,12 @@ void persistWordCount(const App& app) {
 void persistCloseKeepsDrafts(const App& app) {
     Settings settings = loadSettings();
     settings.closeKeepsDrafts = app.closeKeepsDrafts;
+    saveSettings(settings);
+}
+
+void persistPasteImage(const App& app) {
+    Settings settings = loadSettings();
+    settings.pasteImage = app.pasteImageMode;
     saveSettings(settings);
 }
 
@@ -380,6 +387,10 @@ Settings loadSettings() {
             settings.showWordCount = (value == "1");
         } else if (key == "closeKeepsDrafts") {
             settings.closeKeepsDrafts = (value == "1");
+        } else if (key == "pasteImage") {
+            if (value == "ask" || value == "assets" || value == "inline" || value == "off") {
+                settings.pasteImage = value;
+            }
         } else if (key == "printMarginMm") {
             // Any margin from 5 to 50 mm; the preview offers three (#257)
             try {

@@ -5,6 +5,7 @@
 // same primitives the viewer draws, and land as embedded pictures.
 
 #include "export.h"
+#include "image_loader.h"
 #include "fs_path.h"
 #include "d2d_init.h"
 #include <set>
@@ -905,7 +906,21 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
             std::string data;
             int width = 0, height = 0;
             std::string extension;
-            if (!remote) {
+            // An image pasted inline carries its bytes in the address
+            if (imageDataUriBytes(src, data)) {
+                size_t end = src.find_first_of(";,", 11);
+                extension = src.substr(11, end == std::string::npos ? 0 : end - 11);
+                if (extension == "jpg") extension = "jpeg";
+                if ((extension == "png" || extension == "jpeg" || extension == "gif") &&
+                    imageDimensions(data, width, height)) {
+                    int rel = addImageRel(ctx, extension, data);
+                    long long cx, cy;
+                    fitEmu((float)width, (float)height, cx, cy);
+                    out += "<w:r>" + drawingXml(ctx, rel, cx, cy) + "</w:r>";
+                    break;
+                }
+                data.clear();
+            } else if (!remote) {
                 std::wstring widePath = toWide(src);
                 if (widePath.size() < 2 || widePath[1] != L':') {
                     widePath = joinPath(ctx.baseDir, widePath);
@@ -936,8 +951,11 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
             }
             RunProps altProps = props;
             altProps.italic = true;
-            emitTextRun(ctx, alt.empty() ? elem->url : alt + " (" +
-                        elem->url + ")", altProps, out);
+            // A data: address names its type, not its bytes
+            std::string shown = elem->url.rfind("data:", 0) == 0
+                                    ? elem->url.substr(0, elem->url.find(',')) + ",\xE2\x80\xA6"
+                                    : elem->url;
+            emitTextRun(ctx, alt.empty() ? shown : alt + " (" + shown + ")", altProps, out);
             break;
         }
         case ElementType::SoftBreak:
@@ -1675,31 +1693,38 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
     return ok;
 }
 
-// Ctrl+V in the editor with a bitmap on the clipboard: encode it as PNG
-// into the given file (screenshots land beside the document)
-bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path) {
-    if (!IsClipboardFormatAvailable(CF_BITMAP) || !app.wicFactory) {
-        return false;
-    }
-    if (!OpenClipboard(hwnd)) return false;
-    bool ok = false;
-    if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP)) {
-        IWICBitmap* bitmap = nullptr;
-        if (SUCCEEDED(app.wicFactory->CreateBitmapFromHBITMAP(
-                hbm, nullptr, WICBitmapIgnoreAlpha, &bitmap))) {
-            UINT w = 0, h = 0;
-            bitmap->GetSize(&w, &h);
-            std::string png = encodeWicPng(app, bitmap, w, h);
-            bitmap->Release();
-            if (!png.empty()) {
-                std::ofstream out(fsPath(path), std::ios::binary | std::ios::trunc);
-                if (out) {
-                    out.write(png.data(), (std::streamsize)png.size());
-                    ok = out.good();
-                }
+bool clipboardHasImage() {
+    return IsClipboardFormatAvailable(RegisterClipboardFormatW(L"PNG")) ||
+           IsClipboardFormatAvailable(CF_BITMAP);
+}
+
+bool clipboardImagePng(App& app, HWND hwnd, std::string& png) {
+    png.clear();
+    UINT pngFormat = RegisterClipboardFormatW(L"PNG");
+    if (IsClipboardFormatAvailable(pngFormat) && OpenClipboard(hwnd)) {
+        if (HANDLE data = GetClipboardData(pngFormat)) {
+            SIZE_T size = GlobalSize(data);
+            if (const auto* bytes = static_cast<const char*>(GlobalLock(data))) {
+                png.assign(bytes, size);
+                GlobalUnlock(data);
             }
         }
+        CloseClipboard();
+        if (png.size() > 8 && png.compare(1, 3, "PNG") == 0) return true;
+        png.clear();
     }
-    CloseClipboard();
-    return ok;
+    if (IsClipboardFormatAvailable(CF_BITMAP) && app.wicFactory && OpenClipboard(hwnd)) {
+        if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP)) {
+            IWICBitmap* bitmap = nullptr;
+            if (SUCCEEDED(app.wicFactory->CreateBitmapFromHBITMAP(hbm, nullptr, WICBitmapIgnoreAlpha,
+                                                                  &bitmap))) {
+                UINT w = 0, h = 0;
+                bitmap->GetSize(&w, &h);
+                png = encodeWicPng(app, bitmap, w, h);
+                bitmap->Release();
+            }
+        }
+        CloseClipboard();
+    }
+    return !png.empty();
 }

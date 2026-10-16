@@ -1203,6 +1203,7 @@ render_document:
     // Unsaved-changes dialog above it all (also entered from tab closes)
     if (app.confirmExitPending) renderConfirmExitDialog(app);
     if (app.createRefPending) renderCreateRefDialog(app);
+    if (app.pasteImagePending) renderPasteImagePrompt(app);
 
     app.renderTarget->EndDraw();
 }
@@ -2058,6 +2059,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.showWordCount = savedSettings.showWordCount;
     app.printMarginMm = savedSettings.printMarginMm;
     app.closeKeepsDrafts = savedSettings.closeKeepsDrafts;
+    app.pasteImageMode = savedSettings.pasteImage;
     app.frontmatter = savedSettings.frontmatter;
     app.pandocUserPath = toWide(savedSettings.pandocPath);
     int startTheme = app.followSystemTheme ? autoThemeIndex(app)

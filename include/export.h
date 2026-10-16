@@ -36,6 +36,10 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& sourceUtf8,
 bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8);
 
 // Clipboard bitmap -> PNG file (editor image paste; export_docx.cpp)
-bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path);
+// The clipboard holds an image (its "PNG" format, or a bitmap)
+bool clipboardHasImage();
+// That image as PNG: the "PNG" format's bytes when offered (browsers,
+// Snipping Tool, Linux through GTK), else the bitmap encoded (Windows)
+bool clipboardImagePng(App& app, HWND hwnd, std::string& png);
 
 #endif  // TINTA_EXPORT_H

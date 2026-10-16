@@ -19,6 +19,11 @@ void renderHelpOverlay(App& app);
 // Full-frame print preview; render() short-circuits to this while it is open
 void renderPrintPreview(App& app);
 
+// Pasting an image: where it goes (assets folder, inline, save as), with
+// a "remember" box; hits in app.pasteImageHits (PasteImageChoice, 9 =
+// the box)
+void renderPasteImagePrompt(App& app);
+
 // Settings overlay (Ctrl+,). Render stores (rect, action) pairs in
 // app.settingsHits; handleMouseUp resolves them against these ids.
 enum SettingsAction {
@@ -29,6 +34,7 @@ enum SettingsAction {
     SET_TOGGLE_WRAP, SET_TOGGLE_PREVIEW, SET_TOGGLE_ASSISTS,
     SET_TOGGLE_WORDCOUNT, SET_TOGGLE_CLOSE_DRAFTS,
     SET_TOGGLE_UPDATES, SET_CHECK_UPDATES, SET_OPEN_LICENSES,
+    SET_PASTE_ASK, SET_PASTE_ASSETS, SET_PASTE_INLINE, SET_PASTE_OFF,
     SET_LOCATE_PANDOC,
     SET_SLIDER_READING, SET_SLIDER_ZEN,
     SET_OPEN_THEMES, SET_NEW_THEME, SET_EDIT_THEME,

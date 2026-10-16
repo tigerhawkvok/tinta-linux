@@ -228,6 +228,14 @@ if(BUILD_TESTING)
         TINTA_EMACS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/emacs-keys.md")
     add_test(NAME emacs_keys COMMAND emacs_keys_tests)
 
+    # Pasting an image into the editor: the card, assets, inline, off
+    add_executable(paste_image_tests tests/paste_image_tests.cpp)
+    target_include_directories(paste_image_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(paste_image_tests PRIVATE tinta_core)
+    target_compile_definitions(paste_image_tests PRIVATE
+        TINTA_PASTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/paste-image.md")
+    add_test(NAME paste_image COMMAND paste_image_tests)
+
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     target_link_libraries(keymap_tests PRIVATE tinta_compat)

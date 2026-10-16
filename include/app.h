@@ -275,6 +275,9 @@ struct Settings {
     // Closing a window with unsaved edits skips the dialog and leaves them
     // as drafts, offered back on the next launch (#252)
     bool closeKeepsDrafts = false;
+    // Pasting an image into the editor: "ask" each time, or always save it
+    // to the document's assets folder, embed it "inline", or "off"
+    std::string pasteImage = "ask";
     // Page margins on every side when printing and exporting PDF, in mm
     // (#257): the preview offers 12.7, 19.05 (0.75 in) and 25.4
     float printMarginMm = 19.05f;
@@ -1306,6 +1309,11 @@ struct App {
     bool editorAssists = true;
     bool showWordCount = true;       // #240
     bool closeKeepsDrafts = false;   // #252
+    // Pasting an image: the mode (Settings::pasteImage) and the choice card
+    std::string pasteImageMode = "ask";
+    bool pasteImagePending = false;
+    bool pasteImageRemember = false;
+    std::vector<std::pair<D2D1_RECT_F, int>> pasteImageHits;  // rebuilt each paint
     fm::Settings frontmatter;
     float editRailAnim = 0.0f;       // rail slide-in 0..1
     int editRailHover = 0;           // hit id under the mouse, 0 = none

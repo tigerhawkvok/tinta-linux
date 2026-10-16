@@ -3248,6 +3248,19 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         return app.imageCache[src];
     }
 
+    // An image pasted inline: its bytes are in the source itself
+    {
+        std::string bytes;
+        if (imageDataUriBytes(src, bytes)) {
+            DecodedImage image;
+            if (SUCCEEDED(decodeImageMemory(app.wicFactory, bytes, app.renderTarget->GetMaximumBitmapSize(),
+                                            image)))
+                createDecodedBitmap(app, image, entry);
+            app.storeImageCacheEntry(src, std::move(entry));
+            return app.imageCache[src];
+        }
+    }
+
     std::wstring widePath;
 
     // Remote images load on a worker thread — a synchronous download here
