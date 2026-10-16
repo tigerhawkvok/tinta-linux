@@ -16,9 +16,13 @@ FetchContent_Declare(
     URL https://github.com/Latias94/merman/archive/3a4b8c393939b69372a8f05a2b971f7cdf6ae529.tar.gz  # 0.9.0
     URL_HASH SHA256=6bcca122c432f86efa17fbe07d56aada0420d185f4d774b261c032f700b85c2c
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    # The raster loads the fonts Tinta names, not every system font
+    # The raster loads the fonts Tinta names, not every system font; and
+    # rasterizes an SVG Tinta finished (math labels lifted in)
     PATCH_COMMAND ${CMAKE_COMMAND}
         -DPATCH=${CMAKE_CURRENT_LIST_DIR}/patches/merman-raster-font-files.patch
+        -P ${CMAKE_CURRENT_LIST_DIR}/apply_patch.cmake
+    COMMAND ${CMAKE_COMMAND}
+        -DPATCH=${CMAKE_CURRENT_LIST_DIR}/patches/merman-tinta-svg-to-png.patch
         -P ${CMAKE_CURRENT_LIST_DIR}/apply_patch.cmake
 )
 FetchContent_MakeAvailable(merman)

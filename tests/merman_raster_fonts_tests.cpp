@@ -11,6 +11,10 @@
 #include <iostream>
 #include <string>
 
+extern "C" int tinta_merman_svg_to_png(const unsigned char* svg, size_t svgLength, float scale,
+                                       const char* background, unsigned char** out, size_t* outLength);
+extern "C" void tinta_merman_free_png(unsigned char* data, size_t length);
+
 namespace {
 
 int failures = 0;
@@ -78,6 +82,34 @@ int main() {
     std::string unloadable = renderWith("/nonexistent/font.ttf");
     std::string unset = renderWith(nullptr);
     check(!unset.empty() && unloadable == unset, "an unloadable list falls back to the system fonts");
+
+    // Math labels: the PNG is merman's raster of the SVG with the formulas
+    // lifted in (merman-tinta-svg-to-png.patch), not the PNG operation's
+    // raw $$...$$. Last, in this process: the font database is now built.
+    {
+        const char* mathSource = "flowchart LR\n  A[\"$$x^2 + y^2$$\"] --> B[\"$$\\frac{a}{b}$$\"]\n";
+        merman_engine::Theme theme;
+        std::string error;
+        std::string png = merman_engine::renderPng(mathSource, theme, 1.0f, "", error);
+        merman_engine::Diagram lifted = merman_engine::renderSvg(mathSource, theme);
+        unsigned char* data = nullptr;
+        size_t size = 0;
+        int status = tinta_merman_svg_to_png(reinterpret_cast<const unsigned char*>(lifted.svg.data()),
+                                             lifted.svg.size(), 1.0f, nullptr, &data, &size);
+        std::string expected = status == 0 ? std::string(reinterpret_cast<const char*>(data), size) : "";
+        if (data) tinta_merman_free_png(data, size);
+        check(lifted.ok && lifted.svg.find("data-tinta-math-labels") != std::string::npos,
+              "the SVG carries the lifted formulas");
+        check(!png.empty() && png == expected, "a math diagram's PNG is the lifted SVG rasterized");
+        // Any finished SVG rasterizes, at the scale asked for
+        const std::string box = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"6\" "
+                                "viewBox=\"0 0 10 6\"><rect width=\"10\" height=\"6\" fill=\"#c00\"/></svg>";
+        status = tinta_merman_svg_to_png(reinterpret_cast<const unsigned char*>(box.data()), box.size(), 2.0f,
+                                         "#ffffff", &data, &size);
+        bool sized = status == 0 && size > 24 && data[16] == 0 && data[19] == 20 && data[23] == 12;
+        if (data) tinta_merman_free_png(data, size);
+        check(sized, "a plain SVG rasterizes at 2x: 20 x 12, status " + std::to_string(status));
+    }
 
     std::cout << "merman raster fonts: " << failures << " failures\n";
     return failures == 0 ? 0 : 1;

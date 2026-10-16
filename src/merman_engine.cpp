@@ -9,6 +9,13 @@
 #include <cstring>
 #include <mutex>
 
+#if defined(TINTA_MERMAN_MATH) && defined(TINTA_MERMAN_PNG)
+// From cmake/patches/merman-tinta-svg-to-png.patch
+extern "C" int tinta_merman_svg_to_png(const unsigned char* svg, size_t svgLength, float scale,
+                                       const char* background, unsigned char** out, size_t* outLength);
+extern "C" void tinta_merman_free_png(unsigned char* data, size_t length);
+#endif
+
 namespace merman_engine {
 namespace {
 
@@ -510,6 +517,31 @@ Diagram renderParitySvg(std::string_view source, const Theme& theme) {
 
 std::string renderPng(std::string_view source, const Theme& theme, float scale, const std::string& background,
                       std::string& error) {
+#if defined(TINTA_MERMAN_MATH) && defined(TINTA_MERMAN_PNG)
+    // Math labels: the PNG operation renders from the source and draws the
+    // raw $$...$$. Rasterize renderSvg's result instead, the formulas lifted
+    // in as on Linux (cmake/patches/merman-tinta-svg-to-png.patch)
+    if (source.find("$$") != std::string_view::npos) {
+        Diagram lifted = renderSvg(source, theme);
+        if (lifted.ok) {
+            unsigned char* data = nullptr;
+            size_t size = 0;
+            int status;
+            {
+                std::lock_guard<std::mutex> lock(engineMutex());
+                status = tinta_merman_svg_to_png(reinterpret_cast<const unsigned char*>(lifted.svg.data()),
+                                                 lifted.svg.size(), scale,
+                                                 background.empty() ? nullptr : background.c_str(), &data, &size);
+            }
+            if (status == 0 && data) {
+                std::string png(reinterpret_cast<const char*>(data), size);
+                tinta_merman_free_png(data, size);
+                return png;
+            }
+            // Not rasterizable: fall back to the PNG operation (raw TeX)
+        }
+    }
+#endif
     std::string options = optionsJson(theme, "resvg-safe");
     char raster[96];
     std::snprintf(raster, sizeof raster, "{\"raster\":{\"scale\":%g,\"background\":", scale);
