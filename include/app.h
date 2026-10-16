@@ -732,6 +732,16 @@ struct App {
     // Filled by applyKeymap; each binding retains its input message kind.
     KeyBinding keymap[KEY_ACTION_COUNT] = {};
 
+    // Emacs profile (emacs_keys.cpp): a pending C-x, the mark, and where the
+    // last kill left the caret (a kill straight after it appends)
+    bool emacsPrefix = false;
+    bool emacsDispatching = false;     // a chord re-sent as its Windows key
+    bool emacsSwallowSysChar = false;  // the WM_SYSCHAR of a handled Meta chord
+    bool emacsMark = false;
+    size_t emacsMarkPos = 0;
+    size_t emacsKillAt = (size_t)-1;
+    size_t emacsKillSize = 0;
+
     // Reading position restore (#77): applied once enough of the document is
     // laid out for the target to be reachable (chunked layout grows
     // contentHeight, so applying immediately would clamp to a partial height)

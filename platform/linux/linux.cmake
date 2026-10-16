@@ -190,6 +190,14 @@ if(BUILD_TESTING)
     target_link_libraries(list_spacing_tests PRIVATE tinta_core)
     add_test(NAME list_spacing COMMAND list_spacing_tests)
 
+    # The Emacs shortcut profile (emacs_keys.cpp), reader and editor
+    add_executable(emacs_keys_tests tests/emacs_keys_tests.cpp)
+    target_include_directories(emacs_keys_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(emacs_keys_tests PRIVATE tinta_core)
+    target_compile_definitions(emacs_keys_tests PRIVATE
+        TINTA_EMACS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/emacs-keys.md")
+    add_test(NAME emacs_keys COMMAND emacs_keys_tests)
+
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     target_link_libraries(keymap_tests PRIVATE tinta_compat)

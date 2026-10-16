@@ -141,7 +141,14 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 
 **Shortcut profiles** (Settings → Keyboard shortcuts): pick **Windows**
 (`E` edits, `F1` opens help, `F` searches — the default), **Vim** (`/`
-searches, `:` edits, `?` helps), or **Custom**. The Edit button opens a
+searches, `:` edits, `?` helps), **Emacs**, or **Custom**. Emacs adds its
+chords in the reader and the source editor: `C-n`/`C-p`/`C-f`/`C-b`,
+`C-a`/`C-e`, `M-f`/`M-b`, `C-v`/`M-v`, `M-<`/`M->`, `C-s`/`C-r`, the mark
+(`C-SPC`) with `C-w`/`M-w`/`C-y`, `C-k`/`M-d` (consecutive kills append),
+`C-/`, `C-t`, `C-o`, `M-%`, `C-g`, and `C-x` with `C-f`, `C-s`, `C-w`,
+`C-q` (edit/read), `C-c`, `k`, `b`, `h`, `u` and `C-x`. The clipboard is the
+kill ring; chords Emacs leaves undefined keep their Windows meaning, and
+Help (`C-h`) lists them all. The Edit button opens a
 shortcut editor: click an action, press its new key. Raw `:` and `?`
 always work regardless of profile.
 

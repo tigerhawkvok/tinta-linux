@@ -1958,65 +1958,94 @@ void renderHelpOverlay(App& app) {
     };
 
     // Remappable keys show their current binding ([Keys] in settings.ini)
-    std::wstring kDown = keyLabel(app.keymap[KA_SCROLLDOWN]) + L" / \x2193";
-    std::wstring kUp = keyLabel(app.keymap[KA_SCROLLUP]) + L" / \x2191";
-    std::wstring kSearch = keyLabel(app.keymap[KA_SEARCH]) + L" / Ctrl+F";
+    // The Emacs profile shows its chords and drops the rows whose Windows
+    // chord it takes over (Ctrl+N is next-line there, Ctrl+E end of line)
+    const bool emacs = app.keyProfile == "emacs";
+    std::wstring kDown = (emacs ? L"C-n / " : L"") + keyLabel(app.keymap[KA_SCROLLDOWN]) + L" / \x2193";
+    std::wstring kUp = (emacs ? L"C-p / " : L"") + keyLabel(app.keymap[KA_SCROLLUP]) + L" / \x2191";
+    std::wstring kSearch = keyLabel(app.keymap[KA_SEARCH]) + (emacs ? L" / C-s" : L" / Ctrl+F");
     std::wstring kBrowse = keyLabel(app.keymap[KA_BROWSE]);
     std::wstring kToc = keyLabel(app.keymap[KA_TOC]);
     std::wstring kTheme = keyLabel(app.keymap[KA_THEME]);
     std::wstring kStats = keyLabel(app.keymap[KA_STATS]);
-    std::wstring kHelp = keyLabel(app.keymap[KA_HELP]);
-    std::wstring kEdit = keyLabel(app.keymap[KA_EDIT]);
-    std::wstring kQuit = keyLabel(app.keymap[KA_QUIT]);
+    std::wstring kHelp = (emacs ? L"C-h / " : L"") + keyLabel(app.keymap[KA_HELP]);
+    std::wstring kEdit = (emacs ? L"C-x C-q / " : L"") + keyLabel(app.keymap[KA_EDIT]);
+    std::wstring kQuit = (emacs ? L"C-x C-c / " : L"") + keyLabel(app.keymap[KA_QUIT]);
 
-    const HelpEntry navEntries[] = {
+    std::vector<HelpEntry> navEntries = {
         {kDown.c_str(),   tr(app, "help.nav.scroll_down")},
         {kUp.c_str(),     tr(app, "help.nav.scroll_up")},
-        {L"Space / PgDn", tr(app, "help.nav.page_down")},
-        {L"PgUp",         tr(app, "help.nav.page_up")},
-        {L"Home / End",   tr(app, "help.nav.jump_start_end")},
+        {emacs ? L"C-v / Space / PgDn" : L"Space / PgDn", tr(app, "help.nav.page_down")},
+        {emacs ? L"M-v / PgUp" : L"PgUp", tr(app, "help.nav.page_up")},
+        {emacs ? L"M-< / M->" : L"Home / End", tr(app, "help.nav.jump_start_end")},
         {L"Ctrl+Scroll",  tr(app, "help.nav.zoom")},
     };
 
-    const HelpEntry overlayEntries[] = {
+    std::vector<HelpEntry> overlayEntries = {
         {kSearch.c_str(), tr(app, "help.view.search")},
-        {L"Enter",        tr(app, "help.view.next_match")},
+        {emacs ? L"C-s / Enter" : L"Enter", tr(app, "help.view.next_match")},
         {L"Ctrl+Shift+F", tr(app, "help.view.search_results")},
         {kBrowse.c_str(), tr(app, "help.view.folder_browser")},
         {kToc.c_str(),    tr(app, "help.view.toc")},
         {L"Ctrl+T",       tr(app, "help.view.new_tab")},
-        {L"Ctrl+Tab",     tr(app, "help.view.next_tab")},
-        {L"Ctrl+W / Ctrl+F4", tr(app, "help.view.close_tab")},
+        {emacs ? L"C-x b / Ctrl+Tab" : L"Ctrl+Tab", tr(app, "help.view.next_tab")},
+        {emacs ? L"C-x k / Ctrl+F4" : L"Ctrl+W / Ctrl+F4", tr(app, "help.view.close_tab")},
         {kTheme.c_str(),  tr(app, "help.view.theme")},
         {kStats.c_str(),  tr(app, "help.view.stats")},
         {kHelp.c_str(),   tr(app, "help.view.help")},
     };
 
-    const HelpEntry editEntries[] = {
+    std::vector<HelpEntry> editEntries = {
         {kEdit.c_str(),   tr(app, "help.edit.enter_edit")},
-        {L"Ctrl+S",       tr(app, "help.edit.save")},
-        {L"Ctrl+E",       tr(app, "help.edit.preview")},
-        {L"Ctrl+W",       tr(app, "help.edit.word_wrap")},
-        {L"Ctrl+Shift+E", tr(app, "editor.read_help")},
-        {L"ESC ESC",      tr(app, "help.edit.exit_edit")},
-        {L"Alt+\x2191 / Alt+\x2193", tr(app, "help.edit.move_line")},
-        {L"Ctrl+Alt+\x2191 / \x2193", tr(app, "help.edit.add_caret")},
-        {L"Alt+Click",    tr(app, "help.edit.alt_click")},
-        {L"Ctrl+D",       tr(app, "help.edit.next_match")},
+        {emacs ? L"C-x C-s" : L"Ctrl+S", tr(app, "help.edit.save")},
     };
+    if (!emacs) {
+        editEntries.push_back({L"Ctrl+E", tr(app, "help.edit.preview")});
+        editEntries.push_back({L"Ctrl+W", tr(app, "help.edit.word_wrap")});
+    }
+    editEntries.push_back({L"Ctrl+Shift+E", tr(app, "editor.read_help")});
+    editEntries.push_back({emacs ? L"C-x C-q / ESC ESC" : L"ESC ESC", tr(app, "help.edit.exit_edit")});
+    editEntries.push_back({L"Alt+\x2191 / Alt+\x2193", tr(app, "help.edit.move_line")});
+    editEntries.push_back({L"Ctrl+Alt+\x2191 / \x2193", tr(app, "help.edit.add_caret")});
+    editEntries.push_back({L"Alt+Click", tr(app, "help.edit.alt_click")});
+    if (!emacs) editEntries.push_back({L"Ctrl+D", tr(app, "help.edit.next_match")});
 
-    const HelpEntry generalEntries[] = {
-        {L"Ctrl+A",       tr(app, "help.general.select_all")},
-        {L"Ctrl+C",       tr(app, "help.general.copy")},
-        {L"Ctrl+N",       tr(app, "help.general.new_note")},
-        {L"Ctrl+Shift+N", tr(app, "help.general.new_window")},
-        {L"Ctrl+P",       tr(app, "ctx.print")},
-        {L"ESC",          tr(app, "help.general.close")},
-        {kQuit.c_str(),   tr(app, "help.general.quit")},
+    std::vector<HelpEntry> generalEntries = {
+        {emacs ? L"C-x h" : L"Ctrl+A", tr(app, "help.general.select_all")},
+        {emacs ? L"M-w / Ctrl+C" : L"Ctrl+C", tr(app, "help.general.copy")},
     };
+    if (!emacs) generalEntries.push_back({L"Ctrl+N", tr(app, "help.general.new_note")});
+    generalEntries.push_back({L"Ctrl+Shift+N", tr(app, "help.general.new_window")});
+    if (!emacs) generalEntries.push_back({L"Ctrl+P", tr(app, "ctx.print")});
+    generalEntries.push_back({emacs ? L"C-g / ESC" : L"ESC", tr(app, "help.general.close")});
+    generalEntries.push_back({kQuit.c_str(), tr(app, "help.general.quit")});
+
+    // The Emacs profile's chords in the source editor (and their viewer
+    // counterparts above)
+    std::vector<HelpEntry> emacsEntries;
+    if (emacs) {
+        emacsEntries = {
+            {L"C-f C-b \x00B7 M-f M-b", tr(app, "help.emacs.motion")},
+            {L"C-n / C-p",          tr(app, "help.emacs.lines")},
+            {L"C-a / C-e",          tr(app, "help.emacs.line_ends")},
+            {L"C-v / M-v",          tr(app, "help.emacs.pages")},
+            {L"C-SPC",              tr(app, "help.emacs.mark")},
+            {L"C-w / M-w",          tr(app, "help.emacs.region")},
+            {L"C-k / M-d",          tr(app, "help.emacs.kill")},
+            {L"C-y",                tr(app, "help.emacs.yank")},
+            {L"C-/ \x00B7 C-x u / C-?", tr(app, "help.emacs.undo")},
+            {L"C-s / C-r",          tr(app, "help.emacs.search")},
+            {L"M-%",                tr(app, "help.emacs.replace")},
+            {L"C-o / C-t",          tr(app, "help.emacs.open_transpose")},
+            {L"C-g",                tr(app, "help.emacs.quit")},
+            {L"C-x C-f C-s C-w",    tr(app, "help.emacs.files")},
+            {L"C-x k / b / C-c",    tr(app, "help.emacs.tabs")},
+            {L"C-h",                tr(app, "help.view.help")},
+        };
+    }
 
     float padding = dpi(app, 20.0f);
-    float keyColWidth = dpi(app, 150.0f);
+    float keyColWidth = dpi(app, emacs ? 190.0f : 150.0f);
     float leftX = panelX + padding;
     float descX = leftX + keyColWidth;
     float rightEdge = panelX + panelWidth - padding;
@@ -2029,10 +2058,11 @@ void renderHelpOverlay(App& app) {
         return lineH + sectionHeaderExtra + entryCount * lineH + sectionGap;
     };
     float footerH = dpi(app, 35.0f);
-    float totalContentHeight = sectionHeight((int)_countof(navEntries)) +
-                               sectionHeight((int)_countof(overlayEntries)) +
-                               sectionHeight((int)_countof(editEntries)) +
-                               sectionHeight((int)_countof(generalEntries)) + footerH;
+    float totalContentHeight = sectionHeight((int)navEntries.size()) +
+                               sectionHeight((int)overlayEntries.size()) +
+                               sectionHeight((int)editEntries.size()) +
+                               sectionHeight((int)generalEntries.size()) + footerH;
+    if (emacs) totalContentHeight += sectionHeight((int)emacsEntries.size());
 
     // Scrollable area
     float contentTopY = titleBottomY + dpi(app, 10.0f);
@@ -2087,10 +2117,11 @@ void renderHelpOverlay(App& app) {
         y += sectionGap;
     };
 
-    drawSection(tr(app, "help.section.navigation"), navEntries, (int)_countof(navEntries));
-    drawSection(tr(app, "help.section.view"), overlayEntries, (int)_countof(overlayEntries));
-    drawSection(tr(app, "help.section.editing"), editEntries, (int)_countof(editEntries));
-    drawSection(tr(app, "help.section.general"), generalEntries, (int)_countof(generalEntries));
+    drawSection(tr(app, "help.section.navigation"), navEntries.data(), (int)navEntries.size());
+    drawSection(tr(app, "help.section.view"), overlayEntries.data(), (int)overlayEntries.size());
+    drawSection(tr(app, "help.section.editing"), editEntries.data(), (int)editEntries.size());
+    if (emacs) drawSection(L"EMACS", emacsEntries.data(), (int)emacsEntries.size());
+    drawSection(tr(app, "help.section.general"), generalEntries.data(), (int)generalEntries.size());
 
     // Footer hint
     normalFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2836,6 +2867,7 @@ void renderSettingsOverlay(App& app) {
             app.renderTarget->DrawRoundedRectangle(
                 D2D1::RoundedRect(box, dpi(app, 4.0f), dpi(app, 4.0f)), app.brush, 1.0f);
             const char* profKey = app.keyProfile == "vim" ? "settings.profile.vim"
+                : app.keyProfile == "emacs" ? "settings.profile.emacs"
                 : app.keyProfile == "custom" ? "settings.profile.custom"
                                              : "settings.profile.windows";
             std::wstring current = tr(app, profKey);
@@ -3047,9 +3079,10 @@ void renderSettingsOverlay(App& app) {
         float itemH = dpi(app, 26.0f);
         const char* rowKeys[] = {"settings.profile.windows",
                                  "settings.profile.vim",
+                                 "settings.profile.emacs",
                                  "settings.profile.custom"};
-        const char* rowIds[] = {"windows", "vim", "custom"};
-        int count = 3;
+        const char* rowIds[] = {"windows", "vim", "emacs", "custom"};
+        int count = 4;
         D2D1_RECT_F box = app.settingsKeysBox;
         D2D1_RECT_F pop = D2D1::RectF(box.left, box.bottom + dpi(app, 4.0f),
                                       box.right,

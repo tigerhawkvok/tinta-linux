@@ -42,6 +42,7 @@
 #include <thread>
 #pragma comment(lib, "winhttp.lib")
 #include "input.h"
+#include "emacs_keys.h"
 #include "editor.h"
 #include "print.h"
 #include "export.h"
@@ -1665,6 +1666,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 handleKeyDown(*app, hwnd, wParam);
                 return 0;
             }
+            // The Emacs profile's Meta chords (M-f, M-w, M-v, M-<...)
+            if (app) app->emacsSwallowSysChar = false;
+            if (app && emacsSysKeyDown(*app, hwnd, wParam)) return 0;
             // Alt+Up / Alt+Down move the editor's lines (#251)
             if (app && editorAltArrowKey(*app, hwnd, wParam)) return 0;
             // Alt+Left / Alt+Right mirror the mouse side buttons
@@ -1680,6 +1684,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CHAR:
             if (app) handleCharInput(*app, hwnd, wParam);
             return 0;
+
+        case WM_SYSCHAR:
+            // A Meta chord the Emacs profile used: no menu mnemonic, no beep
+            if (app && app->emacsSwallowSysChar) {
+                app->emacsSwallowSysChar = false;
+                return 0;
+            }
+            break;
 
         case WM_SYSCOMMAND:
             // Releasing Alt after an Alt+click (#251) is not a menu request

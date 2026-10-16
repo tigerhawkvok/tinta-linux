@@ -43,6 +43,7 @@ set(SOURCES
     src/themes.cpp
     src/settings.cpp
     src/keymap.cpp
+    src/emacs_keys.cpp
     src/config_dir.cpp
     src/signals.cpp
     src/tableedit.cpp

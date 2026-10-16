@@ -31,6 +31,18 @@ void editorClearExtraCarets(App& app);
 std::wstring editorCaretSelectionsText(const App& app);
 void editorPasteAtCarets(App& app, HWND hwnd, const std::wstring& paste);
 
+// Emacs profile commands on the source editor (emacs_keys.cpp dispatches)
+enum class EmacsKill { Line, WordForward, WordBackward };
+void editorEmacsKill(App& app, HWND hwnd, EmacsKill kind);
+void editorEmacsSetMark(App& app);
+// The mark still anchors the caret or its selection (else it is dropped)
+bool editorEmacsMarkActive(App& app);
+void editorEmacsExchangePointAndMark(App& app, HWND hwnd);
+void editorEmacsTranspose(App& app, HWND hwnd);
+void editorEmacsOpenLine(App& app, HWND hwnd);
+// C-g: drop the mark, the selection and any extra carets
+void editorEmacsQuit(App& app, HWND hwnd);
+
 // Editor input handlers
 void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam);
 void handleEditorCharInput(App& app, HWND hwnd, WPARAM wParam);

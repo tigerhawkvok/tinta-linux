@@ -4150,3 +4150,117 @@ void renderEditor(App& app, float editorWidth) {
 
     app.renderTarget->PopAxisAlignedClip();
 }
+
+// ---- Emacs profile (emacs_keys.cpp dispatches) -------------------------------
+
+// After an Emacs edit: line starts, reparse, caret on screen, repaint
+static void editorEmacsEdited(App& app, HWND hwnd) {
+    app.editorDesiredCol = -1;
+    app.editorCaretUpstreamPos = std::wstring::npos;
+    rebuildLineStarts(app);
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// C-k, M-d, M-DEL. The clipboard is the kill ring's one slot: a kill made
+// where the previous one left the caret, with nothing typed since, adds to
+// it, as consecutive kills do in Emacs. C-k at a line's end takes the break.
+void editorEmacsKill(App& app, HWND hwnd, EmacsKill kind) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = false;
+    size_t pos = app.editorCursorPos, from = pos, to = pos;
+    if (kind == EmacsKill::Line) {
+        size_t end = getLineEnd(app, getLineFromPos(app, pos));
+        to = end > pos ? end : (pos < app.editorText.size() ? editorNextCharEnd(app, pos) : pos);
+    } else if (kind == EmacsKill::WordForward) {
+        to = editorWordRight(app, pos);
+    } else {
+        from = editorWordLeft(app, pos);
+    }
+    if (from == to) return;
+    std::wstring killed = app.editorText.substr(from, to - from);
+    std::wstring clip = killed;
+    if (app.emacsKillAt == pos && app.emacsKillSize == app.editorText.size()) {
+        std::wstring previous = editorGetClipboard(hwnd);
+        clip = kind == EmacsKill::WordBackward ? killed + previous : previous + killed;
+    }
+    editorCopyToClipboard(hwnd, clip);
+    pushUndo(app, App::EditAction::Delete, from, killed, pos, from);
+    app.editorText.erase(from, to - from);
+    app.editorCursorPos = from;
+    app.emacsKillAt = from;
+    app.emacsKillSize = app.editorText.size();
+    editorEmacsEdited(app, hwnd);
+}
+
+// C-SPC: the mark at the caret. Motions then extend a selection from it,
+// until a kill, a copy or C-g drops it, or the selection leaves it.
+void editorEmacsSetMark(App& app) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = true;
+    app.emacsMarkPos = app.editorCursorPos;
+}
+
+bool editorEmacsMarkActive(App& app) {
+    if (!app.emacsMark) return false;
+    bool anchored = app.editorHasSelection ? app.editorSelStart == app.emacsMarkPos
+                                           : app.editorCursorPos == app.emacsMarkPos;
+    if (!anchored || !app.editorExtraCarets.empty()) app.emacsMark = false;
+    return app.emacsMark;
+}
+
+// C-x C-x: the caret and the mark trade places; the region stays
+void editorEmacsExchangePointAndMark(App& app, HWND hwnd) {
+    if (!editorEmacsMarkActive(app) || !app.editorHasSelection) return;
+    size_t point = app.editorCursorPos;
+    app.editorCursorPos = app.editorSelStart;
+    app.editorSelStart = point;
+    app.editorSelEnd = app.editorCursorPos;
+    app.emacsMarkPos = point;
+    app.editorDesiredCol = -1;
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// C-t: swap the characters either side of the caret and step past them;
+// at a line's end, the last two. One undo step.
+void editorEmacsTranspose(App& app, HWND hwnd) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = false;
+    size_t line = getLineFromPos(app, app.editorCursorPos);
+    size_t lineStart = app.editorLineStarts[line];
+    size_t lineEnd = getLineEnd(app, line);
+    size_t pos = app.editorCursorPos;
+    if (pos == lineEnd && pos > lineStart) pos = editorPrevCharStart(app, pos);
+    if (pos <= lineStart || pos >= lineEnd) return;
+    size_t a = editorPrevCharStart(app, pos), b = editorNextCharEnd(app, pos);
+    std::wstring removed = app.editorText.substr(a, b - a);
+    std::wstring swapped = app.editorText.substr(pos, b - pos) + app.editorText.substr(a, pos - a);
+    pushReplaceUndo(app, a, removed, swapped, app.editorCursorPos, b);
+    app.editorText.replace(a, b - a, swapped);
+    app.editorCursorPos = b;
+    editorEmacsEdited(app, hwnd);
+}
+
+// C-o: a line break after the caret, which stays where it is
+void editorEmacsOpenLine(App& app, HWND hwnd) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = false;
+    size_t pos = app.editorCursorPos;
+    app.editorText.insert(pos, L"\n");
+    pushUndo(app, App::EditAction::Insert, pos, L"\n", pos, pos);
+    editorEmacsEdited(app, hwnd);
+}
+
+void editorEmacsQuit(App& app, HWND hwnd) {
+    app.emacsMark = false;
+    app.editorHasSelection = false;
+    editorClearExtraCarets(app);
+    if (app.editCtxOpen) closeEditCtxMenu(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}

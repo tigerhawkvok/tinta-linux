@@ -1,6 +1,7 @@
 #include "frontmatter_ui.h"
 #include "fs_path.h"
 #include "input.h"
+#include "emacs_keys.h"
 #include "link_target.h"
 #include "annotations.h"
 #include "drafts.h"
@@ -657,8 +658,8 @@ static void settingsAction(App& app, HWND hwnd, int action) {
     // language pick base)
     if (action >= SET_KEYS_PICK_BASE) {
         int pick = action - SET_KEYS_PICK_BASE;
-        const char* ids[] = {"windows", "vim", "custom"};
-        if (pick >= 0 && pick < 3) {
+        const char* ids[] = {"windows", "vim", "emacs", "custom"};
+        if (pick >= 0 && pick < 4) {
             Settings s;
             s.keyOverrides = app.keyOverrides;  // session [Keys] for custom
             s.keyProfile = ids[pick];
@@ -3432,6 +3433,8 @@ static void toggleZenMode(App& app, HWND hwnd) {
 bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     // Typing, scrolling and clicking all put the tab hover card away
     tabHoverCardDismiss(app, hwnd);
+    // The Emacs profile's chords and C-x prefix come first
+    if (emacsKeyDown(app, hwnd, wParam)) return true;
     // Ctrl+Alt+Up/Down add editor carets (#251) before the AltGr guard
     if (editorAltArrowKey(app, hwnd, wParam)) return true;
     if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return false;
