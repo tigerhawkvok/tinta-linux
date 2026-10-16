@@ -1178,25 +1178,29 @@ static float editorBottomClearance(const App& app, float lineHeight) {
     return std::max(lineHeight, readPillClearance(app));
 }
 
+// Top of the row holding a text position, in the source's scroll
+// coordinates: with word wrap a logical line spans several rows (#260)
+static float editorPosRowY(App& app, size_t pos, bool upstream) {
+    size_t line = getLineFromPos(app, pos);
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    float padding = dpi(app, 8.0f);
+    if (!editorWrapOn(app)) return padding + line * lineHeight;
+    ensureEditorRowMetrics(app);
+    IDWriteTextLayout* layout = createEditorLineLayout(
+        app, app.editorLineStarts[line], getLineLength(app, line));
+    float cx = 0, cy = 0;
+    editorCaretXY(layout, pos - app.editorLineStarts[line], cx, cy, upstream);
+    if (layout) layout->Release();
+    size_t rowStart = (line < app.editorRowStarts.size()) ? app.editorRowStarts[line] : line;
+    return padding + rowStart * lineHeight + cy;
+}
+
 static void editorEnsureCursorVisible(App& app) {
     if (app.editorLineStarts.empty()) return;
     size_t line = getLineFromPos(app, app.editorCursorPos);
     float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
-    float padding = dpi(app, 8.0f);
-    float cursorY;
-    if (editorWrapOn(app)) {
-        ensureEditorRowMetrics(app);
-        IDWriteTextLayout* layout = createEditorLineLayout(
-            app, app.editorLineStarts[line], getLineLength(app, line));
-        float cx = 0, cy = 0;
-        editorCaretXY(layout, app.editorCursorPos - app.editorLineStarts[line], cx, cy,
-            app.editorCaretUpstreamPos == app.editorCursorPos);
-        if (layout) layout->Release();
-        size_t rowStart = (line < app.editorRowStarts.size()) ? app.editorRowStarts[line] : line;
-        cursorY = padding + rowStart * lineHeight + cy;
-    } else {
-        cursorY = padding + line * lineHeight;
-    }
+    float cursorY = editorPosRowY(app, app.editorCursorPos,
+                                  app.editorCaretUpstreamPos == app.editorCursorPos);
 
     float viewportH = (float)app.height - chromeTopHeight(app);
     float bottomClearance = editorBottomClearance(app, lineHeight);
@@ -1342,19 +1346,19 @@ void scrollEditorToMatch(App& app) {
     app.editorCaretUpstreamPos = std::wstring::npos;
     app.editorDesiredCol = -1;
 
-    // Find the line containing the match
-    size_t line = getLineFromPos(app, match.startPos);
+    // Center the match's row below the strip. With word wrap that row is
+    // counted in wrapped rows, not lines, or a match deep in a long line
+    // stays below the window (#260).
+    if (app.editorLineStarts.empty()) return;
     float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
-    float padding = 8.0f;
-    float matchY = padding + line * lineHeight;
-
-    // Center match in viewport
-    app.editorScrollY = matchY - app.height / 2.0f;
-    app.editorScrollY = std::max(0.0f, app.editorScrollY);
+    float matchY = editorPosRowY(app, match.startPos, false);
+    float viewportH = (float)app.height - chromeTopHeight(app);
+    app.editorScrollY = matchY + lineHeight * 0.5f - viewportH * 0.5f;
     float maxScroll = std::max(0.0f, app.editorContentHeight - app.height);
-    if (maxScroll > 0) {
-        app.editorScrollY = std::min(app.editorScrollY, maxScroll);
-    }
+    app.editorScrollY = std::max(0.0f, std::min(app.editorScrollY, maxScroll));
+    // Without wrap a match far into a long line also needs the source to
+    // scroll sideways; the caret now sits on it
+    editorEnsureCursorVisible(app);
 }
 
 // --- Debounced reparse ---

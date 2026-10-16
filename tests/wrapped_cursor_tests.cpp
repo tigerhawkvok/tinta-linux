@@ -2,6 +2,7 @@
 #include "editor.h"
 #include "input.h"
 #include "render.h"
+#include "search.h"
 #include "settings.h"
 #include "utils.h"
 #include <cmath>
@@ -184,6 +185,44 @@ void readPillClearance(App& app) {
     editorReparse(app); ensureLayoutComplete(app);
 }
 }
+// Every match Enter steps to lands inside the source pane, with word wrap
+// on and off, however deep into a long line it sits (#260)
+void searchMatchesOnScreen(App& app) {
+    if (app.editMode) exitEditMode(app);  // the cursor fixture is still open
+    app.currentFile = TINTA_SEARCH_WRAP_FIXTURE;
+    enterEditMode(app); editorReparse(app);
+    check(app.editorText.find(L"latin number 8") != std::wstring::npos, "search fixture opens in the editor");
+    for (int theme : {0,5}) for (float scale : {1.0f,1.5f}) {
+        applyTheme(app,theme); app.contentScale=scale; updateTextFormats(app);
+        for (int width : {650,1050}) for (bool preview : {true,false}) for (bool wrap : {true,false}) {
+            app.width=width; app.editorShowPreview=preview;
+            app.editorWordWrap=wrap; rebuildLineStarts(app);
+            app.editorScrollY=app.editorScrollX=0; place(app,0); paint(app);
+            openSearchInput(app);
+            for (wchar_t ch : std::wstring(L"latin")) searchInputChar(app,app.hwnd,ch);
+            check(app.editorSearchMatches.size()==17, "every latin in the fixture is a match");
+            const float lineHeight=app.editorTextFormat->GetFontSize()*1.5f;
+            for (size_t step=0; step<app.editorSearchMatches.size(); ++step) {
+                if (step) key(app,VK_RETURN);
+                paint(app);
+                check(app.editorSearchCurrentIndex==(int)step, "Enter steps to the next match");
+                D2D1_POINT_2F point{};
+                check(editorCaretPoint(app,point), "the caret sits on the match");
+                bool vertical = point.y>=chromeTopHeight(app) && point.y+lineHeight<=app.height;
+                bool horizontal = point.x>=0 && point.x<=editorPaneWidth(app);
+                if (!vertical || !horizontal) {
+                    std::cerr << "  match " << step+1 << " at (" << point.x << ", " << point.y << ") wrap " << wrap
+                              << " width " << width << " scale " << scale << " preview " << preview << '\n';
+                }
+                check(vertical, "the current match is on screen vertically");
+                check(horizontal, "the current match is on screen horizontally");
+            }
+            closeSearchInput(app);
+        }
+    }
+    exitEditMode(app);
+}
+
 int runWrappedCursorTests() {
     auto state=std::make_unique<App>(); App& app=*state;
     app.hwnd=CreateWindowExW(0,L"STATIC",L"Wrapped cursor tests",WS_POPUP,0,0,1050,900,nullptr,nullptr,nullptr,nullptr);
@@ -207,6 +246,7 @@ int runWrappedCursorTests() {
         }
     }
     check(app.editorText==original,"navigation leaves the mixed Markdown unchanged");
+    searchMatchesOnScreen(app);
     DestroyWindow(app.hwnd); app.hwnd=nullptr; state.reset(); CoUninitialize();
     std::cout << "Wrapped cursor: " << sequences << " sequences, " << failures << " failures\n";
     return failures ? 1 : 0;
