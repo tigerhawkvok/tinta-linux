@@ -1056,7 +1056,7 @@ void createWindow(HWND hwnd) {
         g_signal_connect(drop, "drop", G_CALLBACK(dropped), n);
         gtk_widget_add_controller(n->area, GTK_EVENT_CONTROLLER(drop));
     }
-    if (hwnd->className == L"Tinta") {
+    if (hwnd->className == L"TintaMono") {
         GdkContentFormats* formats = gdk_content_formats_new((const char*[]){kTabMime}, 1);
         GtkDropTargetAsync* tabs = gtk_drop_target_async_new(formats, GDK_ACTION_MOVE);
         g_signal_connect(tabs, "accept", G_CALLBACK(tabDropAccept), n);
@@ -1399,7 +1399,7 @@ int messageBox(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type) {
         default: labels = {"OK"}; results = {IDOK}; break;
     }
     labels.push_back(nullptr);
-    GtkAlertDialog* dialog = gtk_alert_dialog_new("%s", utf8(caption ? caption : L"Tinta").c_str());
+    GtkAlertDialog* dialog = gtk_alert_dialog_new("%s", utf8(caption ? caption : L"Tinta Mono").c_str());
     gtk_alert_dialog_set_detail(dialog, utf8(text).c_str());
     gtk_alert_dialog_set_buttons(dialog, labels.data());
     gtk_alert_dialog_set_default_button(dialog, 0);

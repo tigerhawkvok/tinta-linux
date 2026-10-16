@@ -22,9 +22,10 @@
 
 // The old bare-launch tutorial, now behind the "Sample document" card
 // (and still the fallback when a requested file cannot be loaded)
-static const char* kSampleDocument = R"(# Welcome to Tinta
+static const char* kSampleDocument = R"(# Welcome to Tinta Mono
 
-**Tinta** is a fast, lightweight Markdown and Mermaid viewer for Windows.
+**Tinta Mono** is a fast, native Markdown and Mermaid viewer for Windows and Linux, a fork of
+Tinta by oipoistar.
 
 ## Getting Started
 
@@ -497,7 +498,7 @@ void renderStartPage(App& app) {
     };
 
     // --- Hero: icon, wordmark, version, tagline
-    IDWriteTextLayout* wm = spLayout(app, L"Tinta", 38.0f,
+    IDWriteTextLayout* wm = spLayout(app, L"Tinta Mono", 38.0f,
                                      DWRITE_FONT_WEIGHT_EXTRA_BOLD, 4096.0f,
                                      false, false, -1.0f);
     DWRITE_TEXT_METRICS wmM = spMetrics(wm);

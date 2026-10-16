@@ -2174,7 +2174,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         printPagesDir.empty() && exportHtmlPath.empty() &&
         exportDocxPath.empty() && exportPdfPath.empty() &&
         savedSettings.openInTabs) {
-        HWND existing = FindWindowW(L"Tinta", nullptr);
+        HWND existing = FindWindowW(L"TintaMono", nullptr);
         if (existing) {
             // inputFile is absolute by now: the receiving window has its
             // own working directory
@@ -2224,7 +2224,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(hInstance, L"IDI_ICON1");
     wc.hIconSm = LoadIconW(hInstance, L"IDI_ICON1");
-    wc.lpszClassName = L"Tinta";
+    wc.lpszClassName = L"TintaMono";
     RegisterClassExW(&wc);
 
     // Validate the saved window position against the monitors that exist
@@ -2271,7 +2271,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     app.hwnd = CreateWindowExW(
         WS_EX_ACCEPTFILES,
-        L"Tinta",       // window class: unchanged, other instances find it by name
+        L"TintaMono",   // window class: not upstream Tinta's "Tinta", so the two run side by side
         L"Tinta Mono",
         WS_OVERLAPPEDWINDOW,
         windowX, windowY,

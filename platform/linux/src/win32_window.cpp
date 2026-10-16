@@ -313,7 +313,7 @@ HWND CreateWindowExW(DWORD exStyle, LPCWSTR className, LPCWSTR windowName, DWORD
         state().windows.push_back(window);
     }
     // Only Tinta's own windows are shown; helpers (the tab drag ghost) stay records
-    if (tinta::gtk::active() && window->className == L"Tinta") tinta::gtk::createWindow(window);
+    if (tinta::gtk::active() && window->className == L"TintaMono") tinta::gtk::createWindow(window);
     return window;
 }
 
@@ -484,8 +484,8 @@ namespace {
 HWND__* remoteTinta() {
     static HWND__ window = [] {
         HWND__ w;
-        w.className = L"Tinta";
-        w.title = L"Tinta";
+        w.className = L"TintaMono";
+        w.title = L"Tinta Mono";
         w.rect = {0, 0, 0, 0};
         w.remote = true;
         return w;
@@ -512,7 +512,7 @@ HWND FindWindowExW(HWND, HWND after, LPCWSTR className, LPCWSTR windowName) {
             return w;
         }
     }
-    if (className && wcscmp(className, L"Tinta") == 0 && !windowName && tinta::gtk::active() &&
+    if (className && wcscmp(className, L"TintaMono") == 0 && !windowName && tinta::gtk::active() &&
         tinta::gtk::remoteInstanceExists()) {
         return remoteTinta();
     }
@@ -814,7 +814,7 @@ BOOL TrackPopupMenu(HMENU, UINT, int, int, int, HWND, const RECT*) { return FALS
 // Headless: report on stderr and take the safe answer (no, cancel)
 int MessageBoxW(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type) {
     if (tinta::gtk::active()) return tinta::gtk::messageBox(owner, text, caption, type);
-    std::fprintf(stderr, "[%ls] %ls\n", caption ? caption : L"Tinta", text ? text : L"");
+    std::fprintf(stderr, "[%ls] %ls\n", caption ? caption : L"Tinta Mono", text ? text : L"");
     switch (type & 0xF) {
         case MB_YESNO: return IDNO;
         case MB_YESNOCANCEL:

@@ -92,7 +92,7 @@ const App::TextRect* findTextRectAt(const App& app, int x, int y) {
 
 
 void updateWindowTitle(App& app) {
-    std::wstring title = L"Tinta";
+    std::wstring title = L"Tinta Mono";
     if (!app.currentFile.empty()) {
         std::wstring wpath = toWide(app.currentFile);
         size_t lastSep = wpath.find_last_of(L"\\/");
