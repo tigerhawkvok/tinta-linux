@@ -2271,8 +2271,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     app.hwnd = CreateWindowExW(
         WS_EX_ACCEPTFILES,
-        L"Tinta",
-        L"Tinta",
+        L"Tinta",       // window class: unchanged, other instances find it by name
+        L"Tinta Mono",
         WS_OVERLAPPEDWINDOW,
         windowX, windowY,
         savedSettings.windowWidth, savedSettings.windowHeight,

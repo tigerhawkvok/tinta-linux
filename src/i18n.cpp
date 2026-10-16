@@ -168,8 +168,8 @@ const Entry kEntries[] = {
                                L"\uC2DC\uC791: %.1fms (\uCC3D: %.1f | D2D: %.1f | DWrite: %.1f | \uD30C\uC77C: %.1f)" },
 
     // ----- File-association dialogs (shared by settings.cpp and main_d2d.cpp /register) -----
-    { "fileassoc.title",                L"Tinta - File Association",                 L"Tinta - \u6587\u4EF6\u5173\u8054",                              L"Tinta - \u30D5\u30A1\u30A4\u30EB\u95A2\u9023\u4ED8\u3051", L"Tinta - \uD30C\uC77C \uC5F0\uACB0" },
-    { "fileassoc.packaged.title",       L"Tinta - Default apps",                     L"Tinta - \u9ED8\u8BA4\u5E94\u7528",                              L"Tinta - \u65E2\u5B9A\u306E\u30A2\u30D7\u30EA", L"Tinta - \uAE30\uBCF8 \uC571" },
+    { "fileassoc.title",                L"Tinta Mono - File Association",                 L"Tinta Mono - \u6587\u4EF6\u5173\u8054",                              L"Tinta Mono - \u30D5\u30A1\u30A4\u30EB\u95A2\u9023\u4ED8\u3051", L"Tinta Mono - \uD30C\uC77C \uC5F0\uACB0" },
+    { "fileassoc.packaged.title",       L"Tinta Mono - Default apps",                     L"Tinta Mono - \u9ED8\u8BA4\u5E94\u7528",                              L"Tinta Mono - \u65E2\u5B9A\u306E\u30A2\u30D7\u30EA", L"Tinta Mono - \uAE30\uBCF8 \uC571" },
     { "fileassoc.packaged.ask_body",
         L"Would you like to make Tinta the default viewer for Markdown and Mermaid files?\n\nWindows will open Settings on Tinta's page \u2014 set .md, .markdown, and .mmd to Tinta Markdown Viewer.",
         L"\u662F\u5426\u5C06 Tinta \u8BBE\u4E3A Markdown \u548C Mermaid \u6587\u4EF6\u7684\u9ED8\u8BA4\u67E5\u770B\u5668\uFF1F\n\nWindows \u5C06\u6253\u5F00 Tinta \u7684\u8BBE\u7F6E\u9875\uFF0C\u8BF7\u5C06 .md\u3001.markdown \u548C .mmd \u8BBE\u4E3A Tinta Markdown Viewer", L"Tinta\u3092 Markdown \u3068 Mermaid \u30D5\u30A1\u30A4\u30EB\u306E\u65E2\u5B9A\u30D3\u30E5\u30FC\u30A2\u306B\u3057\u307E\u3059\u304B\uFF1F\n\nWindows \u306E\u8A2D\u5B9A\u3067 .md\u3001.markdown\u3001.mmd \u3092 Tinta Markdown Viewer \u306B\u8A2D\u5B9A\u3067\u304D\u307E\u3059\u3002", L"Tinta\uB97C Markdown \uBC0F Mermaid \uD30C\uC77C\uC758 \uAE30\uBCF8 \uBDF0\uC5B4\uB85C \uC124\uC815\uD560\uAE4C\uC694?\n\nWindows \uC124\uC815\uC5D0\uC11C .md, .markdown, .mmd\uB97C Tinta Markdown Viewer\uB85C \uC9C0\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4." },
@@ -207,9 +207,9 @@ const Entry kEntries[] = {
     // ----- Window title -----
     // Format with positional args: %1$s = filename (or full path), %2$s is unused
     // for the non-dirty case. For the dirty case see title.dirty below.
-    { "title.plain",   L"Tinta - %1$s",            L"Tinta - %1$s",            L"Tinta - %1$s", L"Tinta - %1$s" },
-    { "title.dirty",   L"Tinta - * %1$s",           L"Tinta - * %1$s",          L"Tinta - * %1$s", L"Tinta - * %1$s" },
-    { "title.no_file", L"Tinta",                    L"Tinta",                   L"Tinta", L"Tinta" },
+    { "title.plain",   L"Tinta Mono - %1$s",            L"Tinta Mono - %1$s",            L"Tinta Mono - %1$s", L"Tinta Mono - %1$s" },
+    { "title.dirty",   L"Tinta Mono - * %1$s",           L"Tinta Mono - * %1$s",          L"Tinta Mono - * %1$s", L"Tinta Mono - * %1$s" },
+    { "title.no_file", L"Tinta Mono",               L"Tinta Mono",              L"Tinta Mono", L"Tinta Mono" },
     // Quick note (Ctrl+N) before its first save
     { "title.untitled", L"Untitled",                L"\u65E0\u6807\u9898",      L"\u7121\u984C\u540D", L"\uC81C\uBAA9 \uC5C6\uC74C" },
 
@@ -911,13 +911,13 @@ const BuiltinTranslation kBuiltinTranslations[] = {
       L"D\u00E9marrage: %.1fms (Fen\u00EAtre: %.1f | D2D: %.1f | DWrite: %.1f | Fichier: %.1f)",
       L"Avvio: %.1fms (Finestra: %.1f | D2D: %.1f | DWrite: %.1f | File: %.1f)" },
     { "fileassoc.title",
-      L"Tinta - Dateizuordnung",
-      L"Tinta - Association de fichiers",
-      L"Tinta - Associazione file" },
+      L"Tinta Mono - Dateizuordnung",
+      L"Tinta Mono - Association de fichiers",
+      L"Tinta Mono - Associazione file" },
     { "fileassoc.packaged.title",
-      L"Tinta - Standard-Apps",
-      L"Tinta - Applications par d\u00E9faut",
-      L"Tinta - App predefinite" },
+      L"Tinta Mono - Standard-Apps",
+      L"Tinta Mono - Applications par d\u00E9faut",
+      L"Tinta Mono - App predefinite" },
     { "fileassoc.packaged.ask_body",
       L"M\u00F6chten Sie Tinta als Standardanzeige f\u00FCr Markdown- und Mermaid-Dateien festlegen?\n\nWindows \u00F6ffnet die Tinta-Seite in den Einstellungen. Setzen Sie dort .md, .markdown und .mmd auf Tinta Markdown Viewer.",
       L"Voulez-vous d\u00E9finir Tinta comme visionneuse par d\u00E9faut des fichiers Markdown et Mermaid ?\n\nWindows ouvrira la page de Tinta dans les Param\u00E8tres. D\u00E9finissez .md, .markdown et .mmd sur Tinta Markdown Viewer.",

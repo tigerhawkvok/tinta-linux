@@ -3,12 +3,14 @@
   <id>io.github.tigerhawkvok.Tinta</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <name>Tinta</name>
+  <name>Tinta Mono</name>
   <summary>Fast Markdown and Mermaid viewer and editor</summary>
   <description>
     <p>
-      Tinta opens Markdown documents instantly and renders Mermaid diagrams, math, tables and
-      code in place. Its source editor sits beside a live preview.
+      Tinta Mono opens Markdown documents instantly and renders Mermaid diagrams, math, tables and
+      code in place, with its source editor beside a live preview. It is a cross-platform fork of
+      Tinta by oipoistar, with Linux support, Mermaid through merman, and programmer-friendly
+      defaults.
     </p>
     <ul>
       <li>Mermaid diagrams drawn in place, with labels sized in the theme's own face</li>
@@ -34,6 +36,7 @@
     <control>keyboard</control>
   </supports>
   <releases>
+    <release version="4.0.6" date="2026-10-16"/>
     <release version="4.0.5" date="2026-10-16"/>
   </releases>
 </component>

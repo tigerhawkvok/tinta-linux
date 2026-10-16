@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Tinta
+Name=Tinta Mono
 GenericName=Markdown Viewer
 Comment=Fast Markdown and Mermaid viewer and editor
 Exec=tinta %f

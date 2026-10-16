@@ -656,7 +656,7 @@ bool printDocument(App& app) {
                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
         return false;
     }
-    std::wstring jobName = L"Tinta - " + toWide(app.currentFile);
+    std::wstring jobName = L"Tinta Mono - " + toWide(app.currentFile);
     IPrintDocumentPackageTarget* target = nullptr;
     HRESULT hr = factory->CreateDocumentPackageTargetForPrintJob(
         printerName.c_str(), jobName.c_str(), nullptr, nullptr, &target);
@@ -916,7 +916,7 @@ bool exportPdfFile(App& app, const std::wstring& path) {
         fileStream->Release();
         return false;
     }
-    std::wstring jobName = L"Tinta - " + toWide(app.currentFile);
+    std::wstring jobName = L"Tinta Mono - " + toWide(app.currentFile);
     IPrintDocumentPackageTarget* target = nullptr;
     HRESULT hr = factory->CreateDocumentPackageTargetForPrintJob(
         L"Microsoft Print to PDF", jobName.c_str(), fileStream, nullptr,

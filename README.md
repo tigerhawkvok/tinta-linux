@@ -1,20 +1,11 @@
 <div align="center">
   <img src="resources/tinta.ico" width="80">
-  <h1>Tinta</h1>
-  <p><em>Markdown, distilled.</em></p>
-  <p>A fast, lightweight Markdown and Mermaid viewer for Windows</p>
+  <h1>Tinta Mono</h1>
+  <p><em>Markdown, distilled. On Windows and Linux, tuned for people who write code.</em></p>
+  <p>A fast, native Markdown and Mermaid viewer and editor</p>
 
-  <p>
-    <a href="https://apps.microsoft.com/detail/9MZ5MZ3L9RKF">
-      <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get Tinta from the Microsoft Store">
-    </a>
-  </p>
-
-  <a href="https://github.com/oipoistar/tinta/releases/latest">
-    <img src="https://img.shields.io/github/v/release/oipoistar/tinta?label=Portable&style=for-the-badge&color=1a1a2e" alt="Portable download">
-  </a>
-  <a href="https://tinta.cc">
-    <img src="https://img.shields.io/badge/website-tinta.cc-8b4513?style=for-the-badge" alt="Website">
+  <a href="https://github.com/tigerhawkvok/tinta-linux/releases/latest">
+    <img src="https://img.shields.io/github/v/release/tigerhawkvok/tinta-linux?label=Download&style=for-the-badge&color=1a1a2e" alt="Download">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License">
@@ -23,33 +14,53 @@
 
 <br>
 
-Tinta is a **fast, lightweight Markdown and Mermaid viewer for Windows**, built with Direct2D and DirectWrite for hardware-accelerated rendering. A single native executable of about 2.5 MB that opens instantly — no Electron, no web engine, no installer.
+**Tinta Mono** is a fast, native Markdown and Mermaid viewer and editor for **Windows and
+Linux**. It opens instantly: no Electron and no web engine, just Direct2D/DirectWrite on Windows
+and GTK 4, Cairo and Pango on Linux.
 
-<p align="center">
-  <img src="https://tinta.cc/img/screenshots/paper.png" width="49%" alt="Tinta markdown viewer on Windows — Paper light theme">
-  <img src="https://tinta.cc/img/screenshots/midnight.png" width="49%" alt="Tinta markdown viewer on Windows — Midnight dark theme">
-</p>
+## Lineage
+
+Tinta Mono is a hard fork of **[Tinta](https://github.com/oipoistar/tinta)** by
+[oipoistar](https://github.com/oipoistar), the Windows Markdown viewer at
+[tinta.cc](https://tinta.cc). Everything that makes Tinta fast and pleasant comes from there: the
+Direct2D renderer, the tabs and unified editor, annotations, the exports, and the themes. If you
+only need Windows, upstream Tinta is signed and in the
+[Microsoft Store](https://apps.microsoft.com/detail/9MZ5MZ3L9RKF).
+
+The fork adds:
+
+- **Linux**:
+  - a compatibility layer that runs the same code on GTK 4, Cairo and Pango, natively on Wayland
+    and X11;
+  - an AppImage and a Flatpak;
+  - single instance, tabs that tear off and move between windows, and printing through the system
+    dialog.
+- **Mermaid through [merman](https://github.com/Latias94/merman)**:
+  - the Rust port of Mermaid draws every diagram family Mermaid's docs show, math labels included;
+  - labels are sized in the face that draws them;
+  - search reaches the diagram's source.
+- **Programmer-friendly choices**:
+  - Monaspace Argon as the default code face, bundled on both platforms;
+  - Windows, Vim and Emacs keyboard profiles;
+  - copying from the reader gives you the Markdown behind the selection;
+  - pasted screenshots go to an assets folder or inline.
+
+The name keeps "Tinta" for where it comes from, and "Mono" for the monospace and code-minded
+defaults. Settings stay where Tinta keeps them (`%APPDATA%\Tinta`, or `~/.config/Tinta` on Linux),
+so moving between the two keeps your setup.
 
 ## Install
 
-The recommended way is the [Microsoft Store](https://apps.microsoft.com/detail/9MZ5MZ3L9RKF): the build is signed by the Store, trusted by Windows out of the box (no security prompts, works with Smart App Control), and updates automatically. The same signed build installs from the command line:
+Download from [the latest release](https://github.com/tigerhawkvok/tinta-linux/releases/latest):
 
-```pwsh
-winget install "Tinta Markdown Viewer" -s msstore
-```
+| File | Platform |
+|---|---|
+| `tinta-mono-<version>-windows-x64.exe` | Windows 10/11, x64: a portable single exe. Put a `settings.ini` beside it to keep settings there. It is unsigned, so SmartScreen asks once ("More info", then "Run anyway"). |
+| `Tinta-Mono-<version>-x86_64.AppImage` | Linux x86_64 (glibc 2.38 or newer): `chmod +x` and run; `--register` adds the desktop entry and file types. |
 
-### Portable and other options
+The Flatpak builds from this tree with `packaging/flatpak/build-flatpak.sh`.
 
-Prefer a single file? Grab [the latest release](https://github.com/oipoistar/tinta/releases/latest): a portable `tinta.exe`, no installation required. Because a freshly released exe is not yet code-signed, Windows may show a SmartScreen prompt on first run ("More info", then "Run anyway") until the new version builds up download reputation.
-
-[Scoop](https://scoop.sh) users can install from the bucket:
-
-```pwsh
-scoop bucket add tinta https://github.com/oipoistar/scoop-bucket
-scoop install tinta
-```
-
-## Why Tinta?
+## Why native?
 
 Most markdown apps ship an entire browser to render text. Tinta uses the GPU-accelerated text stack already built into Windows:
 
