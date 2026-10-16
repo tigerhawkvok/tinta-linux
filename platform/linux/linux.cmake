@@ -235,6 +235,14 @@ if(BUILD_TESTING)
         TINTA_COPY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/copy-as-markdown.md")
     add_test(NAME copy_markdown COMMAND copy_markdown_tests)
 
+    # Tables inside list items (render.cpp)
+    add_executable(list_table_tests tests/list_table_tests.cpp)
+    target_include_directories(list_table_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(list_table_tests PRIVATE tinta_core)
+    target_compile_definitions(list_table_tests PRIVATE
+        TINTA_LIST_TABLE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/list-item-table.md")
+    add_test(NAME list_tables COMMAND list_table_tests)
+
     # The Emacs shortcut profile (emacs_keys.cpp), reader and editor
     add_executable(emacs_keys_tests tests/emacs_keys_tests.cpp)
     target_include_directories(emacs_keys_tests PRIVATE include ${md4c_SOURCE_DIR}/src)

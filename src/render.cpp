@@ -2543,40 +2543,41 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
-        bool hasBlockChildren = false;
-        for (const auto& itemChild : child->children) {
-            if (itemChild->type == ElementType::Paragraph ||
-                itemChild->type == ElementType::List ||
-                itemChild->type == ElementType::CodeBlock ||
-                itemChild->type == ElementType::BlockQuote) {
-                hasBlockChildren = true;
-                break;
+        // The same blocks a blockquote lays out as blocks. Tables were
+        // missing, so a table indented under an item ran together as text
+        auto isBlockChild = [](const ElementPtr& e) {
+            switch (e->type) {
+                case ElementType::Paragraph: case ElementType::Heading: case ElementType::CodeBlock:
+                case ElementType::BlockQuote: case ElementType::List: case ElementType::HorizontalRule:
+                case ElementType::HtmlBlock: case ElementType::Table:
+                    return true;
+                default:
+                    return false;
             }
-        }
+        };
+        bool hasBlockChildren = std::any_of(child->children.begin(), child->children.end(), isBlockChild);
 
         float itemStartY = y;
         const LayoutSnapshot itemStart = takeSnapshot(app);
         if (hasBlockChildren) {
-            std::vector<ElementPtr> inlineElements, blockElements;
+            // In document order: a table between two paragraphs stays
+            // between them (inline text used to go first, then every block)
+            std::vector<ElementPtr> inlineRun;
+            auto flushInline = [&] {
+                if (inlineRun.empty()) return;
+                layoutInlineContent(app, inlineRun, indent + listIndent, y,
+                    maxWidth - listIndent, app.textFormat, app.theme.text);
+                inlineRun.clear();
+            };
             for (const auto& itemChild : child->children) {
-                if (itemChild->type == ElementType::Paragraph ||
-                    itemChild->type == ElementType::List ||
-                    itemChild->type == ElementType::CodeBlock ||
-                    itemChild->type == ElementType::BlockQuote) {
-                    blockElements.push_back(itemChild);
+                if (isBlockChild(itemChild)) {
+                    flushInline();
+                    layoutElement(app, itemChild, y, indent + listIndent, maxWidth - listIndent);
                 } else {
-                    inlineElements.push_back(itemChild);
+                    inlineRun.push_back(itemChild);
                 }
             }
-
-            if (!inlineElements.empty()) {
-                layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                    maxWidth - listIndent, app.textFormat, app.theme.text);
-            }
-
-            for (const auto& blockChild : blockElements) {
-                layoutElement(app, blockChild, y, indent + listIndent, maxWidth - listIndent);
-            }
+            flushInline();
         } else {
             layoutInlineContent(app, child->children, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
