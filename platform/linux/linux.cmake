@@ -130,6 +130,9 @@ if(BUILD_TESTING)
     target_link_libraries(compat_dwrite_tests PRIVATE tinta_compat)
     add_test(NAME compat_dwrite COMMAND compat_dwrite_tests)
 
+    add_executable(compat_crt_tests ${TINTA_LINUX_DIR}/tests/crt_tests.cpp)
+    add_test(NAME compat_crt COMMAND compat_crt_tests)
+
     add_executable(compat_d2d_wic_tests ${TINTA_LINUX_DIR}/tests/d2d_wic_tests.cpp)
     target_include_directories(compat_d2d_wic_tests PRIVATE ${TINTA_LINUX_DIR}/src)
     find_package(ZLIB REQUIRED)  # reads the compressed PDF the print path writes

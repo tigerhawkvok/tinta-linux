@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <string>
 #include <strings.h>
 
 #ifndef _countof
@@ -46,21 +47,73 @@ inline int sprintf_s(char* buffer, size_t size, const char* format, ...) {
     return written;
 }
 
-// MSVC reads %s in a wide format as a wide string; glibc reads it as a narrow
-// one. Shared code must use %ls for wide strings.
+namespace tinta_crt {
+
+// A wide format as MSVC reads it, rewritten for glibc. MSVC's wide printf
+// takes %s and %c as wide, and %hs/%hc or %S/%C as narrow; glibc takes %s
+// and %c as narrow and wants %ls/%lc for wide. Shared code is written for
+// MSVC, and so are languages.ini strings ("%s words" printed only the
+// first digit of the count, and Pandoc's temp file landed in "/").
+inline std::wstring msvcWideFormat(const wchar_t* format) {
+    std::wstring out;
+    const wchar_t* p = format;
+    auto digits = [&] {
+        while (*p == L'*' || (*p >= L'0' && *p <= L'9')) out += *p++;
+    };
+    while (*p) {
+        if (*p != L'%') {
+            out += *p++;
+            continue;
+        }
+        out += *p++;
+        if (*p == L'%') {
+            out += *p++;
+            continue;
+        }
+        while (*p && std::wcschr(L"-+ #0'", *p)) out += *p++;
+        digits();
+        if (*p == L'.') {
+            out += *p++;
+            digits();
+        }
+        std::wstring length;
+        while (*p && std::wcschr(L"hlLjzt", *p)) length += *p++;
+        const wchar_t conversion = *p;
+        if (!conversion) break;
+        p++;
+        const bool text = conversion == L's' || conversion == L'c';
+        if (text && length.empty()) {
+            out += L'l';  // wide, as MSVC means it
+        } else if (text && length == L"h") {
+            // narrow: glibc's plain %s / %c
+        } else if ((conversion == L'S' || conversion == L'C') && length.empty()) {
+            out += conversion == L'S' ? L's' : L'c';  // MSVC's narrow spelling
+            continue;
+        } else {
+            out += length;
+        }
+        out += conversion;
+    }
+    return out;
+}
+
+}  // namespace tinta_crt
+
 template <size_t N>
 inline int swprintf_s(wchar_t (&buffer)[N], const wchar_t* format, ...) {
+    const std::wstring glibc = tinta_crt::msvcWideFormat(format);
     va_list args;
     va_start(args, format);
-    int written = vswprintf(buffer, N, format, args);
+    int written = vswprintf(buffer, N, glibc.c_str(), args);
     va_end(args);
     return written;
 }
 
 inline int swprintf_s(wchar_t* buffer, size_t count, const wchar_t* format, ...) {
+    const std::wstring glibc = tinta_crt::msvcWideFormat(format);
     va_list args;
     va_start(args, format);
-    int written = vswprintf(buffer, count, format, args);
+    int written = vswprintf(buffer, count, glibc.c_str(), args);
     va_end(args);
     return written;
 }
