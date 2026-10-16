@@ -2930,8 +2930,9 @@ void renderSettingsOverlay(App& app) {
                        TINTA_VERSION_MINOR, TINTA_VERSION_PATCH);
             wchar_t hint[160];
             swprintf_s(hint, _countof(hint), tr(app, "settings.updates.hint"), version);
+            const wchar_t* licenses = tr(app, "settings.licenses");
             const wchar_t* check = tr(app, "settings.updates.check");
-            float chipW = chipsWidth({check});
+            float chipW = chipsWidth({licenses, check});
             float toggleW = dpi(app, 40.0f);
             cardLabel(tr(app, "settings.updates"), hint, chipW + toggleW + dpi(app, 22.0f));
             float toggleX = cx + cw - cardPad - toggleW;
@@ -2939,6 +2940,7 @@ void renderSettingsOverlay(App& app) {
                            app.updateCheckEnabled, SET_TOGGLE_UPDATES, anim);
             float bx = toggleX - dpi(app, 12.0f) - chipW;
             float chipY = cy + (rowCardH - dpi(app, 24.0f)) * 0.5f;
+            settingsChip(app, bx, chipY, licenses, false, SET_OPEN_LICENSES, anim, fmt);
             settingsChip(app, bx, chipY, check, app.updateCheckRunning, SET_CHECK_UPDATES, anim, fmt);
         }
     } else if (app.settingsSection == 1) {  // Appearance

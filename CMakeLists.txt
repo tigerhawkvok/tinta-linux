@@ -95,6 +95,18 @@ set(SOURCES
     src/wordcount.cpp
 )
 
+# The third-party notices, built into the binary (Settings > Updates >
+# Licenses). Regenerate the .md with packaging/notices/generate_notices.py.
+set(TINTA_NOTICES_CPP ${CMAKE_CURRENT_BINARY_DIR}/generated/notices_data.cpp)
+add_custom_command(OUTPUT ${TINTA_NOTICES_CPP}
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/packaging/THIRD-PARTY-NOTICES.md
+            -DOUTPUT=${TINTA_NOTICES_CPP} -DSYMBOL=kThirdPartyNotices
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_file.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/packaging/THIRD-PARTY-NOTICES.md
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_file.cmake
+    COMMENT "Embedding the third-party notices")
+list(APPEND SOURCES src/notices.cpp ${TINTA_NOTICES_CPP})
+
 set(HEADERS
     include/markdown.h
     include/types.h

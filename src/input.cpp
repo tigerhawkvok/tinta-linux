@@ -2,6 +2,7 @@
 #include "fs_path.h"
 #include "input.h"
 #include "emacs_keys.h"
+#include "notices.h"
 #include "link_target.h"
 #include "annotations.h"
 #include "drafts.h"
@@ -727,6 +728,11 @@ static void settingsAction(App& app, HWND hwnd, int action) {
         case SET_CHECK_UPDATES:
             if (!app.updateCheckRunning) PostMessageW(hwnd, WM_APP_UPDATE_CHECK_NOW, 0, 0);
             break;
+        case SET_OPEN_LICENSES:
+            // The third-party notices open as a document tab
+            closeSettings(app, hwnd);
+            openThirdPartyNotices(app, hwnd);
+            return;
         case SET_TOGGLE_HEADRULES:
             app.headingRules = !app.headingRules;
             // Layout shifts (the rule adds height), so a repaint alone

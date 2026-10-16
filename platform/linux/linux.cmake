@@ -46,6 +46,9 @@ target_compile_definitions(tinta_compat PRIVATE
     TINTA_SOURCE_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts"
     TINTA_SOURCE_ICON_DIR="${TINTA_LINUX_DIR}/data/icons")
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/ DESTINATION share/tinta/fonts COMPONENT tinta)
+# Tinta's license and everything it ships under (also built into the binary)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/THIRD-PARTY-NOTICES.md
+        DESTINATION share/doc/tinta COMPONENT tinta)
 # Desktop integration; the icons come from resources/tinta.ico. The desktop
 # file name matches the GTK program name (Wayland app id, WM_CLASS)
 install(FILES ${TINTA_LINUX_DIR}/data/tinta.desktop DESTINATION share/applications COMPONENT tinta)
@@ -189,6 +192,22 @@ if(BUILD_TESTING)
     target_include_directories(list_spacing_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(list_spacing_tests PRIVATE tinta_core)
     add_test(NAME list_spacing COMMAND list_spacing_tests)
+
+    # The third-party notices: built in, complete, and opened as a tab
+    add_executable(notices_tests tests/notices_tests.cpp)
+    target_include_directories(notices_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(notices_tests PRIVATE tinta_core)
+    target_compile_definitions(notices_tests PRIVATE
+        TINTA_NOTICES_FILE="${CMAKE_CURRENT_SOURCE_DIR}/packaging/THIRD-PARTY-NOTICES.md")
+    add_test(NAME notices COMMAND notices_tests)
+    # ...and current: regenerated from the pinned merman, they must not differ
+    find_program(TINTA_PYTHON3 python3)
+    if(TINTA_MERMAN AND TINTA_PYTHON3)
+        add_test(NAME notices_current COMMAND ${TINTA_PYTHON3}
+            ${CMAKE_CURRENT_SOURCE_DIR}/packaging/notices/generate_notices.py --check
+            --merman ${merman_SOURCE_DIR} --md4c ${md4c_SOURCE_DIR}
+            --out ${CMAKE_CURRENT_SOURCE_DIR}/packaging/THIRD-PARTY-NOTICES.md)
+    endif()
 
     # The Emacs shortcut profile (emacs_keys.cpp), reader and editor
     add_executable(emacs_keys_tests tests/emacs_keys_tests.cpp)
