@@ -3,6 +3,7 @@
 #include "input.h"
 #include "emacs_keys.h"
 #include "notices.h"
+#include "markdown_copy.h"
 #include "link_target.h"
 #include "annotations.h"
 #include "drafts.h"
@@ -305,6 +306,7 @@ bool openDocumentInViewer(App& app, const std::wstring& fullPath) {
     app.verticalScrollbarVisible = false;
     app.scrollbarContentHeight = 0.0f;
     app.docText.clear();
+    app.docSourceSpans.clear();
     std::wstring().swap(app.docTextLower);
     app.searchMatches.clear();
     clearSelection(app);  // offsets belong to the old docText
@@ -1626,7 +1628,7 @@ static void invokeContextMenuAction(App& app, HWND hwnd, int item) {
     switch (item) {
         case CTX_COPY:
             if (app.hasSelection && app.selAnchor != app.selFocus) {
-                std::wstring selected = selectionTextForRange(
+                std::wstring selected = copyTextForRange(
                     app, std::min(app.selAnchor, app.selFocus),
                     std::max(app.selAnchor, app.selFocus));
                 if (selected.empty()) break;
@@ -3714,7 +3716,7 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         if (tableEditKeyDown(app, hwnd, wParam)) return false;
         if (ctrl && wParam == 'C' && app.hasSelection &&
             app.selAnchor != app.selFocus) {
-            std::wstring selected = selectionTextForRange(
+            std::wstring selected = copyTextForRange(
                 app, std::min(app.selAnchor, app.selFocus),
                 std::max(app.selAnchor, app.selFocus));
             if (selected.empty()) return false;
@@ -3825,10 +3827,11 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 break;
             }
             case 'C': {
-                // Copy - copy selected text or all text if select all was used
+                // Copy returns Markdown: the selection's, or (nothing
+                // selected) the whole document as written
                 bool copied = false;
                 if (app.hasSelection && app.selAnchor != app.selFocus) {
-                    std::wstring selected = selectionTextForRange(
+                    std::wstring selected = copyTextForRange(
                         app, std::min(app.selAnchor, app.selFocus),
                         std::max(app.selAnchor, app.selFocus));
                     if (!selected.empty()) {
@@ -3837,9 +3840,8 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                     }
                     app.hasSelection = false;
                 } else if (app.root) {
-                    // If no selection, copy all
-                    std::wstring allText;
-                    extractText(app.root, allText);
+                    std::wstring allText = documentMarkdown(app);
+                    if (allText.empty()) extractText(app.root, allText);
                     copyToClipboard(hwnd, allText);
                     copied = true;
                 }

@@ -57,6 +57,13 @@ enum class ElementType {
 struct Element;
 using ElementPtr = std::shared_ptr<Element>;
 
+// What a parse read: the text sourceOffset points into (footnote
+// definitions lifted out, frontmatter blanked) and the document as written
+struct DocumentSource {
+    std::string mapped;
+    std::string original;
+};
+
 // Base element structure
 struct Element {
     ElementType type;
@@ -80,6 +87,9 @@ struct Element {
 
     std::vector<ElementPtr> children;
     Element* parent = nullptr;
+    // On the root: the source, so a copy can return the Markdown behind a
+    // selection (markdown_copy.cpp)
+    std::shared_ptr<const DocumentSource> source;
 
     Element(ElementType t) : type(t) {}
 };

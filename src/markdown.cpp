@@ -1167,6 +1167,9 @@ ParseResult MarkdownParser::parse(const std::string& markdown) {
     if (result.success) appendFootnotes(result.root, notes, [&](const std::string& body) {
         return parseCore(body, nullptr); // Nested footnote references stay literal.
     });
+    if (result.success && result.root) {
+        result.root->source = std::make_shared<DocumentSource>(DocumentSource{notes.source, markdown});
+    }
     return result;
 }
 

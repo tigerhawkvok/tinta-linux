@@ -209,6 +209,14 @@ if(BUILD_TESTING)
             --out ${CMAKE_CURRENT_SOURCE_DIR}/packaging/THIRD-PARTY-NOTICES.md)
     endif()
 
+    # Copying from the reader returns Markdown (markdown_copy.cpp)
+    add_executable(copy_markdown_tests tests/copy_markdown_tests.cpp)
+    target_include_directories(copy_markdown_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(copy_markdown_tests PRIVATE tinta_core)
+    target_compile_definitions(copy_markdown_tests PRIVATE
+        TINTA_COPY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/copy-as-markdown.md")
+    add_test(NAME copy_markdown COMMAND copy_markdown_tests)
+
     # The Emacs shortcut profile (emacs_keys.cpp), reader and editor
     add_executable(emacs_keys_tests tests/emacs_keys_tests.cpp)
     target_include_directories(emacs_keys_tests PRIVATE include ${md4c_SOURCE_DIR}/src)

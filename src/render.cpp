@@ -190,6 +190,9 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     app.textRects.resize(s.textRects);
     app.lineBuckets.resize(s.lineBuckets);
     app.docText.resize(s.docTextLen);
+    while (!app.docSourceSpans.empty() && app.docSourceSpans.back().docStart >= s.docTextLen) {
+        app.docSourceSpans.pop_back();
+    }
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
 }
@@ -407,10 +410,64 @@ void analyzeBreakOpportunities(App& app, const std::wstring& text, std::vector<b
 
 } // namespace
 
+// The first source offset in a subtree (the parser marks each element's
+// first text)
+static size_t firstSourceOffsetIn(const Element* elem) {
+    if (!elem) return SIZE_MAX;
+    size_t best = elem->sourceOffset;
+    for (const auto& child : elem->children) best = std::min(best, firstSourceOffsetIn(child.get()));
+    return best;
+}
+
+// Records where docText[docStart, +length) came from (markdown_copy.cpp)
+static void noteDocSource(App& app, size_t docStart, size_t length, const Element* leaf, bool code,
+                          size_t sourceHint) {
+    if (length == 0) return;
+    App::DocSourceSpan span;
+    span.docStart = docStart;
+    span.docLength = length;
+    span.sourceHint = sourceHint;
+    span.block = app.layoutSourceBlock;
+    span.table = app.layoutSourceTable;
+    span.code = code;
+    // Inline spans with delimiters around this text, innermost first; a
+    // code span or inline math leaf carries its own
+    for (const Element* e = leaf; e; e = e->parent) {
+        bool delimited = false;
+        switch (e->type) {
+            case ElementType::Code: case ElementType::MathInline:
+            case ElementType::Emphasis: case ElementType::Strong: case ElementType::Link:
+            case ElementType::Strikethrough: case ElementType::Highlight:
+            case ElementType::Superscript: case ElementType::Subscript:
+                delimited = true;
+                break;
+            case ElementType::Text: case ElementType::Anchor: case ElementType::Image:
+            case ElementType::Ruby: case ElementType::RubyText:
+                break;
+            default:
+                e = nullptr;  // reached the block
+                break;
+        }
+        if (!e) break;
+        if (delimited) span.inlines.push_back({e->type, reinterpret_cast<uintptr_t>(e)});
+    }
+    app.docSourceSpans.push_back(std::move(span));
+}
+
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
                                 const std::string& baseLinkUrl = {}, float customLineHeight = 0.0f) {
+    // One block of text for docSourceSpans: where its source starts. The
+    // parser marks the block (its first text), not plain Text children
+    app.layoutSourceBlock++;
+    size_t blockSourceHint = SIZE_MAX;
+    if (!elements.empty() && elements.front()->parent) {
+        blockSourceHint = firstSourceOffsetIn(elements.front()->parent);
+    }
+    for (const auto& element : elements) {
+        blockSourceHint = std::min(blockSourceHint, firstSourceOffsetIn(element.get()));
+    }
     float x = startX;
     float lineHeight = customLineHeight > 0 ? customLineHeight : baseFormat->GetFontSize() * 1.7f;
     const float normalLineHeight = lineHeight;
@@ -577,6 +634,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 addTextRun(app, std::move(info), pos, bounds, color,
                            codeDocStart, text.length(), true);
 
+                noteDocSource(app, codeDocStart, text.length(), elem.get(), false, blockSourceHint);
                 app.docText += text;
                 if (isLink) addLinkSegment(x, x + textWidth, y, linkUrl, color);
                 // Advance by the pill's own padding only: the surrounding text
@@ -940,6 +998,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         flushSegment(lastWordEnd);
         if (measureInfo.layout) measureInfo.layout->Release();
 
+        noteDocSource(app, textDocStart, text.length(), elem.get(), false, blockSourceHint);
         app.docText += text;
 
         if (isLink && lastWordEndX > linkLineStartX) {
@@ -2344,6 +2403,8 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
         app.contentWidth = std::max(app.contentWidth, indent + widestExtent);
     }
 
+    app.layoutSourceBlock++;
+    noteDocSource(app, codeDocStart, wcode.size(), nullptr, true, elem->sourceOffset);
     app.docText += wcode;
     app.docText += L"\n\n";
     y += blockHeight + 14 * scale;
@@ -3300,6 +3361,12 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
 }
 
 static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    // Cells' docSourceSpans know their table, until it is done
+    struct SourceTable {
+        App& app;
+        explicit SourceTable(App& a) : app(a) { app.layoutSourceTable = ++app.layoutSourceBlock; }
+        ~SourceTable() { app.layoutSourceTable = 0; }
+    } sourceTable(app);
     float scale = app.contentScale * app.zoomFactor;
     float cellPadding = 8.0f * scale;
     float fontSize = app.textFormat->GetFontSize();
@@ -3897,6 +3964,8 @@ bool layoutBegin(App& app) {
     app.scrollAnchors.clear();
     app.layoutTableSeq = 0;
     app.layoutDiagramSeq = 0;
+    app.layoutSourceBlock = 0;
+    app.layoutSourceTable = 0;
     return true;
 }
 

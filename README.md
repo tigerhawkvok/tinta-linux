@@ -113,7 +113,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 | `ESC` | Close overlay / Quit |
 | `T` | Open theme chooser |
 | `S` | Toggle stats overlay |
-| `Ctrl+C` | Copy selected text (or all if none selected) |
+| `Ctrl+C` | Copy the selection as Markdown — its emphasis, code, links, list markers and table header come along (or the whole document as written, if nothing is selected) |
 | `Ctrl+A` | Select all text |
 | `Ctrl+Scroll` | Zoom in/out |
 | `Arrow keys` / `J/K` | Scroll |

@@ -972,6 +972,8 @@ struct App {
     std::vector<unsigned> fitBlocks;
     unsigned layoutTableSeq = 0;
     unsigned layoutDiagramSeq = 0;
+    unsigned layoutSourceBlock = 0;  // numbers docSourceSpans' blocks
+    unsigned layoutSourceTable = 0;  // the table being laid out (0: none)
 
     // Text bounds - tracked for cursor changes and selection (document coordinates)
     struct TextRect {
@@ -1068,6 +1070,20 @@ struct App {
 
     // Document text built during render (used for search/mapping)
     std::wstring docText;
+    // Where each stretch of docText came from, so a copy can return the
+    // Markdown behind a selection (markdown_copy.cpp). No element pointers:
+    // some blocks are laid out from temporaries.
+    struct DocSourceSpan {
+        size_t docStart = 0, docLength = 0;
+        size_t sourceHint = SIZE_MAX;  // where its block's text starts in the source
+        unsigned block = 0;            // which block, numbered per layout
+        unsigned table = 0;            // which table (0: none)
+        bool code = false;             // a code block's text
+        // Inline spans it sits in, innermost first (identity compared only
+        // within one block; never dereferenced)
+        std::vector<std::pair<ElementType, uintptr_t>> inlines;
+    };
+    std::vector<DocSourceSpan> docSourceSpans;
     std::wstring docTextLower;
 
     // Cached space widths for common formats
@@ -1447,6 +1463,7 @@ struct App {
         textRects.clear();
         lineBuckets.clear();
         docText.clear();
+        docSourceSpans.clear();
         docTextLower.clear();
         headings.clear();
         headingSlugCounts.clear();

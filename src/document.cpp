@@ -206,6 +206,11 @@ qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
     if (blankFrontmatter(content, cleaned)) {
         auto result = parser.parse(cleaned);
         insertProperties(result, content);
+        // Blanking keeps offsets; a copy of everything gets the frontmatter
+        if (result.root && result.root->source) {
+            result.root->source = std::make_shared<qmd::DocumentSource>(
+                qmd::DocumentSource{result.root->source->mapped, content});
+        }
         return result;
     }
     return parser.parse(content);
@@ -222,6 +227,11 @@ qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
     if (blankFrontmatter(content, cleaned)) {
         auto result = parser.parse(cleaned);
         insertProperties(result, content);
+        // Blanking keeps offsets; a copy of everything gets the frontmatter
+        if (result.root && result.root->source) {
+            result.root->source = std::make_shared<qmd::DocumentSource>(
+                qmd::DocumentSource{result.root->source->mapped, content});
+        }
         return result;
     }
     return parser.parse(content);
