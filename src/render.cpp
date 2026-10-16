@@ -35,6 +35,8 @@
 #include <cwctype>
 #include <unordered_set>
 #endif
+#include <mutex>
+#include <unordered_map>
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "shlwapi.lib")
 
@@ -2886,6 +2888,130 @@ std::string installedFamily(App& app, const wchar_t* name) {
     return toUtf8(family);
 }
 
+// ---- Label widths for merman (MM2) ---------------------------------------------
+// merman sizes shapes from label widths. Measured here, in the face a label
+// is drawn with, labels fit their shapes in any theme: the first installed
+// family of the CSS list, as librsvg (fontconfig) and resvg pick it.
+namespace {
+
+struct LabelWidths {
+    IDWriteFactory* factory = nullptr;  // its own reference: outlives windows
+    std::mutex mutex;
+    std::string themeFamily;  // for labels that name none
+    std::unordered_map<std::string, std::wstring> faces;  // CSS list -> face
+    std::unordered_map<std::string, double> widths;
+};
+
+bool familyInstalled(IDWriteFactory* factory, const std::wstring& family) {
+    if (fontCollectionFor(factory, family.c_str())) return true;  // bundled
+    IDWriteFontCollection* fonts = nullptr;
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    if (SUCCEEDED(factory->GetSystemFontCollection(&fonts, FALSE)) && fonts) {
+        fonts->FindFamilyName(family.c_str(), &index, &exists);
+        fonts->Release();
+    }
+    return exists != FALSE;
+}
+
+// The face a CSS family list resolves to. A generic name ends the search:
+// fontconfig resolves it on Linux; on Windows, as resvg's font database does
+std::wstring labelFace(LabelWidths& widths, std::string_view list) {
+    std::string key(list);
+    auto known = widths.faces.find(key);
+    if (known != widths.faces.end()) return known->second;
+    std::wstring face;
+    size_t start = 0;
+    while (face.empty() && start <= list.size()) {
+        size_t comma = list.find(',', start);
+        std::string_view name = list.substr(start, comma == std::string_view::npos ? std::string_view::npos
+                                                                                    : comma - start);
+        start = comma == std::string_view::npos ? list.size() + 1 : comma + 1;
+        while (!name.empty() && (name.front() == ' ' || name.front() == '"' || name.front() == '\''))
+            name.remove_prefix(1);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '"' || name.back() == '\''))
+            name.remove_suffix(1);
+        if (name.empty()) continue;
+        std::string lower(name);
+        for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+        static const std::pair<const char*, const wchar_t*> generics[] = {
+            {"sans-serif", L"Arial"}, {"serif", L"Times New Roman"}, {"monospace", L"Courier New"},
+            {"system-ui", L"Segoe UI"}, {"cursive", L"Comic Sans MS"}, {"fantasy", L"Impact"}};
+        bool generic = false;
+        for (const auto& g : generics) {
+            if (lower != g.first) continue;
+            generic = true;
+#ifdef _WIN32
+            face = g.second;
+#else
+            face = toWide(std::string(name));
+#endif
+        }
+        if (generic) break;
+        std::wstring candidate = toWide(std::string(name));
+        if (familyInstalled(widths.factory, candidate)) face = candidate;
+    }
+    if (face.empty()) face = L"sans-serif";
+    widths.faces.emplace(std::move(key), face);
+    return face;
+}
+
+double labelWidth(const merman_engine::TextWidthQuery& query, void* user) {
+    auto& widths = *static_cast<LabelWidths*>(user);
+    std::lock_guard<std::mutex> lock(widths.mutex);
+    std::string_view family = query.family.empty() ? std::string_view(widths.themeFamily) : query.family;
+    char style[48];
+    std::snprintf(style, sizeof style, "\x1f%.3f\x1f%d\x1f%d\x1f", query.size, query.weight, query.italic ? 1 : 0);
+    std::string key;
+    key.reserve(family.size() + query.text.size() + sizeof style);
+    key.append(family).append(style).append(query.text);
+    auto known = widths.widths.find(key);
+    if (known != widths.widths.end()) return known->second;
+
+    std::wstring face = labelFace(widths, family);
+    std::wstring text = toWide(std::string(query.text));
+    double width = -1.0;
+    IDWriteTextFormat* format = nullptr;
+    if (SUCCEEDED(widths.factory->CreateTextFormat(
+            face.c_str(), fontCollectionFor(widths.factory, face.c_str()),
+            (DWRITE_FONT_WEIGHT)std::clamp(query.weight, 1, 999),
+            query.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            (float)query.size, L"en-us", &format)) &&
+        format) {
+        IDWriteTextLayout* layout = nullptr;
+        if (SUCCEEDED(widths.factory->CreateTextLayout(text.c_str(), (UINT32)text.size(), format, 1.0e6f,
+                                                       1.0e6f, &layout)) &&
+            layout) {
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TEXT_METRICS metrics{};
+            if (SUCCEEDED(layout->GetMetrics(&metrics))) width = metrics.widthIncludingTrailingWhitespace;
+            layout->Release();
+        }
+        format->Release();
+    }
+    if (widths.widths.size() > 50000) widths.widths.clear();
+    widths.widths.emplace(std::move(key), width);
+    return width;
+}
+
+// Once a process: every render after it sizes labels with labelWidth
+void installLabelWidths(App& app, const std::string& themeFamily) {
+    static LabelWidths* widths = nullptr;
+    if (!widths) {
+        if (!app.dwriteFactory || std::getenv("TINTA_MERMAN_ESTIMATED_LABELS")) return;
+        widths = new LabelWidths;
+        widths->factory = app.dwriteFactory;
+        widths->factory->AddRef();
+        widths->themeFamily = themeFamily;
+        merman_engine::setTextWidth(labelWidth, widths);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(widths->mutex);
+    widths->themeFamily = themeFamily;
+}
+
+}  // namespace
+
 // The active theme in merman's roles, matching the native renderer: nodes
 // fill with the code background, outline in the accent, label in the text
 // colour; series (pie, charts) take the syntax palette
@@ -2930,6 +3056,7 @@ merman_engine::Theme mermanTheme(App& app) {
     theme.fontSize = app.textFormat && scale > 0.0f
                          ? app.textFormat->GetFontSize() / scale
                          : 16.0f;
+    installLabelWidths(app, theme.fontFamily);
     return theme;
 }
 

@@ -51,6 +51,25 @@ std::string renderPng(std::string_view source, const Theme& theme, float scale, 
 // drop shadows (100x faster through librsvg), the host theme
 std::string optionsJson(const Theme& theme);
 
+// Label measurement (MM2). merman sizes nodes, actors and boxes from their
+// labels' widths, which it otherwise estimates. A host that measures one
+// line in the face it draws with makes labels fit their shapes; merman
+// keeps its own wrapping and line heights.
+struct TextWidthQuery {
+    std::string_view text;    // one line, UTF-8
+    std::string_view family;  // the CSS font-family list; empty for the theme's
+    double size = 16.0;       // CSS px
+    int weight = 400;
+    bool italic = false;
+};
+// The line's advance width in CSS px, or a negative value to let merman
+// estimate it. Called on whichever thread runs a render.
+using TextWidthFn = double (*)(const TextWidthQuery& query, void* user);
+// For every later render (nullptr restores merman's estimates)
+void setTextWidth(TextWidthFn width, void* user);
+// A CSS font-weight ("bold", "600", ...) as a number; 400 when unknown
+int cssFontWeight(std::string_view weight);
+
 }  // namespace merman_engine
 
 #endif  // TINTA_MERMAN_ENGINE_H

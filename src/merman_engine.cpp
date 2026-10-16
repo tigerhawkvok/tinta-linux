@@ -166,6 +166,63 @@ private:
 
 }  // namespace
 
+// cmake/patches/merman-tinta-text-width.patch
+extern "C" void tinta_merman_set_text_width(double (*callback)(const uint8_t*, size_t, const uint8_t*, size_t,
+                                                               double, const uint8_t*, size_t, const uint8_t*,
+                                                               size_t, void*),
+                                            void* user_data);
+
+namespace {
+
+struct TextWidthHook {
+    TextWidthFn width = nullptr;
+    void* user = nullptr;
+} textWidthHook;
+
+std::string_view view(const uint8_t* data, size_t length) {
+    return length ? std::string_view(reinterpret_cast<const char*>(data), length) : std::string_view();
+}
+
+double textWidthTrampoline(const uint8_t* text, size_t textLength, const uint8_t* family, size_t familyLength,
+                           double size, const uint8_t* weight, size_t weightLength, const uint8_t* style,
+                           size_t styleLength, void* user) noexcept {
+    const auto* hook = static_cast<const TextWidthHook*>(user);
+    if (!hook || !hook->width) return -1.0;
+    TextWidthQuery query;
+    query.text = view(text, textLength);
+    query.family = view(family, familyLength);
+    query.size = size;
+    query.weight = cssFontWeight(view(weight, weightLength));
+    std::string_view fontStyle = view(style, styleLength);
+    query.italic = fontStyle.rfind("italic", 0) == 0 || fontStyle.rfind("oblique", 0) == 0;
+    try {
+        return hook->width(query, hook->user);
+    } catch (...) {
+        return -1.0;
+    }
+}
+
+}  // namespace
+
+int cssFontWeight(std::string_view weight) {
+    while (!weight.empty() && weight.front() == ' ') weight.remove_prefix(1);
+    while (!weight.empty() && weight.back() == ' ') weight.remove_suffix(1);
+    if (weight == "bold" || weight == "bolder") return 700;
+    if (weight == "lighter") return 300;
+    int value = 0;
+    for (char c : weight) {
+        if (c < '0' || c > '9' || value > 1000) return 400;
+        value = value * 10 + (c - '0');
+    }
+    return value >= 1 && value <= 1000 ? value : 400;
+}
+
+void setTextWidth(TextWidthFn width, void* user) {
+    textWidthHook.width = width;
+    textWidthHook.user = user;
+    tinta_merman_set_text_width(width ? textWidthTrampoline : nullptr, width ? &textWidthHook : nullptr);
+}
+
 namespace {
 
 std::string optionsJson(const Theme& theme, const char* pipeline) {

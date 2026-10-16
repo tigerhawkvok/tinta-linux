@@ -1565,6 +1565,7 @@ inline float dpi(const App& app, float value) {
 // bundled faces where the family is not installed (Windows), else nullptr,
 // the system collection (bundled_fonts.cpp)
 IDWriteFontCollection* fontCollectionFor(const App& app, const wchar_t* family);
+IDWriteFontCollection* fontCollectionFor(IDWriteFactory* factory, const wchar_t* family);
 
 // Height of the stats overlay box (0 when hidden): two lines, three once
 // diagrams have been drawn

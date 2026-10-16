@@ -107,21 +107,26 @@ bool installedInSystem(IDWriteFactory* factory, const std::wstring& family) {
 
 }  // namespace
 
-IDWriteFontCollection* fontCollectionFor(const App& app, const wchar_t* family) {
-    if (!family || !*family || !app.dwriteFactory) return nullptr;
-    Bundled& bundled = bundledFor(app.dwriteFactory);
+IDWriteFontCollection* fontCollectionFor(IDWriteFactory* factory, const wchar_t* family) {
+    if (!family || !*family || !factory) return nullptr;
+    Bundled& bundled = bundledFor(factory);
     if (!bundled.collection) return nullptr;
     std::wstring key = lower(family);
     if (!bundled.families.count(key)) return nullptr;
     auto known = bundled.installed.find(key);
     if (known == bundled.installed.end()) {
-        known = bundled.installed.emplace(key, installedInSystem(app.dwriteFactory, family)).first;
+        known = bundled.installed.emplace(key, installedInSystem(factory, family)).first;
     }
     return known->second ? nullptr : bundled.collection;
 }
 
+IDWriteFontCollection* fontCollectionFor(const App& app, const wchar_t* family) {
+    return fontCollectionFor(app.dwriteFactory, family);
+}
+
 #else
 
+IDWriteFontCollection* fontCollectionFor(IDWriteFactory*, const wchar_t*) { return nullptr; }
 IDWriteFontCollection* fontCollectionFor(const App&, const wchar_t*) { return nullptr; }
 
 #endif
