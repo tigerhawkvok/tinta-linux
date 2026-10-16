@@ -17,7 +17,18 @@ this list records what changed and why. It is not a diff budget.
 
 ## `#ifdef` islands
 
-None yet. Phase 2 adds the window entry point, title bar and IME.
+As of 2026-10-16 (`git grep -n "_WIN32" -- src`). The window entry point,
+title bar and IME needed none: the compat layer absorbed them.
+
+| Where | Island | Why |
+|---|---|---|
+| `bundled_fonts.cpp` | Windows loads Argon from resources as a private DirectWrite collection | On Linux, fontconfig already has the bundled fonts (`dwrite_pango.cpp`) |
+| `render.cpp` (includes; `localFontPath`, `prepareMermanRasterFonts`) | merman's raster fonts from DirectWrite's system font set | Windows only: Linux draws diagrams through librsvg |
+| `render.cpp` `labelFace` | Generic CSS families map to resvg's defaults (Arial, …) on Windows; on Linux fontconfig resolves them | MM2: measure in the face the raster draws |
+| `settings.cpp` `registerFileAssociation` | Linux writes a desktop entry, icons and MIME defaults (`tintaRegisterDesktopApp`) | No registry |
+| `settings.cpp` `openDefaultAppsSettings` | Windows opens `ms-settings:defaultapps`; Linux needs nothing | Registering already set the default |
+| `print.cpp` `printDocument` | Linux prints the exported PDF through GTK's print dialog (`tintaPrintPdf`) | No `PrintDlgW` or XPS print path |
+| `tabs.cpp` `tabDragMove`, `tabDragDone` | A tab pulled clear of the strip rides the desktop's drag and drop (`tintaBeginTabDrag`); the outcome moves, tears off or keeps the tab | Wayland gives no window positions for `WindowFromPoint` or a placed window (`dcdd21b`) |
 
 ## Absorbed by the compat layer instead of shared code
 

@@ -1,8 +1,20 @@
 # Tinta on Linux: port plan
 
-Status: decisions settled 2026-10-13 (§10); hard fork since 2026-10-14. Phases 0 and 1, the native Mermaid
-preamble fix and merman step MM1 are done. Basis: tinta `c58981a` (3.8.0; identical to upstream
-`oipoistar/tinta` master), md-viewer `45cb36a` (0.3.0 + edit toggle).
+Status (2026-10-16). Both platforms ship from this branch: the latest release is **v4.0.5**
+(`eab2aef`) on `tigerhawkvok/tinta-linux`, an AppImage plus a cross-built portable `tinta.exe`.
+
+| Area | State |
+|---|---|
+| Phases 0–2 | done |
+| Phase 3 | done except a recorded IME session |
+| Phase 4 | done |
+| Phase 5 | done: printing goes through GTK's print dialog |
+| Phase 6 | AppImage, plus a locally built Flatpak |
+| merman | MM1, MM2, MM3 and MM5 done; MM4 became search over diagram source |
+
+Decisions: §10 (2026-10-13/14) and §10.12 (2026-10-15); hard fork since 2026-10-14. Basis: tinta
+`c58981a` (3.8.0; identical to upstream `oipoistar/tinta` master), md-viewer `45cb36a` (0.3.0 +
+edit toggle).
 
 Goal: Tinta's UX (tabs, unified editor, annotations, native Mermaid and math,
 exports, themes) running natively on Linux (Wayland and X11). From md-viewer we
@@ -116,19 +128,24 @@ numbers: §6.
 
 ## 3. Architecture
 
+As built (2026-10-16; about 8k lines in `platform/linux/src/`):
+
 ```
-shared Tinta code (upstream-identical): App, render, overlays, editor, input, tabs, exports...
-        |  D2D / DWrite / WIC / Win32 subset (as upstream calls it)
-platform/linux/include/   compat headers: types, COM-ish refcounting, D2D1:: helpers
+shared Tinta code: App, render, overlays, editor, input, tabs, exports, merman_engine...
+        |  D2D / DWrite / WIC / Win32 subset (as the shared code calls it)
+platform/linux/include/   compat headers: types, COM-ish refcounting, D2D1:: helpers,
+                          tinta_prelude.h + msvc_crt.h (MSVC CRT spellings, force-included)
 platform/linux/src/
-  gfx_cairo.cpp      ID2D1RenderTarget/DeviceContext, brushes, strokes, paths, bitmaps
-  text_pango.cpp     IDWriteFactory/TextFormat/TextLayout/Typography/FontFallback, UAX#14
-  imaging.cpp        IWIC decode (gdk-pixbuf), scale, PNG encode; SVG via librsvg
-  win32_shim.cpp     timers, invalidation, cursors, capture, key state, PostMessage,
-                     MultiByteToWideChar (CP_UTF8), file APIs over POSIX, ShellExecute
-  main_gtk.cpp       GtkApplication, window, event to WM_* synthesis into the existing WndProc
-  peers_dbus.cpp     window registry replacing FindWindowExW/WM_COPYDATA
-  clipboard, dialogs, print_gtk, im_gtk, portal settings (dark mode), file monitor
+  d2d_cairo.cpp           ID2D1RenderTarget/DeviceContext, brushes, strokes, paths, bitmaps
+  dwrite_pango.cpp        IDWriteFactory/TextFormat/TextLayout/FontFallback on Pango, UAX#14
+  wic_imaging.cpp         IWIC decode and encode (gdk-pixbuf), scaling; SVG through librsvg
+  win32_window.cpp        HWNDs, messages, timers, capture, clipboard (local + desktop)
+  win32_system.cpp        files, registry-free settings, ShellExecute, WinHTTP over libcurl,
+                          locale, known folders (XDG)
+  gtk_window.cpp          GTK4 windows: events to WM_*, IME, file and tab drops, tab drags,
+                          clipboard reads, dialogs, single instance and colour scheme on D-Bus
+  desktop_integration.cpp --register: .desktop file, icons, .mmd MIME type, defaults
+  main_linux.cpp, win32_base.cpp, win32_input.cpp, com_streams.cpp
 ```
 
 **Events.** The existing `WndProc` and the `handleMouse*`/`handleKey*`
@@ -162,12 +179,18 @@ table, so themes and `themes.ini` stay unchanged:
 | Yu Gothic UI, Microsoft YaHei UI, Malgun Gothic, JhengHei | Noto Sans CJK JP / SC / KR / TC |
 | Segoe UI Emoji, Segoe UI Symbol | Noto Color Emoji, then fontconfig fallback |
 
-**Process model.** Keep one window per process, mirroring Windows, so `g_app`
-stays valid. Each process registers `cc.tinta.Window.<pid>` on the session bus
-with `OpenFiles`, `AcceptTab` and `LastActive`. That replaces `FindWindowExW`
-and `WM_COPYDATA` in `main_d2d.cpp` and `tabs.cpp`. To let a window raise
-itself on Wayland, the launching process forwards its `XDG_ACTIVATION_TOKEN`
-over D-Bus.
+**Process model.** One window per process, as on Windows, so `g_app` stays
+valid.
+
+- **Single instance** (`a86d94b`): the first interactive Tinta owns
+  `org.tinta.Instance` on the session bus. `FindWindowW(L"Tinta")` in a later
+  process returns a stand-in whose `WM_COPYDATA` travels there, so a plain
+  `tinta file.md` joins the running window as a tab. `--cascade` and `--new`
+  windows stay separate processes.
+- **Raising on Wayland:** the launching process forwards its
+  `XDG_ACTIVATION_TOKEN`.
+- **Tabs between windows** go through the desktop's drag and drop, not
+  D-Bus (§4).
 
 ## 4. Where emulation isn't enough
 
@@ -176,11 +199,11 @@ over D-Bus.
 | `WM_NCHITTEST` custom title bar with tabs | undecorated window; the same hit-test feeds `gdk_toplevel_begin_move`/`begin_resize`; Tinta draws its own window buttons (GNOME requires client-side decorations anyway) | island in `main_d2d.cpp` |
 | IMM32 composition (`WM_IME_*`, `ImmSetCompositionWindow`) | `GtkIMContext` preedit, commit and `set_cursor_location` (IBus and Fcitx5) | island in `editor.cpp` |
 | Synchronous clipboard reads, `MessageBoxW`, `GetOpenFileNameW`/`GetSaveFileNameW` | GTK4 equivalents are async. The shim spins a nested main loop until the result arrives, like GTK3's `gtk_clipboard_wait_for_text`. Re-entrancy is the risk | shim |
-| Tab tear-off ghost (`UpdateLayeredWindow`, `GetCursorPos`) and cross-window drop | GTK DnD with an `application/x-tinta-tab` payload; the drag icon is the rendered card; a `NO_TARGET` drop spawns a new window | island in `tabs.cpp` |
-| Pin on top (`HWND_TOPMOST`) | X11: `_NET_WM_STATE_ABOVE`. Wayland has no protocol for it, so the pin is hidden there | island |
+| Tab tear-off ghost (`UpdateLayeredWindow`, `GetCursorPos`) and cross-window drop | **done** (`dcdd21b`): GTK DnD with an `application/x-tinta-tab` payload; the drag icon is the tab card (Cairo/Pango); a `NO_TARGET` drop tears off a `--cascade` window; the source's own strip takes the tab back | island in `tabs.cpp` + `gtk_window.cpp` |
+| Pin on top (`HWND_TOPMOST`) | **removed** on both platforms (`566b287`, Philip's call) | n/a |
 | `--pos`, `--cascade`, `SetWindowPlacement`, opening a new window at the drop point | works on X11; on Wayland the compositor places windows and only size is kept | degrade, documented |
-| `ID2D1PrintControl` + XPS print package | `GtkPrintOperation` driving Tinta's own pagination; PDF export goes straight to `cairo_pdf_surface` | island in `print.cpp` |
-| WinHttp update check | off in distro and Flatpak builds; AppImage only, via libsoup3 or a `curl` subprocess | island |
+| `ID2D1PrintControl` + XPS print package | **done**: Print exports the same pages to a temporary PDF (`cairo_pdf_surface`) and GTK's print dialog prints it (`gtk_print_dialog_print_file`; the print portal in a sandbox). One drawing path serves PDF and print | island in `print.cpp` |
+| WinHttp update check | **done**: the compat WinHTTP runs over libcurl, so the check and Check now work in every build | shim |
 | Registry: `/register`, light/dark mode | `xdg-mime default` on a shipped `.desktop` file; portal `org.freedesktop.appearance color-scheme` | island |
 | `%APPDATA%\Tinta`, portable `settings.ini` next to the exe | `$XDG_CONFIG_HOME/tinta`; portable mode when `settings.ini` sits next to the binary or `$APPIMAGE` | `config_dir.cpp` |
 | `ShellExecute` (URLs, reveal in Explorer) | `gtk_uri_launcher`; `org.freedesktop.FileManager1.ShowItems` | shim |
@@ -230,7 +253,7 @@ statically: FetchContent currently builds it as `libmd4c.so` on Linux.
   machine (or on a Windows CI runner, if D2D renders correctly there; that is
   untested).
 
-**Phase 2: interactive viewer.** `main_gtk.cpp`, event synthesis, timers,
+**Phase 2: interactive viewer. Done.** `main_gtk.cpp`, event synthesis, timers,
 cursors, custom title bar, HiDPI/fractional scale, dark-mode follow, XDG
 config, drag-and-drop in, clipboard writes (text, HTML, PNG, TSV), open
 dialog, URL launch, reveal-in-folder, file monitor. Measure time to first
@@ -246,14 +269,20 @@ and X11, and the results are recorded.
 - text clipboard, GtkFileDialog and GtkAlertDialog
 
 `tests/linux_render/gui_check.py` checks it on Xvfb (ctest `linux_gtk_window`);
-see `tests/linux-gtk-window-validation.md`. Not yet done:
-- drag-and-drop in
-- rich clipboard formats
-- dark-mode follow
-- URL launch and reveal checks
-- the hand-checked GNOME/Wayland pass
+see `tests/linux-gtk-window-validation.md`.
 
-**Phase 3: editor and IME.** `GtkIMContext`, paste (text and screenshot
+*Status (2026-10-16):*
+- **Done since then:**
+  - drag-and-drop in (`0d1574c`) and dark-mode follow through the portal;
+  - a live-session pass on KDE Plasma Wayland: `desktop_check.py`, 14/14;
+  - fractional scales checked pixel-exact in a nested KWin.
+- **Rich clipboard formats were dropped** (§10.12): copying from the reader
+  returns the Markdown behind the selection (`93ffb00`).
+
+**Phase 3: editor and IME. Done, except the recorded IME session.**
+`GtkIMContext` landed in `c506242` (dead keys checked on Xvfb). Screenshot
+paste is in `c70a4ef`: assets folder, inline or Save as, with a remembered
+choice. The original plan follows. `GtkIMContext`, paste (text and screenshot
 bitmaps), save and save-as dialogs, drafts, multi-caret. Alt+click and
 Alt-drag collide with window-manager move bindings on some desktops (KDE,
 Xfce); document this and keep it rebindable through the existing keymap.
@@ -261,13 +290,22 @@ Xfce); document this and keep it rebindable through the existing keymap.
 `wrapped_cursor`, `table_input`) pass; a manual IME session with Fcitx5 or
 IBus (Japanese, Chinese) is recorded.
 
-**Phase 4: tabs, multiple windows, single instance.** The D-Bus peer
+**Phase 4: tabs, multiple windows, single instance. Done** (single instance
+`a86d94b`; tab tear-off and drags between windows `dcdd21b`, ctest
+`linux_tab_drag`). Not yet tried: a two-window drag on Philip's KDE Wayland
+session. The original plan follows. The D-Bus peer
 registry, "open in tabs" from the file manager, tear-off and cross-process
 tab moves through DnD, and activation tokens.
 *Exit:* `tab_drop`, `tab_hover_card` and `window_drag` suites pass; a manual
 two-window drag is recorded on GNOME/Wayland and KDE/X11.
 
-**Phase 5: print, export, pandoc.** GTK print, Cairo PDF with links (rerun
+**Phase 5: print, export, pandoc.** *Status:*
+- PDF, HTML and DOCX export work.
+- Pandoc export's temp path is fixed (`9e19259`).
+- Printing is done (`tests/linux-print-validation.md`): the system print
+  dialog prints the PDF Tinta exports.
+
+The original plan follows. GTK print, Cairo PDF with links (rerun
 `tests/validate_pdf_links.py` on Linux output), DOCX image encoding through
 Cairo PNG, pandoc launched with `g_spawn`.
 *Exit:* `print_and_word_export` passes; the PDF link validator passes.
@@ -288,9 +326,19 @@ because:
 
 `platform/linux/appimage/build-appimage.sh BUILD OUT` builds
 `Tinta-x86_64.AppImage` from a system-library tree with pinned linuxdeploy
-and its GTK plugin. The `.desktop` file and hicolor icons are in. Still to
-do: AppStream metainfo, the `.mmd` MIME entry, and the Flatpak, AUR and
-`.deb` packages.
+and its GTK plugin. The `.desktop` file and hicolor icons are in, and
+`--register` adds the `.mmd` MIME type.
+
+*Status (2026-10-16):*
+- **Releases:** v4.0.1–v4.0.5 are GitHub releases with the AppImage, the
+  exe, `SHA256SUMS` and, from 4.0.5, the third-party notices.
+- **Flatpak** (Philip: "Flatpak for sure, others optional"):
+  `packaging/flatpak/` has the manifest
+  (`io.github.tigerhawkvok.Tinta`, GNOME 50 runtime, Rust from the SDK
+  extension), AppStream metainfo, and `build-flatpak.sh`. It is a local
+  build: md4c, Corrosion and merman's crates download during the build, so
+  Flathub would need them vendored.
+- **AUR and `.deb`:** optional.
 
 **Windows from Linux (2026-10-14).** `platform/windows/build-windows.sh`
 cross-compiles the portable `tinta.exe` with clang-cl and lld-link against
@@ -303,9 +351,7 @@ Rendering fidelity, print and PDF still need a real Windows machine. Record:
 Linux, MM5's merman build could also be cross-compiled
 (`x86_64-pc-windows-msvc`), but its DirectWrite checks still need Windows.
 
-**Mermaid track (§6), alongside the phases.** MM1 and MM2 need nothing
-beyond phase 0. MM3 (the viewer hookup) waits for phase 1, and MM5 for a
-Windows machine.
+**Mermaid track (§6), alongside the phases.** Done (§6.3).
 
 **Later: macOS.** GTK4 runs there, so the same backend would work, with a
 non-native feel. A CoreText/CoreGraphics backend behind the same compat
@@ -383,9 +429,18 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
     the active Tinta theme. `themes.cpp` already resolves diagram roles.
   - A diagram's own frontmatter or `%%{init}%%` still overrides these, as in
     Mermaid.
-- **Text measurement.** A host callback: Pango on Linux, DirectWrite on
-  Windows. merman's default metrics are font-agnostic, and labels visibly
-  touch their box edges with them. merman's docs give the same advice.
+- **Text measurement** (MM2, `66684c7`). merman's default metrics are
+  font-agnostic, and labels overflowed their shapes with them, even in the
+  default theme.
+  - The third Tinta patch on merman (`merman-tinta-text-width.patch`) adds
+    a process-wide *line-width* hook. Requests then use
+    `DeterministicTextMeasurer::with_width_callback`: merman keeps its own
+    wrapping and line heights and takes Tinta's widths.
+  - `render.cpp` measures with DirectWrite, which is Pango on Linux, in the
+    first installed family of the label's CSS list.
+  - The 22-operation host ABI was set aside, because using it would mean
+    copying merman's wrapping into C++.
+  - Record: `tests/merman-label-width-validation.md`.
 - **Display, Linux.** librsvg onto Cairo.
   - Rasterize once per diagram per zoom × scale, then blit on each paint.
   - Print and PDF draw the SVG as vectors.
@@ -396,10 +451,10 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
     like the async image path.
   - The size comes from the SVG first, so layout doesn't jump when the bitmap
     lands.
-- **Search and selection.** Native flowchart labels are in `docText` today
-  (`render.cpp:1595`), so Ctrl+F finds them. Each `<text>` box in the SVG
-  becomes a text rect with a `docStart`, so search and selection keep
-  working over the image.
+- **Search** (`85690a4`, in place of MM4's label rects). Philip asked why
+  search couldn't read the Mermaid code behind a diagram, and now it does:
+  matches in a diagram's source outline the diagram, and the results list
+  quotes the source line.
 - **Exports.**
   - HTML: inline SVG with the `parity` pipeline, which browsers render
     natively.
@@ -415,18 +470,22 @@ Rendering costs for one large diagram (2,091 × 1,947 px):
   - Labels mixing text and math keep only their text.
   - Details: `tests/mermaid-merman-validation.md`.
 - **Licences.** merman's `rust-render-base` scope is MIT, ISC, BSD-3,
-  Apache-2.0 and DOMPurify's Apache-2.0-or-MPL-2.0. Ship a
-  `THIRD_PARTY_NOTICES` file.
+  Apache-2.0 and DOMPurify's Apache-2.0-or-MPL-2.0.
+  - **Shipped** (`d48c8ce`): `packaging/THIRD-PARTY-NOTICES.md`, generated
+    by `packaging/notices/generate_notices.py`.
+  - It is embedded in both binaries and opened from Settings → Updates →
+    Licenses.
+  - ctest `notices_current` keeps it in step with the pinned merman.
 
 ### 6.3 Steps
 
 | Step | What | Needs |
 |---|---|---|
 | MM1 | CMake + merman build + `merman_engine` wrapper + tests; corpus harness gains a merman mode as the regression gate | **done** (`2a8ad90`, `tests/mermaid-merman-validation.md`) |
-| MM2 | Pango text-measurement callback | nothing; Pango works headless |
+| MM2 | Label widths from the face that draws them | **done** (`66684c7`): a line-width hook patched into merman, measured through DirectWrite/Pango |
 | MM3 | Hook into `layoutCodeBlock`, HTML and DOCX export behind `TINTA_MERMAN`, with merman → native → code fallback | **done** (2026-10-14): viewer, print, PDF, HTML (parity SVG) and DOCX (PNG) |
-| MM4 | Search and selection rects from the SVG labels | MM3 |
-| MM5 | Windows: MSVC build of merman, DirectWrite measurement, async PNG | **cross-built and drawing (PNG path) under Wine** (2026-10-15); measurement, async rendering and a real Windows check remain |
+| MM4 | Search and selection rects from the SVG labels | **replaced** by search over the diagram's source (`85690a4`) |
+| MM5 | Windows: MSVC build of merman, DirectWrite measurement, async PNG | **done**: drawing on Philip's Windows laptop since 4.0.1. Font-scan fix (`8f644d9`, first raster 3,054 → 166 ms); math labels through a lifted SVG raster (`1bf6b50`); measurement shared with MM2. Async rendering is not done (renders are synchronous) |
 
 What this supersedes:
 
@@ -447,18 +506,28 @@ What this supersedes:
   compositor.
 - Mermaid parser changes run `tests/mermaid_corpus/` before and after;
   `compare_runs.py` must report no regressions.
-- Interactive checks happen on this desktop: Ubuntu 25.10, GNOME Wayland
-  (`wayland-0`) and an X11 session. Each phase's exit records what was checked
-  and what is still limited, in a `tests/*-validation.md` record.
+- Interactive checks:
+  - **This desktop** runs **KDE Plasma 6.4.5 on Wayland** (not GNOME), one
+    3440×1440 monitor at scale 1. `desktop_check.py` drives it through
+    uinput, only into an active Tinta window, and never while the session is
+    locked.
+  - **Repeatable checks** run on Xvfb with a private D-Bus session
+    (`gui_check.py`, `instance_check.py`, `tab_drag_check.py`).
+  - **Windows checks** run under Wine on Xvfb, with Philip's laptop for the
+    real thing.
+  - Each feature records what was checked and what is still limited, in a
+    `tests/*-validation.md` record.
 
 ## 8. Upstream relationship
 
 - **Hard fork (2026-10-14).** This is never submitted upstream. Breaking
   changes to shared code are fine when they serve the fork. Upstream commits
   are optional cherry-picks, not something to merge on a schedule.
-- All work stays local: commits on local branches, no pushes, no PRs. The
-  branch `linux-port-plan` went to `origin` once, before that was decided,
-  and was deleted there on 2026-10-13.
+- No PRs. Work is committed locally.
+- Pushes and releases happen when Philip asks. On 2026-10-15 he asked for
+  GitHub releases on `origin` (`tigerhawkvok/tinta-linux`), to get builds
+  onto his Windows laptop, and gave push permission for that loop.
+  v4.0.1–v4.0.5 went out that way.
 - Shared-code fixes such as the Mermaid work also fix Windows, for this
   fork's own Windows build.
 
@@ -480,14 +549,16 @@ What this supersedes:
 4. **Upstream churn into Win32-heavy code** (`tabs.cpp`, `main_d2d.cpp`,
    `input.cpp`), where the islands live. Mitigation: keep islands small and
    merge often.
-5. **Wide `printf` semantics.** MSVC reads `%s` in a wide format as a wide
-   string; glibc reads it as a narrow one. One site does this
-   (`src/pandoc.cpp:189`), inside the pandoc island. Compiling with
-   `-Wformat` on Linux catches new ones.
+5. ~~**Wide `printf` semantics.**~~ Resolved (`9e19259`). MSVC reads `%s` in a
+   wide format as a wide string and glibc as a narrow one. The compat
+   `swprintf_s` now rewrites formats to MSVC's meaning, so shared code and
+   `languages.ini` strings format alike. It had cut the word count to its
+   first digit and sent Pandoc's temp file to `/`.
 6. **Startup**: 112–130 ms to first frame measured headless, against
    Windows Tinta's advertised <100 ms. GTK init alone is 42 ms. Measure on
    real hardware in phase 2 before optimizing.
-7. **merman in the build.** Rust 1.95 via rustup on every build machine;
+7. **merman in the build.** Rust 1.95 via rustup on every build machine (the
+   Flatpak uses the SDK's Rust extension instead, `TINTA_MERMAN_RUSTUP=OFF`);
    ~70 s cold build; ~22 MB in the binary against Tinta's ~2.5 MB (size
    ruled not a concern). Pinned
    by commit. `TINTA_MERMAN=OFF` builds without it.
@@ -505,7 +576,8 @@ What this supersedes:
    no upstream PRs, ever.
 3. **macOS later.** GTK4 or a CoreText backend behind the same headers; not
    scheduled.
-4. **Local only.** No pushes, no PRs.
+4. **Local only.** No PRs. Pushes and releases only at Philip's request
+   (§8).
 5. **merman replaces the native Mermaid parsers.** Native stays linked as
    the fallback for the corpus diagrams merman rejects (6 once math is on);
    `TINTA_MERMAN=OFF` keeps an upstream-identical build.
@@ -526,6 +598,22 @@ What this supersedes:
     `third_party/fonts/monaspace-argon` (Regular, Italic, Bold, BoldItalic of
     v1.400). It replaces Consolas in seven built-in themes, the editor
     gutter and the edit rail; Arctic, Midnight and Abyss keep their Cascadia
-    faces, which reach Argon on Linux through the stand-in stack. Windows has
-    no bundled-font loader yet, so there the default resolves to Consolas
-    unless Argon is installed.
+    faces, which reach Argon on Linux through the stand-in stack. Since
+    `ffdf099` the Windows exe carries Argon too: four faces as resources,
+    loaded as a private DirectWrite collection.
+12. **Philip's answers on the outstanding list (2026-10-15).**
+
+    | Item | His answer | Outcome |
+    |---|---|---|
+    | Printing | "Lowest priority" | done, last: GTK's print dialog prints the exported PDF |
+    | Tab tear-off | "Approved" | done (`dcdd21b`) |
+    | Screenshot paste | option D, "a multi option on each paste (with a rememberable default and corresponding setting)" | done (`c70a4ef`) |
+    | Rich copy formats | "Let's actively kill this. Copying formatted content should return its corresponding rendering code." | done: copy returns Markdown (`93ffb00`); the diagram Image and table TSV buttons stay |
+    | Pin on top | "Let's remove this" | removed (`566b287`) |
+    | Diagram search | "Why can't this search the mermaid code backing it?" | done (`85690a4`) |
+    | MM2; Windows math labels; Windows bundled fonts | "Approved" | all done |
+    | License notices | "it should be added" | done (`d48c8ce`) |
+    | This plan | refresh "Approved" | this revision |
+    | Packaging | "Flatpak for sure, others optional" | §5, phase 6 |
+    | CI | "We can defer for the moment" | deferred |
+    | macOS | "nice to have … after Win/Nix feature parity" | after parity |
