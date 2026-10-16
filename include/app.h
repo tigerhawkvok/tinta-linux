@@ -543,9 +543,6 @@ struct App {
         D2D1_RECT_F labelRect{};  // room the title had (zero: none drawn)
     };
     std::vector<TabHit> tabHits;       // refreshed by renderTabStrip
-    // Pin button in the title bar: keeps this window above every other
-    // (per-window, not persisted)
-    bool alwaysOnTop = false;
 
     // Update-available chip (bottom right): non-blocking, once per
     // session, absent entirely for Store installs
