@@ -1190,16 +1190,96 @@ HRESULT D3D11CreateDevice(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D
     return E_NOTIMPL;
 }
 
-// The update check asks upstream's Windows releases; a Linux build has its
-// own channel (PLAN.md section 7), so the check always comes back empty
-HINTERNET WinHttpOpen(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD) { return nullptr; }
-HINTERNET WinHttpConnect(HINTERNET, LPCWSTR, INTERNET_PORT, DWORD) { return nullptr; }
-HINTERNET WinHttpOpenRequest(HINTERNET, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR*, DWORD) { return nullptr; }
-BOOL WinHttpSendRequest(HINTERNET, LPCWSTR, DWORD, void*, DWORD, DWORD, DWORD_PTR) { return FALSE; }
-BOOL WinHttpReceiveResponse(HINTERNET, void*) { return FALSE; }
-BOOL WinHttpQueryDataAvailable(HINTERNET, DWORD*) { return FALSE; }
-BOOL WinHttpReadData(HINTERNET, void*, DWORD, DWORD*) { return FALSE; }
-BOOL WinHttpCloseHandle(HINTERNET) { return TRUE; }
+// The update check (main_d2d.cpp) asks this fork's GitHub releases, which
+// carry the AppImage too. WinHTTP over libcurl: the request is one HTTPS GET
+// at WinHttpSendRequest, read back from memory. Without libcurl every check
+// fails, and fails quietly unless the reader asked for it.
+namespace {
+struct WinHttpHandle {
+    std::string agent;
+    std::string host;
+    std::string path;
+    std::string body;
+    size_t readAt = 0;
+    bool received = false;
+};
+WinHttpHandle* httpHandle(HINTERNET h) { return static_cast<WinHttpHandle*>(h); }
+#ifdef TINTA_HAVE_CURL
+size_t appendBody(char* data, size_t size, size_t count, void* user) {
+    static_cast<std::string*>(user)->append(data, size * count);
+    return size * count;
+}
+#endif
+}  // namespace
+
+HINTERNET WinHttpOpen(LPCWSTR agent, DWORD, LPCWSTR, LPCWSTR, DWORD) {
+    auto* session = new WinHttpHandle;
+    if (agent) session->agent = tinta::toUtf8(agent, wcslen(agent));
+    return session;
+}
+HINTERNET WinHttpConnect(HINTERNET session, LPCWSTR server, INTERNET_PORT, DWORD) {
+    if (!session || !server) return nullptr;
+    auto* connect = new WinHttpHandle;
+    connect->agent = httpHandle(session)->agent;
+    connect->host = tinta::toUtf8(server, wcslen(server));
+    return connect;
+}
+// HTTPS GET only: the one request Tinta makes
+HINTERNET WinHttpOpenRequest(HINTERNET connect, LPCWSTR verb, LPCWSTR object, LPCWSTR, LPCWSTR, LPCWSTR*, DWORD) {
+    if (!connect || !object || (verb && wcscmp(verb, L"GET") != 0)) return nullptr;
+    auto* request = new WinHttpHandle;
+    request->agent = httpHandle(connect)->agent;
+    request->host = httpHandle(connect)->host;
+    request->path = tinta::toUtf8(object, wcslen(object));
+    return request;
+}
+BOOL WinHttpSendRequest(HINTERNET request, LPCWSTR, DWORD, void*, DWORD, DWORD, DWORD_PTR) {
+    if (!request) return FALSE;
+#ifdef TINTA_HAVE_CURL
+    WinHttpHandle* r = httpHandle(request);
+    CURL* curl = curl_easy_init();
+    if (!curl) return FALSE;
+    std::string url = "https://" + r->host + r->path;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendBody);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &r->body);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, r->agent.empty() ? "Tinta" : r->agent.c_str());
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+    CURLcode code = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    r->received = code == CURLE_OK;
+    if (!r->received) r->body.clear();
+    return r->received ? TRUE : FALSE;
+#else
+    return FALSE;
+#endif
+}
+BOOL WinHttpReceiveResponse(HINTERNET request, void*) {
+    return request && httpHandle(request)->received ? TRUE : FALSE;
+}
+BOOL WinHttpQueryDataAvailable(HINTERNET request, DWORD* available) {
+    if (!request || !available) return FALSE;
+    WinHttpHandle* r = httpHandle(request);
+    *available = static_cast<DWORD>(r->body.size() - r->readAt);
+    return TRUE;
+}
+BOOL WinHttpReadData(HINTERNET request, void* buffer, DWORD size, DWORD* read) {
+    if (!request || !buffer || !read) return FALSE;
+    WinHttpHandle* r = httpHandle(request);
+    size_t n = std::min<size_t>(size, r->body.size() - r->readAt);
+    std::memcpy(buffer, r->body.data() + r->readAt, n);
+    r->readAt += n;
+    *read = static_cast<DWORD>(n);
+    return TRUE;
+}
+BOOL WinHttpCloseHandle(HINTERNET handle) {
+    delete httpHandle(handle);
+    return TRUE;
+}
 
 // Crash reports on Linux come from the system's handler (core dumps)
 LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER) { return nullptr; }

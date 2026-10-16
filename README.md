@@ -177,7 +177,7 @@ from the command line. The print preview offers 12.7, 19.05 and 25.4 mm page
 margins; `printMarginMm=` takes any value from 5 to 50 for printing and PDF.
 
 The interface language is available in Settings → General. It follows the
-Windows display language by default, or can be changed explicitly. Transient
+system display language by default, or can be changed explicitly. Transient
 notifications and native error dialogs use the same language. Additional
 translations can be added through `languages.ini`; the app remains a native,
 single-file Windows viewer with no web runtime.
@@ -218,7 +218,7 @@ Or simply drag and drop a `.md` or `.mmd` file onto the window.
 
 To copy a document's full path, right-click the document or its tab (the filename
 in the title bar when only one file is open) and choose
-**Copy file path**, beside **Reveal in Explorer**. The tab menu copies the clicked
+**Copy file path**, beside **Show in folder**. The tab menu copies the clicked
 tab's path, even if another tab is active. Untitled notes have no path until saved.
 
 ## File Association

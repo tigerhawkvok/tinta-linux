@@ -1527,7 +1527,7 @@ void renderThemeChooser(App& app) {
                                    app.brush, dpi(app, 1.2f));
         app.themeChooserHits.push_back({cb, -2});
     }
-    // "Follow Windows theme" label + toggle, right of center
+    // "Follow system theme" label + toggle, right of center
     if (app.folderBrowserFormat) {
         float togW = dpi(app, 38.0f);
         float togH = dpi(app, 19.0f);
@@ -2559,7 +2559,7 @@ void settingsChip(App& app, float& x, float y, const wchar_t* label, bool active
 
 D2D1_RECT_F settingsPanelRect(const App& app) {
     float w = std::min(dpi(app, app.settingsSection == 3 ? 980.0f : 760.0f), app.width - dpi(app, app.settingsSection == 3 ? 32.0f : 80.0f));
-    float h = std::min(dpi(app, app.settingsSection == 3 ? 650.0f : 540.0f), app.height - dpi(app, 64.0f));
+    float h = std::min(dpi(app, app.settingsSection == 3 ? 650.0f : 590.0f), app.height - dpi(app, 64.0f));
     float x = (app.width - w) / 2;
     float y = (app.height - h) / 2 + (1 - app.settingsAnimation) * dpi(app, 30.0f);
     return D2D1::RectF(x, y, x + w, y + h);
@@ -2888,6 +2888,26 @@ void renderSettingsOverlay(App& app) {
             settingsChip(app, bx, chipY, L"settings.ini", false, SET_OPEN_INI, anim, fmt);
             settingsChip(app, bx, chipY, L"themes.ini", false, SET_OPEN_THEMES_INI, anim, fmt);
             settingsChip(app, bx, chipY, L"languages.ini", false, SET_OPEN_LANGS_INI, anim, fmt);
+        }
+        cy += rowCardH + cardGap;
+        // Updates: the daily check, and one on demand
+        card(rowCardH);
+        {
+            wchar_t version[32];
+            swprintf_s(version, _countof(version), L"%d.%d.%d", TINTA_VERSION_MAJOR,
+                       TINTA_VERSION_MINOR, TINTA_VERSION_PATCH);
+            wchar_t hint[160];
+            swprintf_s(hint, _countof(hint), tr(app, "settings.updates.hint"), version);
+            const wchar_t* check = tr(app, "settings.updates.check");
+            float chipW = chipsWidth({check});
+            float toggleW = dpi(app, 40.0f);
+            cardLabel(tr(app, "settings.updates"), hint, chipW + toggleW + dpi(app, 22.0f));
+            float toggleX = cx + cw - cardPad - toggleW;
+            settingsToggle(app, toggleX, cy + (rowCardH - dpi(app, 20.0f)) * 0.5f,
+                           app.updateCheckEnabled, SET_TOGGLE_UPDATES, anim);
+            float bx = toggleX - dpi(app, 12.0f) - chipW;
+            float chipY = cy + (rowCardH - dpi(app, 24.0f)) * 0.5f;
+            settingsChip(app, bx, chipY, check, app.updateCheckRunning, SET_CHECK_UPDATES, anim, fmt);
         }
     } else if (app.settingsSection == 1) {  // Appearance
         card(sliderCardH);

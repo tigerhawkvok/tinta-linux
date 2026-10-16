@@ -719,6 +719,13 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             app.closeKeepsDrafts = !app.closeKeepsDrafts;
             persistCloseKeepsDrafts(app);
             break;
+        case SET_TOGGLE_UPDATES:
+            // Saved with the other settings at exit
+            app.updateCheckEnabled = !app.updateCheckEnabled;
+            break;
+        case SET_CHECK_UPDATES:
+            if (!app.updateCheckRunning) PostMessageW(hwnd, WM_APP_UPDATE_CHECK_NOW, 0, 0);
+            break;
         case SET_TOGGLE_HEADRULES:
             app.headingRules = !app.headingRules;
             // Layout shifts (the rule adds height), so a repaint alone

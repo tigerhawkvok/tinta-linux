@@ -1217,7 +1217,7 @@ static bool isNewerVersion(const std::string& version) {
     return patch > TINTA_VERSION_PATCH;
 }
 
-static void updateCheckWorker(HWND hwnd) {
+static void updateCheckWorker(HWND hwnd, bool manual) {
     std::string version;
     HINTERNET session = WinHttpOpen(
         L"tinta-update-check", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -1272,7 +1272,7 @@ static void updateCheckWorker(HWND hwnd) {
         WinHttpCloseHandle(session);
     }
     auto* result = new std::string(std::move(version));
-    if (!PostMessageW(hwnd, WM_APP_UPDATE_CHECK, 0, (LPARAM)result)) {
+    if (!PostMessageW(hwnd, WM_APP_UPDATE_CHECK, manual ? 1 : 0, (LPARAM)result)) {
         delete result;
     }
 }
@@ -1733,7 +1733,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == TIMER_UPDATE_CHECK && app) {
                 KillTimer(hwnd, TIMER_UPDATE_CHECK);
-                std::thread(updateCheckWorker, hwnd).detach();
+                if (!app->updateCheckRunning) {
+                    app->updateCheckRunning = true;
+                    std::thread(updateCheckWorker, hwnd, false).detach();
+                }
             }
             if (wParam == TIMER_DRAFT_SAVE && app) {
                 draftsSweep(*app);
@@ -1776,14 +1779,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app) completeFolderSearch(*app, (void*)lParam);
             return 0;
 
+        case WM_APP_UPDATE_CHECK_NOW:
+            if (app && !app->updateCheckRunning) {
+                app->updateCheckRunning = true;
+                InvalidateRect(hwnd, nullptr, FALSE);  // the chip shows it is out
+                std::thread(updateCheckWorker, hwnd, true).detach();
+            }
+            return 0;
+
         case WM_APP_UPDATE_CHECK: {
             // Update worker finished (handler takes ownership). A failed
-            // check does not stamp the day, so it retries next launch.
+            // check does not stamp the day, so it retries next launch. A
+            // check the reader asked for (wParam) answers every outcome and
+            // offers a release even after it was dismissed.
             auto* version = (std::string*)lParam;
+            bool manual = wParam != 0;
+            if (app) app->updateCheckRunning = false;
             if (app && version && !version->empty()) {
                 app->updateLastCheck = todayString();
+                if (manual && !isNewerVersion(*version)) {
+                    wchar_t current[32];
+                    swprintf_s(current, _countof(current), L"%d.%d.%d", TINTA_VERSION_MAJOR,
+                               TINTA_VERSION_MINOR, TINTA_VERSION_PATCH);
+                    wchar_t label[96];
+                    swprintf_s(label, _countof(label), tr(*app, "update.current"), current);
+                    signalPush(*app, SIG_SUCCESS, SIGI_CHECK, label);
+                }
                 if (isNewerVersion(*version) &&
-                    *version != app->updateDismissedVersion) {
+                    (manual || *version != app->updateDismissedVersion)) {
                     app->updateVersion = *version;
                     app->updateAvailable = true;
                     wchar_t label[96];
@@ -1795,7 +1818,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                SIGC_DISMISS_UPDATE, false);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
+            } else if (app && manual) {
+                signalPushKey(*app, SIG_WARN, SIGI_WARNING, "update.failed");
             }
+            if (app && manual) InvalidateRect(hwnd, nullptr, FALSE);
             delete version;
             return 0;
         }

@@ -70,6 +70,10 @@ inline int64_t usElapsed(Clock::time_point start) {
 // Pandoc worker finished; wParam = success (pandoc.cpp)
 #define WM_APP_PANDOC_DONE (WM_APP + 6)
 
+// Settings > Updates > Check now: an update check whatever the day. Its
+// WM_APP_UPDATE_CHECK carries wParam = 1, and every outcome is shown
+#define WM_APP_UPDATE_CHECK_NOW (WM_APP + 7)
+
 // Startup metrics
 struct StartupMetrics {
     int64_t windowInitUs = 0;
@@ -548,6 +552,7 @@ struct App {
     bool updateCheckEnabled = true;
     bool updateAvailable = false;
     bool updateDismissed = false;   // this session
+    bool updateCheckRunning = false;  // a worker is out
     std::string updateVersion;      // "X.Y.Z" offered by the chip
     std::string updateLastCheck;    // mirrors Settings on save
     std::string updateDismissedVersion;
