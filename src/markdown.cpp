@@ -60,6 +60,12 @@ struct ParserContext {
     Element* literalOwner = nullptr;  // element whose text so far is md4c's literals
     size_t literalBytes = 0;
     int openAnchors = 0;  // inline <a id> tags of this block awaiting their </a>
+    // Inline <sub>, <sup>, <ins>... spans still open in this block (#263)
+    std::vector<Element*> htmlSpans;
+    // Inline raw HTML waiting for the next callback. md4c hands it over
+    // line by line, with each line break inside it as a "\n" piece of its
+    // own, so a tag or comment spread over lines is only read whole.
+    std::string pendingTag;
 
     ParserContext() {
         root = std::make_shared<Element>(ElementType::Document);
@@ -83,6 +89,48 @@ struct ParserContext {
             elementStack.pop();
         }
     }
+
+    // Close the inline HTML spans opened inside the current Markdown span
+    // or block, as md4c closes it: they cannot outlive it
+    void closeHtmlSpans() {
+        while (!htmlSpans.empty() && current() == htmlSpans.back()) {
+            flushText();
+            popElement();
+            htmlSpans.pop_back();
+        }
+    }
+
+    // A close tag for an open HTML span. Whatever opened inside the span
+    // closes with it, and Markdown spans among those open again right
+    // after, the way a browser reads the misnested <ins>a *b</ins> c*.
+    void closeHtmlSpan(Element* span) {
+        std::vector<Element*> reopen;
+        for (Element* e = current(); e != span; e = e->parent) {
+            // Copying an image or a code span would draw it twice
+            if (!e || e->type == ElementType::Image || e->type == ElementType::Code ||
+                e->type == ElementType::MathInline) {
+                return;
+            }
+            if (std::find(htmlSpans.begin(), htmlSpans.end(), e) == htmlSpans.end()) {
+                reopen.push_back(e);
+            }
+        }
+        flushText();
+        while (current() != span) {
+            htmlSpans.erase(std::remove(htmlSpans.begin(), htmlSpans.end(), current()),
+                            htmlSpans.end());
+            popElement();
+        }
+        popElement();
+        htmlSpans.erase(std::remove(htmlSpans.begin(), htmlSpans.end(), span), htmlSpans.end());
+        for (auto it = reopen.rbegin(); it != reopen.rend(); ++it) {
+            auto copy = std::make_shared<Element>((*it)->type);
+            copy->url = (*it)->url;
+            copy->title = (*it)->title;
+            pushElement(copy);
+        }
+    }
+
 
     void flushText() {
         if (!currentText.empty() && current()) {
@@ -108,6 +156,14 @@ struct ParserContext {
             for (size_t i = 0; i < size; ++i) if (text[i] == '[') {
                 size_t slashes = 0, p = offset + i;
                 while (p && inputStart[--p] == '\\') ++slashes;
+                if (slashes % 2) literalBrackets.push_back(currentText.size() + i);
+            }
+        } else if (notes) {
+            // Raw HTML read whole from its pieces is a copy (#263): its
+            // backslashes are in the text itself
+            for (size_t i = 0; i < size; ++i) if (text[i] == '[') {
+                size_t slashes = 0, p = i;
+                while (p && text[--p] == '\\') ++slashes;
                 if (slashes % 2) literalBrackets.push_back(currentText.size() + i);
             }
         }
@@ -146,11 +202,18 @@ struct ParserContext {
     }
 };
 
+static void flushPendingHtml(ParserContext* ctx);
+
 // MD4C callbacks
 static int enterBlockCallback(MD_BLOCKTYPE type, void* detail, void* userdata) {
     auto* ctx = static_cast<ParserContext*>(userdata);
+    flushPendingHtml(ctx);
     ctx->flushText();
     ctx->openAnchors = 0;  // inline HTML pairs up within one block
+    // A nested block (a sublist after a tight item's text) ends the
+    // parent's open inline HTML spans rather than landing inside them
+    ctx->closeHtmlSpans();
+    ctx->htmlSpans.clear();
 
     ElementPtr elem;
     switch (type) {
@@ -250,7 +313,11 @@ static int enterBlockCallback(MD_BLOCKTYPE type, void* detail, void* userdata) {
 
 static int leaveBlockCallback(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
     auto* ctx = static_cast<ParserContext*>(userdata);
+    flushPendingHtml(ctx);
     ctx->flushText();
+    // An unclosed <sub> or <ins> ends with its block, as in a browser
+    ctx->closeHtmlSpans();
+    ctx->htmlSpans.clear();
 
     switch (type) {
         case MD_BLOCK_DOC:
@@ -276,6 +343,7 @@ static int leaveBlockCallback(MD_BLOCKTYPE type, void* /*detail*/, void* userdat
 
 static int enterSpanCallback(MD_SPANTYPE type, void* detail, void* userdata) {
     auto* ctx = static_cast<ParserContext*>(userdata);
+    flushPendingHtml(ctx);
     ctx->flushText();
 
     ElementPtr elem;
@@ -336,6 +404,7 @@ static int enterSpanCallback(MD_SPANTYPE type, void* detail, void* userdata) {
 
 static int leaveSpanCallback(MD_SPANTYPE type, void* /*detail*/, void* userdata) {
     auto* ctx = static_cast<ParserContext*>(userdata);
+    flushPendingHtml(ctx);
     ctx->flushText();
 
     switch (type) {
@@ -346,6 +415,7 @@ static int leaveSpanCallback(MD_SPANTYPE type, void* /*detail*/, void* userdata)
         case MD_SPAN_IMG:
         case MD_SPAN_LATEXMATH:
         case MD_SPAN_LATEXMATH_DISPLAY:
+            ctx->closeHtmlSpans();
             ctx->popElement();
             break;
         default:
@@ -385,6 +455,44 @@ static bool isTransparentFontTag(const MD_CHAR* text, MD_SIZE size) {
     return afterName == size - 1 ||
            isspace((unsigned char)text[afterName]) ||
            text[afterName] == '/';
+}
+
+// Inline HTML that has a native span (#263): <sub>, <sup>, <ins> and <u>
+// (underline), <del>, <s> and <strike>, <mark>. The opening tag may carry
+// attributes; self-closing forms such as <sub/> mean nothing.
+static bool htmlSpanTag(const MD_CHAR* text, MD_SIZE size, ElementType& type, bool& closing) {
+    if (size < 3 || text[0] != '<' || text[size - 1] != '>') return false;
+    MD_SIZE i = 1;
+    closing = text[i] == '/';
+    if (closing) i++;
+    std::string name;
+    while (i < size - 1 && isalpha((unsigned char)text[i])) {
+        name += (char)tolower((unsigned char)text[i++]);
+    }
+    const std::string rest(text + i, size - 1 - i);
+    if (!rest.empty() && !isspace((unsigned char)rest[0])) return false;
+    size_t last = rest.find_last_not_of(" \t\r\n");
+    if (last != std::string::npos && (closing || rest[last] == '/')) return false;
+    // A '>' inside a quoted attribute value does not end the tag
+    char quote = 0;
+    for (char c : rest) {
+        if (quote) { if (c == quote) quote = 0; }
+        else if (c == '"' || c == '\'') quote = c;
+    }
+    if (quote) return false;
+    static const std::pair<const char*, ElementType> kTags[] = {
+        {"sub", ElementType::Subscript},     {"sup", ElementType::Superscript},
+        {"ins", ElementType::Underline},     {"u", ElementType::Underline},
+        {"del", ElementType::Strikethrough}, {"s", ElementType::Strikethrough},
+        {"strike", ElementType::Strikethrough}, {"mark", ElementType::Highlight},
+    };
+    for (const auto& tag : kTags) {
+        if (name == tag.first) {
+            type = tag.second;
+            return true;
+        }
+    }
+    return false;
 }
 
 // <a id="x"> or <a name="x"> without an href only marks a link target, the
@@ -441,45 +549,114 @@ static AnchorTag anchorTag(const MD_CHAR* text, MD_SIZE size, std::string& id) {
     return tag.back() == '/' ? AnchorTag::SelfClosed : AnchorTag::Open;
 }
 
+// Whether a raw HTML piece from md4c is a whole tag: it ends with '>'
+// outside any quoted attribute value. Comments and declarations end at
+// their own '>' whatever quotes they hold.
+static bool rawTagComplete(const std::string& tag) {
+    if (tag.empty() || tag.back() != '>') return false;
+    if (tag.size() > 1 && (tag[1] == '!' || tag[1] == '?')) return true;
+    char quote = 0;
+    for (char c : tag) {
+        if (quote) { if (c == quote) quote = 0; }
+        else if (c == '"' || c == '\'') quote = c;
+    }
+    return quote == 0;
+}
+
+// Raw HTML met inside a paragraph, heading or cell: the tags Tinta draws
+// natively become elements, the rest stays literal text
+static void inlineHtml(ParserContext* ctx, const MD_CHAR* text, MD_SIZE size) {
+    // Inline <br> becomes a hard line break (#45)
+    if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock &&
+        isBrTag(text, size)) {
+        ctx->flushText();
+        auto elem = std::make_shared<Element>(ElementType::HardBreak);
+        elem->parent = ctx->current();
+        ctx->current()->children.push_back(elem);
+        return;
+    }
+    if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock &&
+        isTransparentFontTag(text, size)) {
+        return;
+    }
+    if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock) {
+        std::string id;
+        AnchorTag anchor = anchorTag(text, size, id);
+        if (anchor == AnchorTag::Open || anchor == AnchorTag::SelfClosed) {
+            ctx->flushText();
+            auto elem = std::make_shared<Element>(ElementType::Anchor);
+            elem->title = id;
+            elem->parent = ctx->current();
+            ctx->current()->children.push_back(elem);
+            if (anchor == AnchorTag::Open) ctx->openAnchors++;
+            return;
+        }
+        // Only the </a> of an anchor goes; others stay literal text
+        if (anchor == AnchorTag::Close && ctx->openAnchors > 0) {
+            ctx->openAnchors--;
+            return;
+        }
+        ElementType spanType;
+        bool closing = false;
+        if (htmlSpanTag(text, size, spanType, closing)) {
+            if (!closing) {
+                ctx->flushText();
+                auto elem = std::make_shared<Element>(spanType);
+                ctx->pushElement(elem);
+                ctx->htmlSpans.push_back(elem.get());
+                return;
+            }
+            // The innermost open span of this kind takes the close tag; a
+            // stray one draws nothing, as on GitHub
+            auto open = std::find_if(ctx->htmlSpans.rbegin(), ctx->htmlSpans.rend(),
+                [&](const Element* span) { return span->type == spanType; });
+            if (open != ctx->htmlSpans.rend()) ctx->closeHtmlSpan(*open);
+            return;
+        }
+    }
+    ctx->addText(text, size);
+}
+
+// Reads the raw HTML waiting in pendingTag. A tag spread over lines is
+// still one tag; anything else spread over lines, such as a comment,
+// stays literal text whatever tags it mentions.
+static void flushPendingHtml(ParserContext* ctx) {
+    if (ctx->pendingTag.empty()) return;
+    std::string html;
+    html.swap(ctx->pendingTag);
+    bool tag = html.size() > 1 && html[0] == '<' &&
+               (isalpha((unsigned char)html[1]) || html[1] == '/');
+    if (html.find('\n') != std::string::npos && !(tag && rawTagComplete(html))) {
+        ctx->addText(html.data(), (MD_SIZE)html.size());
+        return;
+    }
+    inlineHtml(ctx, html.data(), (MD_SIZE)html.size());
+}
+
 static int textCallback(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
     auto* ctx = static_cast<ParserContext*>(userdata);
     ctx->trackOffset(text, size);
 
+    if (type != MD_TEXT_HTML) flushPendingHtml(ctx);
+
     switch (type) {
-        case MD_TEXT_HTML:  // Capture HTML content
-            // Inline <br> becomes a hard line break (#45); raw HTML inside an
-            // HtmlBlock keeps accumulating so parseHtmlIntoElements sees it all
-            if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock &&
-                isBrTag(text, size)) {
-                ctx->flushText();
-                auto elem = std::make_shared<Element>(ElementType::HardBreak);
-                elem->parent = ctx->current();
-                ctx->current()->children.push_back(elem);
-                break;
-            }
-            if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock &&
-                isTransparentFontTag(text, size)) {
-                break;
-            }
+        case MD_TEXT_HTML:
+            // Raw HTML inside an HtmlBlock keeps accumulating so
+            // parseHtmlIntoElements sees it all
             if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock) {
-                std::string id;
-                AnchorTag anchor = anchorTag(text, size, id);
-                if (anchor == AnchorTag::Open || anchor == AnchorTag::SelfClosed) {
-                    ctx->flushText();
-                    auto elem = std::make_shared<Element>(ElementType::Anchor);
-                    elem->title = id;
-                    elem->parent = ctx->current();
-                    ctx->current()->children.push_back(elem);
-                    if (anchor == AnchorTag::Open) ctx->openAnchors++;
-                    break;
+                // A line break, or the blanks before it, continues the
+                // element before it, and so does the line after one
+                bool blank = true;
+                for (MD_SIZE k = 0; k < size && blank; k++) {
+                    blank = text[k] == ' ' || text[k] == '\t' || text[k] == '\n';
                 }
-                // Only the </a> of an anchor goes; others stay literal text
-                if (anchor == AnchorTag::Close && ctx->openAnchors > 0) {
-                    ctx->openAnchors--;
-                    break;
-                }
+                bool continues = !ctx->pendingTag.empty() &&
+                                 (blank || ctx->pendingTag.back() == '\n');
+                if (!continues) flushPendingHtml(ctx);
+                ctx->pendingTag.append(text, size);
+                break;
             }
-            ctx->addText(text, size);
+            inlineHtml(ctx, text, size);
             break;
         case MD_TEXT_NORMAL:
         case MD_TEXT_CODE:
@@ -650,6 +827,68 @@ static void detectGitHubAlerts(const ElementPtr& parent) {
     }
 }
 
+// Inline HTML spans (#263) sit inside a run of text the post-passes read
+// as one string, so ~~H<sub>2</sub>O~~ and [[Water|H<sub>2</sub>O]] still
+// pair. At this point these element types only come from inline HTML.
+static bool isInlineHtmlSpan(ElementType type) {
+    return type == ElementType::Subscript || type == ElementType::Superscript ||
+           type == ElementType::Underline || type == ElementType::Strikethrough ||
+           type == ElementType::Highlight;
+}
+
+// Adjacent siblings [begin, end) read as one string: text as itself, any
+// other part (math, an inline HTML span) as one opaque \x01. append()
+// hands out pieces of that string in order, moving opaque parts whole.
+class SiblingRun {
+public:
+    SiblingRun(const ElementPtr& parent, size_t begin, size_t end)
+        : parent_(parent), begin_(begin) {
+        if (end == begin + 1 && parent->children[begin]->type == ElementType::Text) {
+            single_ = &parent->children[begin]->text;  // the usual case: no copy
+            return;
+        }
+        offsets_.push_back(0);
+        for (size_t j = begin; j < end; ++j) {
+            const auto& part = parent->children[j];
+            if (part->type == ElementType::Text) combined_ += part->text;
+            else combined_ += '\x01';
+            offsets_.push_back(combined_.size());
+        }
+    }
+
+    const std::string& text() const { return single_ ? *single_ : combined_; }
+
+    void append(size_t start, size_t end, const ElementPtr& owner, std::vector<ElementPtr>& output) {
+        if (single_) {
+            if (end > start) output.push_back(makeTextElement(single_->substr(start, end - start), owner.get()));
+            return;
+        }
+        while (partIndex_ + 1 < offsets_.size() && offsets_[partIndex_] < end) {
+            size_t lo = std::max(start, offsets_[partIndex_]);
+            size_t hi = std::min(end, offsets_[partIndex_ + 1]);
+            if (lo < hi) {
+                auto part = parent_->children[begin_ + partIndex_];
+                if (part->type == ElementType::Text) {
+                    output.push_back(makeTextElement(combined_.substr(lo, hi - lo), owner.get()));
+                } else {
+                    part->parent = owner.get();
+                    output.push_back(part);
+                }
+            }
+            if (offsets_[partIndex_ + 1] > end) break;
+            ++partIndex_;
+        }
+    }
+
+private:
+    const ElementPtr& parent_;
+    size_t begin_;
+    const std::string* single_ = nullptr;
+    std::string combined_;
+    std::vector<size_t> offsets_;
+    size_t partIndex_ = 0;
+};
+
 static void splitInlineExtensions(const ElementPtr& parent) {
     if (parent->type == ElementType::Code ||
         parent->type == ElementType::CodeBlock ||
@@ -657,77 +896,45 @@ static void splitInlineExtensions(const ElementPtr& parent) {
         return;
     }
 
+    // TeX and inline HTML spans are opaque atoms between text nodes:
+    // ==before $x$ after== wraps the equation without interpreting
+    // delimiters inside it. Markdown wrappers and block boundaries keep
+    // their existing scope.
+    auto inRun = [](ElementType type) {
+        return type == ElementType::Text || type == ElementType::MathInline || isInlineHtmlSpan(type);
+    };
     std::vector<ElementPtr> rebuilt;
     bool changed = false;
     for (size_t i = 0; i < parent->children.size();) {
         auto child = parent->children[i];
-        if (child->type != ElementType::Text && child->type != ElementType::MathInline) {
+        if (!inRun(child->type)) {
             splitInlineExtensions(child);
             rebuilt.push_back(child);
             ++i;
             continue;
         }
-
-        // TeX is an opaque atom between text nodes: ==before $x$ after==
-        // must wrap the equation without interpreting delimiters inside it.
-        // Other wrappers and block boundaries keep their existing scope.
         size_t begin = i;
-        while (i < parent->children.size()) {
-            const auto& part = parent->children[i];
-            if (part->type != ElementType::Text && part->type != ElementType::MathInline) break;
+        while (i < parent->children.size() && inRun(parent->children[i]->type)) {
+            // A span's own text is split first, then it moves whole
+            if (isInlineHtmlSpan(parent->children[i]->type)) splitInlineExtensions(parent->children[i]);
             ++i;
         }
-        if (i == begin + 1 && child->type == ElementType::MathInline) {
+        if (i == begin + 1 && child->type != ElementType::Text) {
             rebuilt.push_back(child);
             continue;
         }
-        // The usual single Text node needs neither a string copy nor an
-        // offset map. Allocate those only for a group containing math.
-        std::string combined;
-        std::vector<size_t> offsets;
-        if (i > begin + 1) {
-            offsets.push_back(0);
-            for (size_t j = begin; j < i; ++j) {
-                const auto& part = parent->children[j];
-                if (part->type == ElementType::Text) combined += part->text;
-                else combined += '\x01';
-                offsets.push_back(combined.size());
-            }
-        }
-        const std::string& text = offsets.empty() ? child->text : combined;
-        size_t partIndex = 0;
-        auto appendRange = [&](size_t start, size_t end, const ElementPtr& owner,
-                               std::vector<ElementPtr>& output) {
-            if (offsets.empty()) {
-                if (end > start) output.push_back(makeTextElement(text.substr(start, end - start), owner.get()));
-                return;
-            }
-            while (partIndex + 1 < offsets.size() && offsets[partIndex] < end) {
-                size_t lo = std::max(start, offsets[partIndex]);
-                size_t hi = std::min(end, offsets[partIndex + 1]);
-                if (lo < hi) {
-                    auto part = parent->children[begin + partIndex];
-                    if (part->type == ElementType::Text) {
-                        output.push_back(makeTextElement(text.substr(lo, hi - lo), owner.get()));
-                    } else {
-                        part->parent = owner.get();
-                        output.push_back(part);
-                    }
-                }
-                if (offsets[partIndex + 1] > end) break;
-                ++partIndex;
-            }
-        };
+        SiblingRun run(parent, begin, i);
+        const std::string& text = run.text();
         size_t cursor = 0;
         ExtensionMatch m;
         bool any = false;
         while (findExtensionSpan(text, cursor, m)) {
             any = true;
-            appendRange(cursor, m.start, parent, rebuilt);
+            run.append(cursor, m.start, parent, rebuilt);
             auto span = std::make_shared<Element>(m.type);
             span->parent = parent.get();
-            appendRange(m.start + m.delimLen, m.start + m.delimLen + m.contentLen,
-                        span, span->children);
+            run.append(m.start + m.delimLen, m.start + m.delimLen + m.contentLen,
+                       span, span->children);
             rebuilt.push_back(std::move(span));
             cursor = m.start + m.delimLen + m.contentLen + m.delimLen;
         }
@@ -737,7 +944,7 @@ static void splitInlineExtensions(const ElementPtr& parent) {
             continue;
         }
         changed = true;
-        appendRange(cursor, text.size(), parent, rebuilt);
+        run.append(cursor, text.size(), parent, rebuilt);
     }
     if (changed) parent->children = std::move(rebuilt);
 }
@@ -745,7 +952,8 @@ static void splitInlineExtensions(const ElementPtr& parent) {
 // Obsidian [[wiki links]]: [[Target]] and [[Target|shown text]] become
 // Link elements with a wiki: scheme URL; the click handler resolves the
 // target against the current file's folder. Runs after the extension
-// splitter, skipping code the same way.
+// splitter, skipping code the same way. The shown text may hold inline
+// HTML spans; the target is plain text.
 static void splitWikiLinks(const ElementPtr& parent) {
     if (parent->type == ElementType::Code ||
         parent->type == ElementType::CodeBlock ||
@@ -754,57 +962,67 @@ static void splitWikiLinks(const ElementPtr& parent) {
         return;
     }
 
+    auto inRun = [](ElementType type) { return type == ElementType::Text || isInlineHtmlSpan(type); };
     std::vector<ElementPtr> rebuilt;
     bool changed = false;
-    for (auto& child : parent->children) {
-        if (child->type != ElementType::Text) {
+    for (size_t i = 0; i < parent->children.size();) {
+        auto child = parent->children[i];
+        if (!inRun(child->type)) {
             splitWikiLinks(child);
+            rebuilt.push_back(child);
+            ++i;
+            continue;
+        }
+        size_t begin = i;
+        while (i < parent->children.size() && inRun(parent->children[i]->type)) {
+            if (parent->children[i]->type != ElementType::Text) splitWikiLinks(parent->children[i]);
+            ++i;
+        }
+        if (i == begin + 1 && child->type != ElementType::Text) {
             rebuilt.push_back(child);
             continue;
         }
 
-        const std::string& text = child->text;
-        size_t cursor = 0;
+        SiblingRun run(parent, begin, i);
+        const std::string& text = run.text();
+        size_t cursor = 0;  // end of the text handed out so far
+        size_t from = 0;    // where the next [[ is looked for
         bool any = false;
         while (true) {
-            size_t open = text.find("[[", cursor);
+            size_t open = text.find("[[", from);
             if (open == std::string::npos) break;
             size_t close = text.find("]]", open + 2);
             if (close == std::string::npos) break;
             std::string inner = text.substr(open + 2, close - open - 2);
             if (inner.empty() || inner.find('\n') != std::string::npos) {
-                cursor = open + 2;
+                from = open + 2;
                 continue;
             }
-            std::string target = inner, shown = inner;
             size_t pipe = inner.find('|');
-            if (pipe != std::string::npos) {
-                target = inner.substr(0, pipe);
-                shown = inner.substr(pipe + 1);
-            }
-            if (target.empty() || shown.empty()) {
-                cursor = open + 2;
+            std::string target = pipe == std::string::npos ? inner : inner.substr(0, pipe);
+            size_t shownStart = pipe == std::string::npos ? open + 2 : open + 2 + pipe + 1;
+            if (target.empty() || shownStart >= close ||
+                target.find('\x01') != std::string::npos) {
+                from = open + 2;
                 continue;
             }
             any = true;
-            if (open > cursor) {
-                rebuilt.push_back(makeTextElement(text.substr(cursor, open - cursor), parent.get()));
-            }
+            run.append(cursor, open, parent, rebuilt);
             auto link = std::make_shared<Element>(ElementType::Link);
             link->parent = parent.get();
             link->url = "wiki:" + target;
-            link->children.push_back(makeTextElement(shown, link.get()));
+            // The brackets, the target and its pipe are left out
+            run.append(shownStart, close, link, link->children);
             rebuilt.push_back(std::move(link));
-            cursor = close + 2;
+            cursor = from = close + 2;
         }
         if (!any) {
-            rebuilt.push_back(child);
+            rebuilt.insert(rebuilt.end(), parent->children.begin() + begin,
+                           parent->children.begin() + i);
             continue;
         }
         changed = true;
-        if (cursor < text.size()) {
-            rebuilt.push_back(makeTextElement(text.substr(cursor), parent.get()));
-        }
+        run.append(cursor, text.size(), parent, rebuilt);
     }
     if (changed) parent->children = std::move(rebuilt);
 }
@@ -1225,6 +1443,7 @@ std::string elementTypeToString(ElementType type) {
         case ElementType::MermaidDiagram: return "MermaidDiagram";
         case ElementType::Highlight: return "Highlight";
         case ElementType::Strikethrough: return "Strikethrough";
+        case ElementType::Underline: return "Underline";
         case ElementType::Superscript: return "Superscript";
         case ElementType::Subscript: return "Subscript";
         case ElementType::BlockQuote: return "BlockQuote";
@@ -1339,6 +1558,99 @@ static HtmlTag parseTag(const std::string& tagStr) {
     return tag;
 }
 
+// Elements that start on their own line inside an HTML block; text after
+// one of them starts fresh, with no space carried over
+static bool isHtmlBlockLevel(ElementType type) {
+    switch (type) {
+        case ElementType::Paragraph: case ElementType::Heading: case ElementType::List:
+        case ElementType::ListItem: case ElementType::CodeBlock: case ElementType::BlockQuote:
+        case ElementType::HorizontalRule: case ElementType::HardBreak:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Whether an element draws any text: an empty anchor, or a link around an
+// image the block ignores, only takes a place
+static bool hasDrawnText(const Element* elem) {
+    if (elem->type == ElementType::Text) return !elem->text.empty();
+    for (const auto& child : elem->children) {
+        if (hasDrawnText(child.get())) return true;
+    }
+    return false;
+}
+
+// Whether an element's drawn text ends in a space
+static bool endsInSpace(const Element* elem) {
+    if (elem->type == ElementType::Text) {
+        return !elem->text.empty() && isspace((unsigned char)elem->text.back());
+    }
+    for (auto it = elem->children.rbegin(); it != elem->children.rend(); ++it) {
+        if (!hasDrawnText(it->get())) continue;
+        return endsInSpace(it->get());
+    }
+    return false;
+}
+
+// What text added at the end of `container` follows on its line: whether
+// that is inline content and whether it already ends in a space. An empty
+// inline element continues the line of the content before it.
+static void precedingInline(const Element* container, const Element* root,
+                            bool& afterInline, bool& afterSpace) {
+    afterInline = afterSpace = false;
+    const Element* child = nullptr;  // look before this child; null: at the end
+    for (const Element* e = container; e; child = e, e = e->parent) {
+        auto end = e->children.end();
+        if (child) {
+            end = std::find_if(e->children.begin(), e->children.end(),
+                               [&](const ElementPtr& c) { return c.get() == child; });
+        }
+        for (auto it = std::make_reverse_iterator(end); it != e->children.rend(); ++it) {
+            // Inline content without text (an empty anchor, a linked
+            // image) only takes a place
+            if (!isHtmlBlockLevel((*it)->type) && !hasDrawnText(it->get())) continue;
+            afterInline = !isHtmlBlockLevel((*it)->type);
+            afterSpace = endsInSpace(it->get());
+            return;
+        }
+        if (e == root || isHtmlBlockLevel(e->type)) return;
+    }
+}
+
+// Drops the trailing space of an element's last drawn text
+static void trimTrailingSpace(Element* elem) {
+    for (auto it = elem->children.rbegin(); it != elem->children.rend(); ++it) {
+        if (!hasDrawnText(it->get())) continue;
+        if ((*it)->type != ElementType::Text) {
+            trimTrailingSpace(it->get());
+            return;
+        }
+        std::string& text = (*it)->text;
+        while (!text.empty() && isspace((unsigned char)text.back())) text.pop_back();
+        if (text.empty()) elem->children.erase(std::next(it).base());
+        return;
+    }
+}
+
+// A wrapper left with nothing in it (<sub> alone on its line, ahead of the
+// Markdown it was meant to wrap) would only draw an empty line
+static void pruneEmptyWrappers(Element* elem) {
+    for (const auto& child : elem->children) pruneEmptyWrappers(child.get());
+    auto empty = [](const ElementPtr& child) {
+        switch (child->type) {
+            case ElementType::Strong: case ElementType::Emphasis: case ElementType::Subscript:
+            case ElementType::Superscript: case ElementType::Underline:
+            case ElementType::Strikethrough: case ElementType::Highlight:
+                return child->children.empty();
+            default:
+                return false;
+        }
+    };
+    elem->children.erase(std::remove_if(elem->children.begin(), elem->children.end(), empty),
+                         elem->children.end());
+}
+
 void parseHtmlIntoElements(const std::string& html, Element* parent) {
     if (!parent) return;
 
@@ -1348,15 +1660,50 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
     size_t pos = 0;
     std::string textBuffer;
 
-    auto flushText = [&]() {
-        std::string trimmed = trim(textBuffer);
-        if (!trimmed.empty() && !elementStack.empty()) {
-            auto textElem = std::make_shared<Element>(ElementType::Text);
-            textElem->text = trimmed;
-            textElem->parent = elementStack.top();
-            elementStack.top()->children.push_back(textElem);
+    // Text between tags. Block tags trim it; beside an inline tag (<b>,
+    // <sub>, <a>...) a space stays one space, as in a browser, where
+    // trimming glued "a <ins>b</ins> c" into "abc" (#263)
+    auto flushText = [&](bool inlineTag = false) {
+        if (textBuffer.empty() || elementStack.empty()) {
+            textBuffer.clear();
+            return;
         }
+        Element* top = elementStack.top();
+        // What the text follows on its line: inline content (a space before
+        // the text stays) that may already end in a space (it is not doubled)
+        bool afterInline = false, afterSpace = false;
+        precedingInline(top, parent, afterInline, afterSpace);
+        bool lead = isspace((unsigned char)textBuffer.front()) != 0;
+        bool tail = isspace((unsigned char)textBuffer.back()) != 0;
+        std::string text = trim(textBuffer);
         textBuffer.clear();
+        if (text.empty()) {
+            if (!(inlineTag && afterInline) || afterSpace) return;
+            text = " ";  // the space between two inline elements
+        } else {
+            if (lead && afterInline && !afterSpace) text.insert(0, 1, ' ');
+            if (tail && inlineTag) text += ' ';
+        }
+        auto textElem = std::make_shared<Element>(ElementType::Text);
+        textElem->text = text;
+        textElem->parent = top;
+        top->children.push_back(textElem);
+    };
+
+    // A close tag closes the nearest open element of its kind and whatever
+    // was left open inside it. One with nothing to close is ignored rather
+    // than ending whichever element happens to be open.
+    auto closeElement = [&](ElementType type, bool inlineTag, ElementType alsoType) {
+        size_t depth = 0;
+        for (Element* e = elementStack.top(); e && e != parent; e = e->parent, depth++) {
+            if (e->type != type && e->type != alsoType) continue;
+            flushText(inlineTag);
+            for (size_t i = 0; i <= depth && elementStack.size() > 1; i++) elementStack.pop();
+            // A block ends without the space kept before an inline tag
+            // (<h2>Title <a><img></a></h2>), which would reach its slug
+            if (isHtmlBlockLevel(e->type)) trimTrailingSpace(e);
+            return;
+        }
     };
 
     while (pos < html.length()) {
@@ -1394,9 +1741,8 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::List, false, ElementType::List);
             }
         }
         else if (tag.name == "li") {
@@ -1406,14 +1752,13 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::ListItem, false, ElementType::ListItem);
             }
         }
         else if (tag.name == "a") {
             if (!tag.isClosing) {
-                flushText();
+                flushText(true);
                 // Without an href, id= or name= only marks a link target (#255)
                 std::string anchorId;
                 if (tag.href.empty()) {
@@ -1430,45 +1775,68 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 if (anchorId.empty() || !tag.isSelfClosing) elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Link, true, ElementType::Anchor);
             }
         }
         else if (tag.name == "strong" || tag.name == "b") {
             if (!tag.isClosing) {
-                flushText();
+                flushText(true);
                 auto elem = std::make_shared<Element>(ElementType::Strong);
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Strong, true, ElementType::Strong);
             }
         }
         else if (tag.name == "em" || tag.name == "i") {
             if (!tag.isClosing) {
-                flushText();
+                flushText(true);
                 auto elem = std::make_shared<Element>(ElementType::Emphasis);
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Emphasis, true, ElementType::Emphasis);
             }
         }
         else if (tag.name == "code") {
             if (!tag.isClosing) {
-                flushText();
+                flushText(true);
                 auto elem = std::make_shared<Element>(ElementType::Code);
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Code, true, ElementType::Code);
+            }
+        }
+        else if (tag.name == "sub" || tag.name == "sup" || tag.name == "ins" ||
+                 tag.name == "u" || tag.name == "del" || tag.name == "s" ||
+                 tag.name == "strike" || tag.name == "mark") {
+            // The inline spans of #263, as in a paragraph. Inside <pre> or
+            // <code> the tags go and their text stays, as before.
+            bool inCode = false;
+            for (Element* e = elementStack.top(); e && e != parent; e = e->parent) {
+                inCode = inCode || e->type == ElementType::CodeBlock || e->type == ElementType::Code;
+            }
+            ElementType type =
+                tag.name == "sub" ? ElementType::Subscript :
+                tag.name == "sup" ? ElementType::Superscript :
+                tag.name == "mark" ? ElementType::Highlight :
+                (tag.name == "ins" || tag.name == "u") ? ElementType::Underline :
+                ElementType::Strikethrough;
+            if (inCode) {
+                // the text runs on inside the code
+            } else if (!tag.isClosing && !tag.isSelfClosing) {
+                flushText(true);
+                auto elem = std::make_shared<Element>(type);
+                elem->parent = elementStack.top();
+                elementStack.top()->children.push_back(elem);
+                elementStack.push(elem.get());
+            } else if (tag.isClosing) {
+                closeElement(type, true, type);
             }
         }
         else if (tag.name == "p") {
@@ -1478,9 +1846,8 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Paragraph, false, ElementType::Paragraph);
             }
         }
         else if (tag.name == "h1" || tag.name == "h2" || tag.name == "h3" ||
@@ -1492,9 +1859,8 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Heading, false, ElementType::Heading);
             }
         }
         else if (tag.name == "br") {
@@ -1516,9 +1882,8 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::CodeBlock, false, ElementType::CodeBlock);
             }
         }
         else if (tag.name == "blockquote") {
@@ -1528,21 +1893,19 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::BlockQuote, false, ElementType::BlockQuote);
             }
         }
         else if (tag.name == "ruby") {
             if (!tag.isClosing) {
-                flushText();
+                flushText(true);
                 auto elem = std::make_shared<Element>(ElementType::Ruby);
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::Ruby, true, ElementType::Ruby);
             }
         }
         else if (tag.name == "rt") {
@@ -1552,9 +1915,8 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 elem->parent = elementStack.top();
                 elementStack.top()->children.push_back(elem);
                 elementStack.push(elem.get());
-            } else if (elementStack.size() > 1) {
-                flushText();
-                elementStack.pop();
+            } else {
+                closeElement(ElementType::RubyText, false, ElementType::RubyText);
             }
         }
         else if (tag.name == "rp") {
@@ -1581,6 +1943,12 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
     }
 
     flushText();
+    // Blocks left open (an <h2> whose </h2> never came) end here, the same way
+    while (elementStack.size() > 1) {
+        if (isHtmlBlockLevel(elementStack.top()->type)) trimTrailingSpace(elementStack.top());
+        elementStack.pop();
+    }
+    pruneEmptyWrappers(parent);
 }
 
 } // namespace qmd

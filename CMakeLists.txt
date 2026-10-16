@@ -338,6 +338,13 @@ if(BUILD_TESTING)
         TINTA_FOOTNOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/footnotes.md")
     add_test(NAME footnotes COMMAND footnote_tests)
 
+    add_executable(html_span_tests tests/html_span_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(html_span_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(html_span_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(html_span_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_HTML_SPAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-inline-tags-263.md")
+    add_test(NAME html_spans COMMAND html_span_tests)
+
     add_executable(blockquote_layout_tests tests/blockquote_layout_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(blockquote_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(blockquote_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)

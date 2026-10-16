@@ -48,6 +48,7 @@ enum class ElementType {
     Superscript,   // ^text^
     Subscript,     // ~text~
     Strikethrough, // ~~text~~ (handled in the post-pass, not md4c)
+    Underline,     // inline HTML <ins> or <u> (#263)
     // LaTeX math spans (#80): text carries the raw TeX source
     MathInline,    // $...$
     MathDisplay,   // $$...$$ (rendered as a centered block)

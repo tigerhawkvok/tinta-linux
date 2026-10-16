@@ -22,6 +22,12 @@ struct InlineStyle {
     bool hasBg = false;
     D2D1_COLOR_F bgColor{};
     bool hasStrike = false;
+    bool hasUnderline = false;  // <ins> or <u> (#263)
+    // Where the underline began: its rule sits under that face's baseline,
+    // so <ins>x<sup>2</sup></ins> keeps one rule while <sup><ins>2</ins></sup>
+    // gets its own under the 2
+    IDWriteTextFormat* underlineFormat = nullptr;
+    float underlineYOffset = 0.0f;
     float drawYOffset = 0.0f;
     bool bold = false;
     bool italic = false;

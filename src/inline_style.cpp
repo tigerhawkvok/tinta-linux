@@ -86,6 +86,18 @@ IDWriteTextFormat* emphasisFormat(App& app, IDWriteTextFormat* base, bool bold, 
     return fmt ? fmt : base;
 }
 
+// The small face for ^sup^/~sub~ and <sup>/<sub>: a heading's own, in
+// proportion to its size, or the body's
+static IDWriteTextFormat* scriptFormat(App& app, IDWriteTextFormat* around) {
+    for (int i = 0; i < 6; i++) {
+        if (around && (around == app.headingFormats[i] || around == app.headingItalicFormats[i]) &&
+            app.headingScriptFormats[i]) {
+            return app.headingScriptFormats[i];
+        }
+    }
+    return app.supSubFormat;
+}
+
 IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic) {
     IDWriteTextFormat* fmt = nullptr;
     if (bold && italic) fmt = app.codeBoldItalicFormat;
@@ -122,6 +134,12 @@ void flattenInline(App& app, const std::vector<ElementPtr>& elements,
                 st.hasStrike = true;
                 break;
 
+            case ElementType::Underline:
+                st.hasUnderline = true;
+                st.underlineFormat = st.format;
+                st.underlineYOffset = st.drawYOffset;
+                break;
+
             case ElementType::Anchor:
                 // Zero-width target the layout pins to its line (#255),
                 // then any text it wraps flows on as usual
@@ -137,9 +155,10 @@ void flattenInline(App& app, const std::vector<ElementPtr>& elements,
 
             case ElementType::Superscript:
             case ElementType::Subscript:
-                // Small text; NEAR alignment already sits sup at the top of the line
-                if (app.supSubFormat) {
-                    st.format = app.supSubFormat;
+                // Small text, a heading's in proportion to it (#263); NEAR
+                // alignment already sits sup at the top of the line
+                if (IDWriteTextFormat* face = scriptFormat(app, st.format)) {
+                    st.format = face;
                     st.fixedSize = true;
                 }
                 if (elem->type == ElementType::Subscript) st.drawYOffset = lineHeight * 0.38f;

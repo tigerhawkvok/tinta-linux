@@ -79,6 +79,10 @@ tinta_upstream_test(footnote_tests tests/footnote_tests.cpp)
 target_compile_definitions(footnote_tests PRIVATE TINTA_FOOTNOTE_FIXTURE="${TINTA_FIXTURES}/footnotes.md")
 add_test(NAME footnotes COMMAND footnote_tests)
 
+tinta_upstream_test(html_span_tests tests/html_span_tests.cpp)
+target_compile_definitions(html_span_tests PRIVATE TINTA_HTML_SPAN_FIXTURE="${TINTA_FIXTURES}/html-inline-tags-263.md")
+add_test(NAME html_spans COMMAND html_span_tests)
+
 tinta_upstream_test(blockquote_layout_tests tests/blockquote_layout_tests.cpp)
 target_compile_definitions(blockquote_layout_tests PRIVATE TINTA_QUOTE_FIXTURE="${TINTA_FIXTURES}/blockquote-spacing.md")
 add_test(NAME blockquote_layout COMMAND blockquote_layout_tests)

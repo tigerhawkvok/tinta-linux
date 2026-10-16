@@ -62,18 +62,26 @@ void scriptLayout(App& app, const std::string& fixture) {
     }
     for (const char* source : {
         "base^SUP^ base~SUB~\n", "# base^SUP^ base~SUB~\n",
-        "### base^SUP^ base~SUB~\n", "> base^SUP^ base~SUB~\n",
+        "### base^SUP^ base~SUB~\n", "## *base^SUP^ base~SUB~*\n",
+        "> base^SUP^ base~SUB~\n",
         "- base^SUP^ base~SUB~\n", "**base^SUP^** *base~SUB~*\n",
         "[base^SUP^](#target) base~SUB~\n",
         "| Header |\n| --- |\n| base^SUP^ base~SUB~ |\n"}) {
         layout(app, source);
+        const auto* base = runFor(app, L"base");
         const auto* sup = runFor(app, L"SUP");
         const auto* sub = runFor(app, L"SUB");
-        check(sup && sub, "both script runs survive the surrounding Markdown");
-        if (sup && sub) {
-            check(closeEnough(sup->layout->GetFontSize(), smallSize) && closeEnough(sub->layout->GetFontSize(), smallSize),
+        check(base && sup && sub, "both script runs survive the surrounding Markdown");
+        if (base && sup && sub) {
+            // Small in proportion to the text around it: a heading's
+            // scripts scale with the heading (#263)
+            const float around = base->layout->GetFontSize() * 0.68f;
+            check(closeEnough(sup->layout->GetFontSize(), around) && closeEnough(sub->layout->GetFontSize(), around),
                   "native heading, table, quote, list and nested runs use small text");
             check(baseline(*sub) > baseline(*sup), "subscript is lower than superscript");
+            check(baseline(*sup) < baseline(*base) && baseline(*sub) > baseline(*base),
+                  "scripts rise above and drop below the baseline of the text around them");
+            check(sup->pos.y >= sup->bounds.top - 0.01f, "a superscript stays inside its line");
         }
     }
     layout(app, "base^SUP^ base~SUB~\n");

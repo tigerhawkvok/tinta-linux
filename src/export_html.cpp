@@ -17,6 +17,7 @@
 #include "render.h"
 #include "utils.h"
 
+#include <functional>
 #include <commdlg.h>
 #include <cmath>
 #include <fstream>
@@ -1055,10 +1056,13 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
             src = std::string("data:") + mime + ";base64," + base64(data);
         }
     }
+    // Nested spans (<sub>, emphasis) in the alt text keep their words
     std::string alt;
-    for (const auto& child : elem->children) {
-        if (child->type == ElementType::Text) alt += child->text;
-    }
+    std::function<void(const ElementPtr&)> gather = [&](const ElementPtr& e) {
+        if (e->type == ElementType::Text) alt += e->text;
+        for (const auto& child : e->children) gather(child);
+    };
+    for (const auto& child : elem->children) gather(child);
     ctx.out += "<img src=\"" + htmlEscape(src) + "\" alt=\"" +
                htmlEscape(alt) + "\"/>";
 }
@@ -1273,6 +1277,11 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             ctx.out += "<del>";
             walkChildren(ctx, elem);
             ctx.out += "</del>";
+            break;
+        case ElementType::Underline:
+            ctx.out += "<ins>";
+            walkChildren(ctx, elem);
+            ctx.out += "</ins>";
             break;
         case ElementType::Superscript:
             ctx.out += "<sup>";

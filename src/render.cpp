@@ -491,47 +491,6 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     float spaceWidth = getSpaceWidth(app, baseFormat);
 
 
-    std::string inlineAnchor;
-    auto addLinkSegment = [&](float lineStartX, float lineEndX, float lineY,
-                              const std::string& linkUrl, D2D1_COLOR_F color) {
-        if (lineEndX <= lineStartX) return;
-        if (!inlineAnchor.empty()) app.footnoteAnchors.emplace(inlineAnchor, lineY);
-        bool refLive = linkUrl.rfind("fileref-ok:", 0) == 0;
-        bool refMissing = linkUrl.rfind("fileref-missing:", 0) == 0;
-        float underlineY = lineY + mathTextOffset + normalLineHeight - 2;
-        if (refLive || refMissing) {
-            // .md references underline dashed; a missing target keeps a
-            // faint ghost of the same treatment, and its click offers to
-            // create the file (#127)
-            D2D1_COLOR_F dashColor = color;
-            dashColor.a *= 0.55f;
-            float dash = normalLineHeight * 0.16f;
-            float gap = normalLineHeight * 0.12f;
-            for (float sx = lineStartX; sx < lineEndX; sx += dash + gap) {
-                float ex = std::min(sx + dash, lineEndX);
-                app.layoutLines.push_back({D2D1::Point2F(sx, underlineY),
-                                           D2D1::Point2F(ex, underlineY),
-                                           dashColor, 1.0f});
-            }
-        } else if (inlineAnchor.empty()) {
-            app.layoutLines.push_back({D2D1::Point2F(lineStartX, underlineY),
-                                       D2D1::Point2F(lineEndX, underlineY),
-                                       color, 1.0f});
-        }
-        App::LinkRect lr;
-        lr.bounds = D2D1::RectF(lineStartX, lineY, lineEndX, lineY + lineHeight);
-        lr.url = linkUrl;
-        app.linkRects.push_back(lr);
-    };
-
-    InlineStyle rootStyle;
-    rootStyle.format = baseFormat;
-    rootStyle.color = baseColor;
-    rootStyle.linkUrl = baseLinkUrl;
-    rootStyle.isLink = !baseLinkUrl.empty();
-    std::vector<StyledRun> runs;
-    flattenInline(app, elements, rootStyle, lineHeight, runs);
-
     // First-line baseline and height of a format's layouts. Runs are
     // top-aligned at the line, so a run in another face (inline code) sits
     // on the paragraph's baseline only when shifted by the difference (#262).
@@ -568,6 +527,71 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         float baseline = layoutBaseline(layout);
         return baseline >= 0.0f ? baseline : baselineOf(format);
     };
+
+    // <ins> and <u> text (#263): a rule just under the baseline of the text
+    // the underline began in, and never above the run's own, so a subscript
+    // inside stays clear of it. The spaces between two underlined runs on
+    // one line (<ins>a **b** c</ins>) carry the rule across.
+    float underlineEndX = -1.0f;
+    float underlineLineY = 0.0f;
+    auto addUnderline = [&](const InlineStyle& style, float lineStartX, float lineEndX,
+                            float lineY, float runBaselineY, D2D1_COLOR_F color) {
+        if (lineEndX <= lineStartX) return;
+        if (underlineEndX >= 0.0f && underlineLineY == lineY && underlineEndX < lineStartX) {
+            lineStartX = underlineEndX;
+        }
+        IDWriteTextFormat* origin = style.underlineFormat ? style.underlineFormat : baseFormat;
+        float originBaseline = lineY + mathTextOffset + style.underlineYOffset + baselineOf(origin);
+        float baseline = std::max(originBaseline, runBaselineY);
+        float underlineY = baseline + std::max(1.0f, origin->GetFontSize() * 0.12f);
+        app.layoutLines.push_back({D2D1::Point2F(lineStartX, underlineY),
+                                   D2D1::Point2F(lineEndX, underlineY), color, 1.0f});
+        underlineEndX = lineEndX;
+        underlineLineY = lineY;
+    };
+
+    std::string inlineAnchor;
+    bool linkUnderInsertion = false;  // a link inside <ins> shares its rule
+    auto addLinkSegment = [&](float lineStartX, float lineEndX, float lineY,
+                              const std::string& linkUrl, D2D1_COLOR_F color) {
+        if (lineEndX <= lineStartX) return;
+        if (!inlineAnchor.empty()) app.footnoteAnchors.emplace(inlineAnchor, lineY);
+        bool refLive = linkUrl.rfind("fileref-ok:", 0) == 0;
+        bool refMissing = linkUrl.rfind("fileref-missing:", 0) == 0;
+        float underlineY = lineY + mathTextOffset + normalLineHeight - 2;
+        if (refLive || refMissing) {
+            // .md references underline dashed; a missing target keeps a
+            // faint ghost of the same treatment, and its click offers to
+            // create the file (#127)
+            D2D1_COLOR_F dashColor = color;
+            dashColor.a *= 0.55f;
+            float dash = normalLineHeight * 0.16f;
+            float gap = normalLineHeight * 0.12f;
+            for (float sx = lineStartX; sx < lineEndX; sx += dash + gap) {
+                float ex = std::min(sx + dash, lineEndX);
+                app.layoutLines.push_back({D2D1::Point2F(sx, underlineY),
+                                           D2D1::Point2F(ex, underlineY),
+                                           dashColor, 1.0f});
+            }
+        } else if (inlineAnchor.empty() && !linkUnderInsertion) {
+            app.layoutLines.push_back({D2D1::Point2F(lineStartX, underlineY),
+                                       D2D1::Point2F(lineEndX, underlineY),
+                                       color, 1.0f});
+        }
+        App::LinkRect lr;
+        lr.bounds = D2D1::RectF(lineStartX, lineY, lineEndX, lineY + lineHeight);
+        lr.url = linkUrl;
+        app.linkRects.push_back(lr);
+    };
+
+    InlineStyle rootStyle;
+    rootStyle.format = baseFormat;
+    rootStyle.color = baseColor;
+    rootStyle.linkUrl = baseLinkUrl;
+    rootStyle.isLink = !baseLinkUrl.empty();
+    std::vector<StyledRun> runs;
+    flattenInline(app, elements, rootStyle, lineHeight, runs);
+
     // A code chip hugs its glyphs' line box, padded by a fifth of the code
     // size, and stays inside the text line so cells never clip it (#262)
     auto codeChip = [&](float left, float right, float lineTop, float codeTop, IDWriteTextFormat* format) {
@@ -610,6 +634,13 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         bool isLink = run.style.isLink;
         bool hasBg = run.style.hasBg;
         bool hasStrike = run.style.hasStrike;
+        // A link inside <ins> is underlined once, by the insertion's rule;
+        // a .md reference keeps its dashed one alone
+        bool fileRef = isLink && (linkUrl.rfind("fileref-ok:", 0) == 0 ||
+                                  linkUrl.rfind("fileref-missing:", 0) == 0);
+        bool hasUnderline = run.style.hasUnderline && !fileRef;
+        linkUnderInsertion = hasUnderline;
+        if (!hasUnderline) underlineEndX = -1.0f;
         D2D1_COLOR_F bgColor = run.style.bgColor;
         float drawYOffset = run.style.drawYOffset + mathTextOffset;
         bool wrappedCode = false;
@@ -665,6 +696,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 noteDocSource(app, codeDocStart, text.length(), elem.get(), false, blockSourceHint);
                 app.docText += text;
                 if (isLink) addLinkSegment(x, x + textWidth, y, linkUrl, color);
+                if (hasUnderline) {
+                    addUnderline(run.style, x, x + textWidth, y, y + drawYOffset + baselineOf(textFormat),
+                                 color);
+                }
                 // Advance by the pill's own padding only: the surrounding text
                 // already carries the source's spacing, so a full space width
                 // here would double it and shove a following comma off the span
@@ -704,6 +739,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
                     app.layoutLines.push_back({D2D1::Point2F(x, strikeY),
                                                D2D1::Point2F(x + w, strikeY), color, 1.0f});
+                }
+                if (hasUnderline) {
+                    // On the text baseline, as under the words around it
+                    addUnderline(run.style, x, x + w, y, y + drawYOffset + textBaseline, color);
                 }
                 mathBoxRetain(app, box, x, boxTop, color);
                 if (isLink) addLinkSegment(x, x + w, y, linkUrl, color);
@@ -807,6 +846,11 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     D2D1_POINT_2F rubyPos = D2D1::Point2F(rubyPosX, y + mathTextOffset);
                     D2D1_RECT_F rubyBounds = D2D1::RectF(rubyPosX, y + mathTextOffset, rubyPosX + rubyWidth, y + mathTextOffset + rubyLineHeight);
                     addTextRun(app, std::move(rubyInfo), rubyPos, rubyBounds, rubyColor, 0, 0, false);
+                }
+
+                if (hasUnderline) {
+                    addUnderline(run.style, basePosX, basePosX + baseWidth, y,
+                                 baseY + std::max(0.0f, layoutBaseline(baseInfo.layout)), color);
                 }
 
                 // Draw base text (selectable)
@@ -921,6 +965,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 app.layoutLines.push_back({D2D1::Point2F(segX, strikeY),
                                            D2D1::Point2F(segX + segWidth, strikeY),
                                            color, 1.0f});
+            }
+            if (hasUnderline) {
+                addUnderline(run.style, segX, segX + segWidth, y, y + drawYOffset + baselineOf(format),
+                             color);
             }
             // A run that draws fallback glyphs (Chinese beside a Latin
             // font, emoji) gets a taller line ascent from DirectWrite; put

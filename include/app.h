@@ -437,6 +437,8 @@ struct App {
     IDWriteTextFormat* headingFormats[6] = {};
     // *Emphasis* inside a heading keeps the heading's size and face
     IDWriteTextFormat* headingItalicFormats[6] = {};
+    // Superscripts and subscripts in a heading, in proportion to it
+    IDWriteTextFormat* headingScriptFormats[6] = {};
 
     // Overlay text formats (cached)
     IDWriteTextFormat* searchTextFormat = nullptr;
@@ -1571,6 +1573,9 @@ struct App {
             if (fmt) { fmt->Release(); fmt = nullptr; }
         }
         for (auto& fmt : headingItalicFormats) {
+            if (fmt) { fmt->Release(); fmt = nullptr; }
+        }
+        for (auto& fmt : headingScriptFormats) {
             if (fmt) { fmt->Release(); fmt = nullptr; }
         }
         if (bodyTypography) { bodyTypography->Release(); bodyTypography = nullptr; }
