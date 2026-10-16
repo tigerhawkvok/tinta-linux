@@ -52,9 +52,26 @@ Documents point into the output directory. 3/3 pass:
   "Permission denied". A desktop session has `~/Documents`. The check
   creates one.
 
+## Live on KDE Plasma Wayland (2026-10-16)
+
+- **Outside a sandbox, GTK took the print portal anyway, and KDE's portal
+  failed** ("Operation failed", with no dialog shown).
+  - Fix: unsandboxed builds use GTK's own dialog and a `GtkPrintJob` over
+    CUPS (`printWithUnixDialog`).
+  - Live, it opened with the exported PDF ready (Philip's CUPS printer is
+    listed). Esc cancelled it and removed the temporary file. Nothing was
+    printed: the check only ever cancels.
+- **In the Flatpak the portal is the only way out, and it failed the same
+  way.** `dbus-monitor` showed why: given no setup, GTK calls the portal's
+  `Print` directly without `PreparePrint`, and KDE's portal answers 2
+  (error) within a millisecond. The Flatpak path now calls
+  `gtk_print_dialog_setup` first (PreparePrint shows KDE's dialog), then
+  prints with that setup.
+
 ## Not checked
 
-- A physical printer (CUPS), and the print portal: KDE's dialog in Philip's
-  session, or the Flatpak.
+- Printing on paper: every check cancels or prints to a file. The CUPS
+  dialog and the Flatpak's portal dialog were both opened live and
+  cancelled.
 - A Tinta process killed while its dialog is open leaves its temporary PDF
   behind.

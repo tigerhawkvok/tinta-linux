@@ -69,14 +69,43 @@ session and Xvfb, with XTest input and XDND. 5/5 checks pass:
 - ctest 57/57. The Windows exe builds; its tab drag is unchanged, and the
   new message is a no-op there.
 
+## Live on KDE Plasma Wayland (2026-10-16)
+
+Philip let me drive his session while he was away.
+`tests/linux_render/desktop_tab_drag_check.py` uses uinput input, KWin
+scripting and spectacle. It guards every press so it lands in the active
+Tinta window, and it kills every Tinta it started. 6/6 passed:
+
+| Check | Result |
+|---|---|
+| backend | GdkWaylandDisplay |
+| moved | beta, dropped on another window's strip, opens there |
+| torn-off | released over another application: a new window |
+| own-window | released over its own document: a new window |
+| returned | dropped back on its own strip: nothing moves |
+| print-dialog | see `linux-print-validation.md` |
+
+The first live runs found three things the Xvfb runs couldn't:
+
+- **A tab could vanish into another application.** Creality Print, which
+  is Chromium-based, accepted the drop and reported a move, so Tinta closed
+  the tab, and it opened nowhere.
+  - Fix: the payload carries a receipt path in `XDG_RUNTIME_DIR`, and only
+    a Tinta window that took the tab creates the file. The source treats the
+    tab as moved only with the receipt; without one, the tab tears off.
+  - The source polls for the receipt for up to 2 s after the drop is
+    performed. It doesn't wait for the other application's "finished",
+    which Creality Print sent many seconds late.
+- **No tear-off on Wayland.** GDK reports a drop on nothing as
+  `GDK_DRAG_CANCEL_ERROR`, not `NO_TARGET`. That reason now tears off,
+  unless this process saw Esc during the drag.
+- **Esc can't be told apart.** On KWin the source gets no key events during
+  a drag, so Esc and a drop on nothing arrive alike, and the tab tears off.
+  It is not lost: dropping the new window's tab back moves it home. Under
+  XDND, where the source does see keys, Esc is swallowed and keeps the tab.
+
 ## Not checked
 
-- **Wayland (KDE Plasma, Philip's desktop).** The code is backend-neutral
-  GDK/GTK (`gdk_drag_begin`, `GtkDropTargetAsync`, `GtkDragIcon`), but I
-  didn't drive his live session: a drag moves his pointer across windows
-  and spawns new ones. To try it: open two files in tabs, pull one down out
-  of the strip, and drop it on another Tinta window, on the desktop, back on
-  its strip, or press Esc mid-drag.
 - **Esc during a drag.** Under Xvfb with no window manager, an XTest Esc
   went to the focused window (where Tinta's Esc closes it), not to the drag.
   On a real desktop the drag protocol owns Esc, and the CANCELLED path

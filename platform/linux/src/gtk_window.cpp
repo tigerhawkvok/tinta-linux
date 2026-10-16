@@ -6,6 +6,7 @@
 
 #include <glib/gstdio.h>
 #include <gtk/gtk.h>
+#include <gtk/gtkunixprint.h>
 
 #include <algorithm>
 #include <cmath>
@@ -250,7 +251,10 @@ void left(GtkEventControllerMotion*, gpointer data) {
 }
 
 // ---- Tab drags (tintaBeginTabDrag) ----------------------------------------------------------------
-// The payload: the tab's path (UTF-8), a newline, the source process id
+// The payload: the tab's path (UTF-8), a newline, a receipt path. A Tinta
+// window that takes the tab creates the receipt; only then has the tab
+// moved. Other applications may accept any drop (Chromium-based ones
+// report a move), and a tab must not vanish into them.
 const char kTabMime[] = "application/x-tinta-tab";
 
 struct OutgoingTabDrag {
@@ -260,6 +264,8 @@ struct OutgoingTabDrag {
     int stripHeight = 0;    // logical px: the source window's strip
     bool performed = false;
     bool returned = false;  // dropped back on its own strip
+    bool escaped = false;   // Esc pressed while it ran
+    std::string receipt;    // created by the Tinta window that takes the tab
 } g_tabDrag;
 
 void cairoColour(cairo_t* cr, COLORREF c, double alpha) {
@@ -313,6 +319,7 @@ GdkTexture* tabCardTexture(const TintaTabDragCard& card, double scale) {
 
 void tabDragFinished(int outcome) {
     if (!g_tabDrag.drag) return;
+    if (!g_tabDrag.receipt.empty()) g_remove(g_tabDrag.receipt.c_str());
     if (std::find(g_natives.begin(), g_natives.end(), g_tabDrag.source) != g_natives.end()) {
         postFromUi(g_tabDrag.source->hwnd, g_tabDrag.message, static_cast<WPARAM>(outcome), 0);
     }
@@ -320,12 +327,50 @@ void tabDragFinished(int outcome) {
     g_tabDrag = OutgoingTabDrag{};
 }
 
-void tabDragPerformed(GdkDrag*, gpointer) { g_tabDrag.performed = true; }
+// The drop was taken. A Tinta window writes its receipt within moments;
+// an application that swallows any drop may keep the drag open for many
+// seconds before it finishes, so the outcome does not wait for it
+void tabDragPerformed(GdkDrag*, gpointer) {
+    g_tabDrag.performed = true;
+    if (g_tabDrag.returned) return;
+    struct Poll {
+        GdkDrag* drag;
+        int ticks = 0;
+    };
+    g_timeout_add(100, +[](gpointer data) -> gboolean {
+        auto* poll = static_cast<Poll*>(data);
+        if (g_tabDrag.drag != poll->drag) {  // already decided
+            delete poll;
+            return G_SOURCE_REMOVE;
+        }
+        bool taken = g_file_test(g_tabDrag.receipt.c_str(), G_FILE_TEST_EXISTS);
+        if (taken || ++poll->ticks >= 20) {
+            tabDragFinished(taken ? TINTA_TAB_DRAG_MOVED : TINTA_TAB_DRAG_NO_TARGET);
+            delete poll;
+            return G_SOURCE_REMOVE;
+        }
+        return G_SOURCE_CONTINUE;
+    }, new Poll{g_tabDrag.drag});
+}
 
 void tabDragDone(GdkDrag* drag, gpointer) {
+    if (g_tabDrag.drag != drag) {  // decided already (tabDragPerformed)
+        gdk_drag_drop_done(drag, TRUE);
+        return;
+    }
+    if (g_getenv("TINTA_TRACE_GTK")) {
+        std::fprintf(stderr, "tinta-gtk: tab drag finished, performed %d returned %d\n", g_tabDrag.performed,
+                     g_tabDrag.returned);
+    }
     gdk_drag_drop_done(drag, TRUE);
-    bool moved = g_tabDrag.performed && !g_tabDrag.returned;
-    tabDragFinished(moved ? TINTA_TAB_DRAG_MOVED : TINTA_TAB_DRAG_CANCELLED);
+    // Taken by a Tinta window only with its receipt; dropped on any other
+    // application, the tab tears off as if released over nothing
+    bool taken = g_tabDrag.performed && !g_tabDrag.returned &&
+                 g_file_test(g_tabDrag.receipt.c_str(), G_FILE_TEST_EXISTS);
+    int outcome = g_tabDrag.returned ? TINTA_TAB_DRAG_CANCELLED
+                  : taken            ? TINTA_TAB_DRAG_MOVED
+                                     : TINTA_TAB_DRAG_NO_TARGET;
+    tabDragFinished(outcome);
 }
 
 bool ownTabDrag(GdkDrop* drop, Native* n) {
@@ -333,8 +378,12 @@ bool ownTabDrag(GdkDrop* drop, Native* n) {
 }
 
 void tabDragCancelled(GdkDrag* drag, GdkDragCancelReason reason, gpointer) {
-    // Nowhere to land is a tear-off, so no animation back to the strip
-    bool tearOff = reason == GDK_DRAG_CANCEL_NO_TARGET;
+    if (g_tabDrag.drag != drag) return;  // decided already
+    if (g_getenv("TINTA_TRACE_GTK")) std::fprintf(stderr, "tinta-gtk: tab drag cancelled, reason %d\n", reason);
+    // Nowhere to land is a tear-off, so no animation back to the strip.
+    // Wayland reports a drop on nothing as an error, as it does Esc: only an
+    // Esc seen here keeps the tab
+    bool tearOff = reason == GDK_DRAG_CANCEL_NO_TARGET || (reason == GDK_DRAG_CANCEL_ERROR && !g_tabDrag.escaped);
     gdk_drag_drop_done(drag, tearOff ? TRUE : FALSE);
     tabDragFinished(tearOff ? TINTA_TAB_DRAG_NO_TARGET : TINTA_TAB_DRAG_CANCELLED);
 }
@@ -361,7 +410,9 @@ struct TabDropRead {
 // The payload has arrived: hand the tab to the window
 void tabDropDeliver(TabDropRead* read, const std::string& payload) {
     bool taken = false;
-    std::string path = payload.substr(0, payload.find('\n'));
+    size_t newline = payload.find('\n');
+    std::string path = payload.substr(0, newline);
+    std::string receipt = newline == std::string::npos ? std::string() : payload.substr(newline + 1);
     if (!path.empty() && std::find(g_natives.begin(), g_natives.end(), read->n) != g_natives.end()) {
         // As tabSendDrop does on Windows: the point, in screen pixels, then
         // the path and its NUL
@@ -377,7 +428,11 @@ void tabDropDeliver(TabDropRead* read, const std::string& payload) {
         copy.cbData = static_cast<DWORD>(bytes.size());
         copy.lpData = bytes.data();
         taken = SendMessageW(read->n->hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&copy)) != FALSE;
-        if (taken) gtk_window_present(read->n->window);
+        if (taken) {
+            // The source closes its tab only on this receipt
+            if (receipt.rfind(g_get_user_runtime_dir(), 0) == 0) g_file_set_contents(receipt.c_str(), "", 0, nullptr);
+            gtk_window_present(read->n->window);
+        }
     }
     gdk_drop_finish(read->drop, taken ? GDK_ACTION_MOVE : static_cast<GdkDragAction>(0));
     g_object_unref(read->drop);
@@ -559,6 +614,12 @@ gboolean keyPressed(GtkEventControllerKey* controller, guint keyval, guint keyco
                     gpointer data) {
     auto* n = static_cast<Native*>(data);
     if (g_modal) return FALSE;
+    // Esc during a tab drag keeps the tab (and must not reach Tinta, where
+    // Esc in the reader closes the window)
+    if (g_tabDrag.drag && keyval == GDK_KEY_Escape) {
+        g_tabDrag.escaped = true;
+        return TRUE;
+    }
     syncModifiers(state);
     UINT vk = virtualKey(baseKeyval(controller, keycode, keyval));
     if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) tintaSetKeyState(static_cast<int>(vk), true);
@@ -766,35 +827,105 @@ void watchColorScheme() {
 
 }  // namespace
 
-bool printPdf(HWND owner, const std::string& path) {
-#if GTK_CHECK_VERSION(4, 14, 0)
-    Native* n = nativeOf(owner);
-    GtkPrintDialog* dialog = gtk_print_dialog_new();
-    gtk_print_dialog_set_title(dialog, "Print");
-    GFile* file = g_file_new_for_path(path.c_str());
-    auto* pending = new std::string(path);
-    gtk_print_dialog_print_file(
-        dialog, n ? n->window : nullptr, nullptr, file, nullptr,
-        [](GObject* source, GAsyncResult* result, gpointer data) {
-            std::unique_ptr<std::string> printed(static_cast<std::string*>(data));
+namespace {
+
+void tracePrint(const char* what, const GError* error) {
+    if (g_getenv("TINTA_TRACE_GTK")) {
+        std::fprintf(stderr, "tinta-gtk: print %s%s%s\n", what, error ? ": " : "", error ? error->message : "");
+    }
+}
+
+// Outside a sandbox: GTK's own dialog and a print job over CUPS. KDE's print
+// portal fails for an unsandboxed app ("Operation failed"), and GtkPrintDialog
+// takes the portal whenever one runs.
+void printWithUnixDialog(Native* n, const std::string& path) {
+    GtkWidget* dialog = gtk_print_unix_dialog_new("Print", n ? n->window : nullptr);
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    g_signal_connect(dialog, "response", G_CALLBACK(+[](GtkDialog* d, int response, gpointer data) {
+        std::unique_ptr<std::string> file(static_cast<std::string*>(data));
+        auto* chooser = GTK_PRINT_UNIX_DIALOG(d);
+        GtkPrinter* printer = response == GTK_RESPONSE_OK ? gtk_print_unix_dialog_get_selected_printer(chooser) : nullptr;
+        if (printer && gtk_printer_accepts_pdf(printer)) {
+            GtkPrintSettings* settings = gtk_print_unix_dialog_get_settings(chooser);
+            GtkPrintJob* job = gtk_print_job_new("Tinta", printer, settings, gtk_print_unix_dialog_get_page_setup(chooser));
+            g_object_unref(settings);
             GError* error = nullptr;
-            bool ok = gtk_print_dialog_print_file_finish(GTK_PRINT_DIALOG(source), result, &error);
-            if (g_getenv("TINTA_TRACE_GTK")) {
-                std::fprintf(stderr, "tinta-gtk: print %s%s%s\n", ok ? "sent" : "not sent",
-                             error ? ": " : "", error ? error->message : "");
+            if (gtk_print_job_set_source_file(job, file->c_str(), &error)) {
+                gtk_print_job_send(
+                    job,
+                    +[](GtkPrintJob*, gpointer done, const GError* sendError) {
+                        std::unique_ptr<std::string> sent(static_cast<std::string*>(done));
+                        tracePrint(sendError ? "not sent" : "sent", sendError);
+                        g_remove(sent->c_str());
+                    },
+                    file.release(), nullptr);
+            } else {
+                tracePrint("not sent", error);
+                g_error_free(error);
             }
-            if (error) g_error_free(error);
-            g_remove(printed->c_str());
-            g_object_unref(source);
-        },
-        pending);
-    g_object_unref(file);
-    return true;
-#else
-    (void)owner;
-    (void)path;
-    return false;
+            g_object_unref(job);
+        } else {
+            tracePrint(printer ? "not sent: the printer takes no PDF" : "not sent: cancelled", nullptr);
+        }
+        if (file) g_remove(file->c_str());
+        gtk_window_destroy(GTK_WINDOW(d));
+    }), new std::string(path));
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+}  // namespace
+
+bool printPdf(HWND owner, const std::string& path) {
+    Native* n = nativeOf(owner);
+    // In a sandbox (Flatpak): the print portal, the only way to a printer.
+    // Set up first (PreparePrint shows the portal's dialog), then print with
+    // that setup: given no setup, GTK calls the portal's Print directly,
+    // which KDE's portal refuses at once ("Operation failed")
+    if (g_file_test("/.flatpak-info", G_FILE_TEST_EXISTS)) {
+#if GTK_CHECK_VERSION(4, 14, 0)
+        struct Job {
+            std::string path;
+            GtkWindow* parent;
+        };
+        GtkPrintDialog* dialog = gtk_print_dialog_new();
+        gtk_print_dialog_set_title(dialog, "Print");
+        gtk_print_dialog_setup(
+            dialog, n ? n->window : nullptr, nullptr,
+            [](GObject* source, GAsyncResult* result, gpointer data) {
+                auto* job = static_cast<Job*>(data);
+                auto* d = GTK_PRINT_DIALOG(source);
+                GError* error = nullptr;
+                GtkPrintSetup* setup = gtk_print_dialog_setup_finish(d, result, &error);
+                if (!setup) {
+                    tracePrint("not sent", error);
+                    if (error) g_error_free(error);
+                    g_remove(job->path.c_str());
+                    delete job;
+                    g_object_unref(d);
+                    return;
+                }
+                GFile* file = g_file_new_for_path(job->path.c_str());
+                gtk_print_dialog_print_file(
+                    d, job->parent, setup, file, nullptr,
+                    [](GObject* src, GAsyncResult* res, gpointer data2) {
+                        std::unique_ptr<Job> printed(static_cast<Job*>(data2));
+                        GError* printError = nullptr;
+                        bool ok = gtk_print_dialog_print_file_finish(GTK_PRINT_DIALOG(src), res, &printError);
+                        tracePrint(ok ? "sent" : "not sent", printError);
+                        if (printError) g_error_free(printError);
+                        g_remove(printed->path.c_str());
+                        g_object_unref(src);
+                    },
+                    job);
+                g_object_unref(file);
+                gtk_print_setup_unref(setup);
+            },
+            new Job{path, n ? n->window : nullptr});
+        return true;
 #endif
+    }
+    printWithUnixDialog(n, path);
+    return true;
 }
 
 bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& card, int hotX, int hotY,
@@ -805,7 +936,11 @@ bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& ca
     GdkSeat* seat = gdk_display_get_default_seat(gtk_widget_get_display(n->area));
     GdkDevice* pointer = seat ? gdk_seat_get_pointer(seat) : nullptr;
     if (!surface || !pointer) return false;
-    std::string payload = path + "\n" + std::to_string(getpid());
+    static int drags = 0;
+    std::string receipt = std::string(g_get_user_runtime_dir()) + "/tinta-tab-" + std::to_string(getpid()) + "-" +
+                          std::to_string(++drags);
+    g_remove(receipt.c_str());
+    std::string payload = path + "\n" + receipt;
     GBytes* bytes = g_bytes_new(payload.data(), payload.size());
     GdkContentProvider* content = gdk_content_provider_new_for_bytes(kTabMime, bytes);
     g_bytes_unref(bytes);
@@ -814,7 +949,7 @@ bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& ca
     if (!drag) return false;
     // The press now belongs to the drag: no release comes back to us
     n->buttons = 0;
-    g_tabDrag = OutgoingTabDrag{drag, n, doneMessage, card.stripHeight, false, false};
+    g_tabDrag = OutgoingTabDrag{drag, n, doneMessage, card.stripHeight, false, false, false, receipt};
     GdkTexture* texture = tabCardTexture(card, surfaceScale(n));
     GtkWidget* picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(texture));
     g_object_unref(texture);

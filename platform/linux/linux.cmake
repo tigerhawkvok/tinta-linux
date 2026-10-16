@@ -15,7 +15,7 @@ pkg_check_modules(PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 pkg_check_modules(RSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 # The window layer (gtk_window.cpp); headless runs never initialise it
-pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.10)
+pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.10 gtk4-unix-print)
 # Remote images (URLDownloadToCacheFileW); without it they show as links
 pkg_check_modules(CURL IMPORTED_TARGET libcurl)
 

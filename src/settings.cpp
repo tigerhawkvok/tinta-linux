@@ -602,6 +602,11 @@ void openDefaultAppsSettings() {
 
 void askAndRegisterFileAssociation(Settings& settings) {
     int lang = settingsLanguageIndex(settings);
+#ifndef _WIN32
+    // Flatpak: installing exported the desktop entry and the file types, and
+    // registering from inside the sandbox would only write into the sandbox
+    if (GetFileAttributesW(L"/.flatpak-info") != INVALID_FILE_ATTRIBUTES) return;
+#endif
     if (isRunningPackaged()) {
         // Store installs: the package manifest already registers the file
         // types, so only the "make default" choice is missing. Ask once per

@@ -44,12 +44,26 @@ vendored (for example with `flatpak-cargo-generator`), which is not done.
     and the Mermaid diagrams are drawn by merman with measured labels
     (screenshot).
 
+## Live on KDE Plasma Wayland (2026-10-16)
+
+The bundle was installed for the user (`flatpak install --user --bundle`)
+and run with `flatpak run`. Afterwards it was uninstalled with
+`--delete-data`.
+
+- **Wayland:** it maps on Wayland (`GdkWaylandDisplay`) in 1.8 s.
+- **First-run prompt removed.** The first run met the "set Tinta as the
+  default viewer" prompt. A Flatpak install already exports the desktop
+  entry and the file types, and registering from the sandbox writes only
+  into it, so the prompt now never shows in a Flatpak (`/.flatpak-info`).
+  The rebuilt bundle opened straight to the document.
+- **Print through the portal:** Ctrl+P, then Enter, opened KDE's portal
+  dialog (`org.freedesktop.impl.portal.desktop.kde`, "Print"). Esc
+  dismissed it, and the temporary PDF was removed. That needed the setup-
+  first fix in `linux-print-validation.md`.
+
 ## Not checked
 
-- Installing the bundle (`flatpak install --bundle`) and running it with
-  `flatpak run` on Philip's KDE Wayland session. The portals (file dialogs,
-  print, colour scheme) and the per-app config in
-  `~/.var/app/io.github.tigerhawkvok.Tinta` are untested.
+- Printing to a physical printer from the Flatpak.
 - Single instance between two sandboxed instances.
 - A Flathub submission: it would need vendored sources and a review.
 
