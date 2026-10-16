@@ -4,6 +4,7 @@
 // queue as Windows would; the GLib main loop runs inside GetMessage.
 #include "window_internal.h"
 
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -763,6 +765,37 @@ void watchColorScheme() {
 }
 
 }  // namespace
+
+bool printPdf(HWND owner, const std::string& path) {
+#if GTK_CHECK_VERSION(4, 14, 0)
+    Native* n = nativeOf(owner);
+    GtkPrintDialog* dialog = gtk_print_dialog_new();
+    gtk_print_dialog_set_title(dialog, "Print");
+    GFile* file = g_file_new_for_path(path.c_str());
+    auto* pending = new std::string(path);
+    gtk_print_dialog_print_file(
+        dialog, n ? n->window : nullptr, nullptr, file, nullptr,
+        [](GObject* source, GAsyncResult* result, gpointer data) {
+            std::unique_ptr<std::string> printed(static_cast<std::string*>(data));
+            GError* error = nullptr;
+            bool ok = gtk_print_dialog_print_file_finish(GTK_PRINT_DIALOG(source), result, &error);
+            if (g_getenv("TINTA_TRACE_GTK")) {
+                std::fprintf(stderr, "tinta-gtk: print %s%s%s\n", ok ? "sent" : "not sent",
+                             error ? ": " : "", error ? error->message : "");
+            }
+            if (error) g_error_free(error);
+            g_remove(printed->c_str());
+            g_object_unref(source);
+        },
+        pending);
+    g_object_unref(file);
+    return true;
+#else
+    (void)owner;
+    (void)path;
+    return false;
+#endif
+}
 
 bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& card, int hotX, int hotY,
                   UINT doneMessage) {

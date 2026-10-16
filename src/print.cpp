@@ -4,6 +4,7 @@
 #include "d2d_init.h"
 #include "document.h"
 #include "editor.h"
+#include "export.h"
 #include "settings.h"
 #include "utils.h"
 
@@ -581,6 +582,21 @@ int renderPages(App& app, const PageGeometry& geo, EmitFn emitPage) {
 } // namespace
 
 bool printDocument(App& app) {
+#ifndef _WIN32
+    // Linux: the system print dialog prints the PDF Tinta exports (at the
+    // preview's paper size), so print and PDF come out of the same pages
+    wchar_t tempDir[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tempDir);
+    static int jobs = 0;
+    std::wstring path = std::wstring(tempDir) + L"tinta-print-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                        std::to_wstring(++jobs) + L".pdf";
+    if (!exportPdfFile(app, path)) return false;
+    if (!tintaPrintPdf(app.hwnd, toUtf8(path).c_str())) {
+        DeleteFileW(path.c_str());
+        return false;
+    }
+    return true;
+#endif
     // Standard printer picker; PD_RETURNDC so the paper size can be read
     PRINTDLGW pd{};
     pd.lStructSize = sizeof(pd);

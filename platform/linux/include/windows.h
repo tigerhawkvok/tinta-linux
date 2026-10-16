@@ -260,4 +260,10 @@ enum { TINTA_TAB_DRAG_MOVED = 1, TINTA_TAB_DRAG_NO_TARGET = 2, TINTA_TAB_DRAG_CA
 bool tintaBeginTabDrag(HWND hwnd, const char* path, const TintaTabDragCard& card, int hotX, int hotY,
                        UINT doneMessage);
 
+// Printing: the system print dialog (GtkPrintDialog; the print portal in a
+// sandbox) prints the PDF at `path` (UTF-8), which Tinta exported at the
+// preview's paper size. Returns at once; the file is deleted when the job
+// has it or the dialog is cancelled. False when no dialog could open.
+bool tintaPrintPdf(HWND owner, const char* path);
+
 #endif  // TINTA_LINUX_WINDOWS_H

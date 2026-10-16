@@ -184,6 +184,12 @@ if(BUILD_TESTING)
                 COMMAND ${TINTA_GUI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/tab_drag_check.py
                     $<TARGET_FILE:tinta> --out ${CMAKE_BINARY_DIR}/linux-render/tab-drag)
             set_tests_properties(linux_tab_drag PROPERTIES TIMEOUT 180)
+            # Print: the GTK dialog prints the exported PDF (Print to File)
+            add_test(NAME linux_print
+                COMMAND ${TINTA_GUI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/print_check.py
+                    $<TARGET_FILE:tinta> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/paste-image.md
+                    --out ${CMAKE_BINARY_DIR}/linux-render/print)
+            set_tests_properties(linux_print PROPERTIES TIMEOUT 180)
         endif()
     endif()
 

@@ -1112,3 +1112,7 @@ bool tintaBeginTabDrag(HWND hwnd, const char* path, const TintaTabDragCard& card
     return tinta::gtk::active() && path && *path &&
            tinta::gtk::beginTabDrag(hwnd, path, card, hotX, hotY, doneMessage);
 }
+
+bool tintaPrintPdf(HWND owner, const char* path) {
+    return tinta::gtk::active() && path && *path && tinta::gtk::printPdf(owner, path);
+}

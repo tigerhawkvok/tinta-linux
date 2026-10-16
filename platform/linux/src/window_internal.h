@@ -76,6 +76,8 @@ void publishClipboardImage(const std::string& png);
 bool readClipboardText(std::wstring& text);
 bool clipboardHasText();
 bool clipboardHasImage();
+// tintaPrintPdf (windows.h)
+bool printPdf(HWND owner, const std::string& path);
 // tintaBeginTabDrag (windows.h)
 bool beginTabDrag(HWND hwnd, const std::string& path, const TintaTabDragCard& card, int hotX, int hotY,
                   UINT doneMessage);
