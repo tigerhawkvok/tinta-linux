@@ -379,16 +379,16 @@ void writeThemesIni() {
     file << "; User themes. Colors are RRGGBB hex. Restart not required for\n";
     file << "; themes saved from the editor; hand edits load at next launch.\n";
     file << "; Optional inlinecode overrides code for inline spans only.\n";
+    file << "; An empty headingfont= sets headings in font=.\n";
     for (const auto& ct : g_customThemes) {
         const D2DTheme& t = ct->theme;
         file << "\n[theme]\n";
         file << "name=" << wideToUtf8Theme(ct->name) << "\n";
         file << "dark=" << (t.isDark ? 1 : 0) << "\n";
         file << "font=" << wideToUtf8Theme(ct->fontFamily) << "\n";
-        if (!ct->headingFontFamily.empty()) {
-            file << "headingfont=" << wideToUtf8Theme(ct->headingFontFamily)
-                 << "\n";
-        }
+        // Always written, empty while headings use font=, so the key is
+        // there to fill in by hand (#256)
+        file << "headingfont=" << wideToUtf8Theme(ct->headingFontFamily) << "\n";
         file << "codefont=" << wideToUtf8Theme(ct->codeFontFamily) << "\n";
         file << "background=" << colorToHex(t.background) << "\n";
         file << "text=" << colorToHex(t.text) << "\n";
@@ -414,6 +414,29 @@ void writeThemesIni() {
 }
 
 } // namespace
+
+const char* themesIniTemplate() {
+    return "; Custom themes: [theme] sections, RRGGBB colors. For example:\n"
+           ";\n"
+           "; [theme]\n"
+           "; name=My theme\n"
+           "; dark=0\n"
+           "; font=Segoe UI\n"
+           "; headingfont=Georgia      (empty: headings use font=)\n"
+           "; codefont=Cascadia Mono\n"
+           "; background=F7FAFC\n"
+           "; text=2D3748\n"
+           "; heading=1A365D           (h1= to h6= set single levels)\n"
+           "; link=2B6CB0\n"
+           "; code=285E61              (inlinecode= for inline spans only)\n"
+           "; codebackground=EBF8FF\n"
+           "; blockquoteborder=A0C4E8\n"
+           "; accent=2B6CB0\n"
+           "; highlightbackground=FEF3C7\n"
+           "; highlighttext=2D3748\n"
+           "; syntaxkeyword=, syntaxstring=, syntaxcomment=, syntaxnumber=,\n"
+           "; syntaxfunction=, syntaxtype=, syntaxcontrolflow= color code blocks\n";
+}
 
 int themeCount() {
     return THEME_COUNT + (int)g_customThemes.size();

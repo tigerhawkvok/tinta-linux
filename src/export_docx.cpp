@@ -1341,20 +1341,23 @@ std::string stylesXml(const DocxCtx& ctx) {
     // Viewer pixel sizes: body 16, code 14, headings 32/26/22/18/16/14.
     // Word half-points are px * 1.5 at 96dpi.
     const int headingSizes[6] = {48, 39, 33, 27, 24, 21};
+    const std::string bodyRun = rFontsXml(ctx.bodyFont, ctx.bodyEastAsia) +
+        "<w:color w:val=\"" + ctx.textHex + "\"/>"
+        "<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>";
+    // The Normal style repeats the defaults: Word in Chinese otherwise sets
+    // CJK text in its own East Asian default, DengXian, rather than the
+    // theme's face (#256)
     std::string xml =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<w:styles "
         "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/"
         "main\">"
-        "<w:docDefaults><w:rPrDefault><w:rPr>" +
-        rFontsXml(ctx.bodyFont, ctx.bodyEastAsia) +
-        "<w:color w:val=\"" + ctx.textHex + "\"/>"
-        "<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>"
+        "<w:docDefaults><w:rPrDefault><w:rPr>" + bodyRun +
         "</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>"
         "<w:spacing w:after=\"160\" w:line=\"312\" w:lineRule=\"auto\"/>"
         "</w:pPr></w:pPrDefault></w:docDefaults>"
         "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
-        "<w:name w:val=\"Normal\"/></w:style>";
+        "<w:name w:val=\"Normal\"/><w:rPr>" + bodyRun + "</w:rPr></w:style>";
     for (int i = 0; i < 6; i++) {
         std::string n = std::to_string(i + 1);
         xml += "<w:style w:type=\"paragraph\" w:styleId=\"Heading" + n +

@@ -560,6 +560,9 @@ static void themeEditorAdoptBase(App& app, int baseIndex) {
     const D2DTheme& bt = themeAt(baseIndex);
     app.themeEditorTheme = bt;
     app.themeEditorFont = bt.fontFamily;
+    app.themeEditorHeadingFont =
+        (bt.headingFontFamily && bt.headingFontFamily[0]) ? bt.headingFontFamily : L"";
+    app.themeEditorCodeFont = bt.codeFontFamily ? bt.codeFontFamily : L"";
     for (int i = 0; i < 6; i++) {
         app.themeEditorHex[i] = colorToHexW(*themeEditorSlot(app, i));
     }
@@ -578,7 +581,7 @@ static void openThemesIniFile() {
     p = p.substr(0, slash + 1) + L"themes.ini";
     if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::ofstream f{fsPath(p)};
-        f << "; Custom themes: [theme] sections, RRGGBB colors.\n";
+        f << themesIniTemplate();
     }
     ShellExecuteW(nullptr, L"open", configFilePathForShell(p).c_str(),
                   nullptr, nullptr, SW_SHOWNORMAL);
@@ -594,6 +597,7 @@ static void openThemeEditor(App& app, bool editCurrent) {
     app.themeEditorFontScroll = 0.0f;
     app.themeEditorColorScroll = 0.0f;
     app.themeEditorHeadingsOpen = false;
+    app.themeEditorFontRole = 0;
     app.showSettings = false;
     app.showThemeEditor = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
@@ -2912,8 +2916,30 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             if (action >= TE_FONT_BASE) {
                 int idx = action - TE_FONT_BASE;
                 if (idx >= 0 && idx < (int)app.systemFontFamilies.size()) {
-                    app.themeEditorFont = app.systemFontFamilies[idx];
+                    std::wstring& face = app.themeEditorFontRole == 1 ? app.themeEditorHeadingFont
+                                       : app.themeEditorFontRole == 2 ? app.themeEditorCodeFont
+                                       : app.themeEditorFont;
+                    face = app.systemFontFamilies[idx];
                 }
+            } else if (action == TE_FONT_SAME) {
+                app.themeEditorHeadingFont.clear();
+            } else if (action >= TE_FONT_TEXT && action <= TE_FONT_CODE) {
+                // Switch the list to another face and scroll to its choice
+                app.themeEditorFontRole = action - TE_FONT_TEXT;
+                const std::wstring& face = app.themeEditorFontRole == 1 ? app.themeEditorHeadingFont
+                                         : app.themeEditorFontRole == 2 ? app.themeEditorCodeFont
+                                         : app.themeEditorFont;
+                int lead = app.themeEditorFontRole == 1 ? 1 : 0;
+                int row = 0;
+                for (size_t i = 0; !face.empty() && i < app.systemFontFamilies.size(); i++) {
+                    if (_wcsicmp(app.systemFontFamilies[i].c_str(), face.c_str()) == 0) {
+                        row = (int)i + lead;
+                        break;
+                    }
+                }
+                float rowH = dpi(app, 26.0f);
+                float listH = app.themeEditorFontListRect.bottom - app.themeEditorFontListRect.top;
+                app.themeEditorFontScroll = std::max(0.0f, row * rowH - (listH - rowH) / 2);
             } else if (action >= TE_FIELD_BG && action <= TE_FIELD_HIGHLIGHT_TEXT) {
                 app.themeEditorField = action - TE_FIELD_BG;
             } else if (action == TE_FIELD_NAME) {
@@ -2935,14 +2961,10 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             } else if (action == TE_SAVE) {
                 std::wstring name = app.themeEditorName.empty()
                     ? L"My theme" : app.themeEditorName;
-                const D2DTheme& base = themeAt(app.themeEditorBase);
-                // Carry the base theme's heading face so deriving from a
-                // theme with headingfont= (Abyss included) keeps its look
-                std::wstring baseHeading =
-                    (base.headingFontFamily && base.headingFontFamily[0])
-                        ? base.headingFontFamily : L"";
-                int idx = saveCustomTheme(app.themeEditorTheme, name,
-                    app.themeEditorFont, base.codeFontFamily, baseHeading);
+                // The heading and code faces start from the base theme's,
+                // so deriving from Abyss keeps its pinned heading face
+                int idx = saveCustomTheme(app.themeEditorTheme, name, app.themeEditorFont,
+                    app.themeEditorCodeFont, app.themeEditorHeadingFont);
                 if (idx >= 0) {
                     // Preview format cache must grow for the chooser
                     for (auto& pf : app.themePreviewFormats) {

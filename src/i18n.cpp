@@ -502,6 +502,11 @@ const Entry kEntries[] = {
     { "theme.editor.color.code_background", L"Code background", L"\u4EE3\u7801\u80CC\u666F", L"\u30B3\u30FC\u30C9\u80CC\u666F", L"\uCF54\uB4DC \uBC30\uACBD" },
     { "theme.editor.save", L"Save theme", L"\u4FDD\u5B58\u4E3B\u9898", L"\u30C6\u30FC\u30DE\u3092\u4FDD\u5B58", L"\uD14C\uB9C8 \uC800\uC7A5" },
     { "theme.editor.cancel", L"Cancel", L"\u53D6\u6D88", L"\u30AD\u30E3\u30F3\u30BB\u30EB", L"\uCDE8\uC18C" },
+    { "theme.editor.font.text", L"Text", L"\u6B63\u6587", L"\u672C\u6587", L"\uBCF8\uBB38" },
+    { "theme.editor.font.headings", L"Headings", L"\u6807\u9898", L"\u898B\u51FA\u3057", L"\uC81C\uBAA9" },
+    { "theme.editor.font.code", L"Code", L"\u4EE3\u7801", L"\u30B3\u30FC\u30C9", L"\uCF54\uB4DC" },
+    { "theme.editor.font.same", L"Same as text", L"\u4E0E\u6B63\u6587\u76F8\u540C",
+      L"\u672C\u6587\u3068\u540C\u3058", L"\uBCF8\uBB38\uACFC \uAC19\uC74C" },
     { "theme.editor.open_ini", L"Open themes.ini for full control", L"\u6253\u5F00 themes.ini \u8FDB\u884C\u5B8C\u6574\u914D\u7F6E", L"themes.ini\u3092\u958B\u3044\u3066\u3059\u3079\u3066\u3092\u8ABF\u6574", L"themes.ini\uC5D0\uC11C \uC804\uCCB4 \uC124\uC815 \uD3B8\uC9D1" },
 
     // ----- Print preview -----
@@ -1365,6 +1370,10 @@ const BuiltinTranslation kBuiltinTranslations[] = {
       L"Abbrechen",
       L"Annuler",
       L"Annulla" },
+    { "theme.editor.font.text", L"Text", L"Texte", L"Testo" },
+    { "theme.editor.font.headings", L"\u00DCberschriften", L"Titres", L"Titoli" },
+    { "theme.editor.font.code", L"Code", L"Code", L"Codice" },
+    { "theme.editor.font.same", L"Wie Text", L"Comme le texte", L"Come il testo" },
     { "theme.editor.open_ini",
        L"themes.ini f\u00FCr vollst\u00E4ndige Kontrolle \u00F6ffnen",
        L"Ouvrir themes.ini pour tout contr\u00F4ler",

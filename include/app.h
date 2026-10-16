@@ -192,6 +192,9 @@ inline const wchar_t* themeHeadingFont(const D2DTheme& t) {
                : t.fontFamily;
 }
 void loadCustomThemes();
+// What a new themes.ini starts with: a commented example naming every
+// key, headingfont= and codefont= included (#256)
+const char* themesIniTemplate();
 // Adds or replaces (by name) a user theme and rewrites themes.ini.
 // Returns the theme's registry index, or -1 on failure.
 int saveCustomTheme(const D2DTheme& t, const std::wstring& name,
@@ -707,6 +710,9 @@ struct App {
     D2DTheme themeEditorTheme{};        // working colors (string ptrs unused)
     std::wstring themeEditorName;
     std::wstring themeEditorFont;       // main font family
+    std::wstring themeEditorHeadingFont;  // empty: headings use the main font
+    std::wstring themeEditorCodeFont;
+    int themeEditorFontRole = 0;        // the face the list sets: 0 text, 1 headings, 2 code
     std::wstring themeEditorHex[14];     // base colours, h1-h6, highlight bg/text
     int themeEditorField = -1;          // focused field: 0..13 hex, 14 = name
     int themeEditorBase = 0;            // registry index the colors started from

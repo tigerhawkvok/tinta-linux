@@ -93,6 +93,8 @@ enum ThemeEditorAction {
     TE_FIELD_NAME,
     TE_BASE_PREV, TE_BASE_NEXT,
     TE_DARK, TE_SAVE, TE_CANCEL, TE_OPEN_INI, TE_HEADINGS,
+    TE_FONT_TEXT, TE_FONT_HEADING, TE_FONT_CODE,  // which face the font list sets
+    TE_FONT_SAME,                                 // headings follow the text face
     TE_FONT_BASE = 100,
 };
 void renderThemeEditor(App& app);

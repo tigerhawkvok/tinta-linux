@@ -1,10 +1,14 @@
 #include "d2d_init.h"
+#include "editor.h"
 #include "export.h"
+#include "input.h"
+#include "overlays.h"
 #include "render.h"
 #include "settings.h"
 #include "syntax.h"
 #include "utils.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -37,6 +41,137 @@ void checkRun(const App& app, const wchar_t* marker, D2D1_COLOR_F color) {
     if (!found) std::wcerr << L"Missing native marker: " << marker << L'\n';
     check(found, "native fixture marker renders");
 }
+// themes.ini lines of one [theme] section
+std::string themeSection(std::string ini, const std::string& name) {
+    ini.erase(std::remove(ini.begin(), ini.end(), '\r'), ini.end());  // text-mode CRLF
+    size_t at = ini.find("name=" + name + "\n");
+    if (at == std::string::npos) return {};
+    size_t next = ini.find("[theme]", at);
+    return ini.substr(at, next == std::string::npos ? std::string::npos : next - at);
+}
+
+// #256: the theme editor sets the text, heading and code faces through its
+// own clicks, and every saved theme lists headingfont=
+void themeEditorFonts(const std::filesystem::path& dir) {
+    auto state = std::make_unique<App>();
+    App& app = *state;
+    app.hwnd = CreateWindowExW(0, L"STATIC", L"Theme editor tests", WS_POPUP, 0, 0, 1180, 900,
+                               nullptr, nullptr, nullptr, nullptr);
+    if (!app.hwnd || !initD2D(app) || !createRenderTarget(app)) {
+        check(false, "the theme editor test window opens");
+        return;
+    }
+    app.width = 1180;
+    app.height = 900;
+    applyTheme(app, 0);
+    updateTextFormats(app);
+    auto paint = [&] {
+        app.renderTarget->BeginDraw();
+        if (app.showThemeEditor) renderThemeEditor(app);
+        else renderSettingsOverlay(app);
+        app.renderTarget->EndDraw();
+    };
+    auto click = [&](const std::vector<std::pair<D2D1_RECT_F, int>>& hits, int id) {
+        for (const auto& [r, action] : hits) {
+            if (action != id) continue;
+            LPARAM p = MAKELPARAM((int)((r.left + r.right) / 2), (int)((r.top + r.bottom) / 2));
+            handleMouseDown(app, app.hwnd, MK_LBUTTON, p);
+            handleMouseUp(app, app.hwnd, 0, p);
+            paint();
+            return true;
+        }
+        return false;
+    };
+    auto open = [&](const wchar_t* name) {
+        app.showSettings = true;
+        app.settingsSection = 1;  // Appearance
+        app.settingsAnimation = 1.0f;
+        paint();
+        check(click(app.settingsHits, SET_NEW_THEME) && app.showThemeEditor,
+              "Appearance settings open the theme editor");
+        app.themeEditorName = name;
+    };
+    // Switch the list to a face, scroll the family into view, pick it
+    auto pick = [&](int role, const wchar_t* family) {
+        check(click(app.themeEditorHits, role), "the font switch has the role");
+        size_t index = 0;
+        while (index < app.systemFontFamilies.size() &&
+               _wcsicmp(app.systemFontFamilies[index].c_str(), family) != 0) index++;
+        check(index < app.systemFontFamilies.size(), "the family is installed");
+        int row = (int)index + (role == TE_FONT_HEADING ? 1 : 0);
+        app.themeEditorFontScroll = row * dpi(app, 26.0f);
+        paint();
+        check(click(app.themeEditorHits, TE_FONT_BASE + (int)index), "the family's row can be clicked");
+    };
+
+    open(L"Editor fonts");
+    const D2DTheme& paper = themeAt(0);
+    check(app.themeEditorFont == paper.fontFamily && app.themeEditorHeadingFont.empty() &&
+          app.themeEditorCodeFont == paper.codeFontFamily, "the editor starts from Paper's faces");
+    // Three installed families that are none of Paper's: Windows has
+    // Georgia, Courier New and Verdana; elsewhere, whatever is installed
+    std::vector<std::wstring> faces;
+    auto installed = [&](const std::wstring& family) {
+        for (const auto& f : app.systemFontFamilies) if (_wcsicmp(f.c_str(), family.c_str()) == 0) return true;
+        return false;
+    };
+    auto usable = [&](const std::wstring& family) {
+        return _wcsicmp(family.c_str(), paper.fontFamily) != 0 &&
+               _wcsicmp(family.c_str(), paper.codeFontFamily) != 0 &&
+               std::find(faces.begin(), faces.end(), family) == faces.end();
+    };
+    for (const wchar_t* family : {L"Georgia", L"Courier New", L"Verdana"})
+        if (installed(family) && usable(family)) faces.push_back(family);
+    for (size_t i = 0; faces.size() < 3 && i < app.systemFontFamilies.size(); ++i)
+        if (usable(app.systemFontFamilies[i])) faces.push_back(app.systemFontFamilies[i]);
+    check(faces.size() == 3, "three installed families to choose from");
+    if (faces.size() < 3) return;
+    const std::wstring& heading = faces[0];
+    const std::wstring& code = faces[1];
+    const std::wstring& text = faces[2];
+    pick(TE_FONT_HEADING, heading.c_str());
+    pick(TE_FONT_CODE, code.c_str());
+    pick(TE_FONT_TEXT, text.c_str());
+    check(app.themeEditorFont == text && app.themeEditorHeadingFont == heading &&
+          app.themeEditorCodeFont == code, "each role keeps its own face");
+    check(click(app.themeEditorHits, TE_SAVE) && !app.showThemeEditor, "the theme saves");
+    std::string section = themeSection(read(dir / "themes.ini"), "Editor fonts");
+    check(section.find("\nfont=" + toUtf8(text) + "\n") != std::string::npos &&
+          section.find("\nheadingfont=" + toUtf8(heading) + "\n") != std::string::npos &&
+          section.find("\ncodefont=" + toUtf8(code) + "\n") != std::string::npos,
+          "themes.ini holds the text, heading and code faces");
+    check(_wcsicmp(app.theme.fontFamily, text.c_str()) == 0 &&
+          _wcsicmp(themeHeadingFont(app.theme), heading.c_str()) == 0 &&
+          _wcsicmp(app.theme.codeFontFamily, code.c_str()) == 0,
+          "the saved theme applies all three faces");
+
+    // A new themes.ini names every font key
+    const std::string seed = themesIniTemplate();
+    check(seed.find("; font=") != std::string::npos && seed.find("; headingfont=") != std::string::npos &&
+          seed.find("; codefont=") != std::string::npos, "a new themes.ini names the three font keys");
+
+    // Headings back to the text face: the key stays, empty
+    open(L"Editor same");
+    click(app.themeEditorHits, TE_FONT_HEADING);
+    app.themeEditorFontScroll = 0.0f;  // the switch scrolled to the heading face
+    paint();
+    check(click(app.themeEditorHits, TE_FONT_SAME) && app.themeEditorHeadingFont.empty(),
+          "headings can follow the text face again");
+    check(click(app.themeEditorHits, TE_SAVE), "the second theme saves");
+    section = themeSection(read(dir / "themes.ini"), "Editor same");
+    check(section.find("\nheadingfont=\n") != std::string::npos,
+          "themes.ini writes an empty headingfont= line");
+    loadCustomThemes();
+    for (int i = THEME_COUNT; i < themeCount(); i++) {
+        if (wcscmp(themeAt(i).name, L"Editor same") == 0) {
+            check(wcscmp(themeHeadingFont(themeAt(i)), themeAt(i).fontFamily) == 0,
+                  "an empty headingfont= sets headings in font=");
+        }
+    }
+    DestroyWindow(app.hwnd);
+    app.hwnd = nullptr;
+}
+
 std::string docxRun(const std::string& zip, const std::string& marker) {
     // Tinta writes stored ZIP entries, so the actual XML can be inspected
     // here without introducing a ZIP dependency into the native tests.
@@ -173,6 +308,7 @@ int main(int argc, char** argv) {
               "DOCX linked code preserves the link color");
         failures += testThemeColours(app, dir);
     }
+    themeEditorFonts(dir);
     CoUninitialize();
     std::cout << "Inline code themes: " << failures << " failures\n";
     return failures ? 1 : 0;

@@ -4120,15 +4120,19 @@ void renderThemeEditor(App& app) {
 
         const wchar_t* fam = app.themeEditorFont.empty()
             ? L"Segoe UI" : app.themeEditorFont.c_str();
+        const wchar_t* headingFam = app.themeEditorHeadingFont.empty()
+            ? fam : app.themeEditorHeadingFont.c_str();
+        const wchar_t* codeFam = app.themeEditorCodeFont.empty()
+            ? app.uiCodeFont : app.themeEditorCodeFont.c_str();
         IDWriteTextFormat* h = nullptr; IDWriteTextFormat* b = nullptr;
         IDWriteTextFormat* m = nullptr;
-        app.dwriteFactory->CreateTextFormat(fam, fontCollectionFor(app, fam), DWRITE_FONT_WEIGHT_BOLD,
+        app.dwriteFactory->CreateTextFormat(headingFam, fontCollectionFor(app, headingFam), DWRITE_FONT_WEIGHT_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 20.0f),
             L"en-us", &h);
         app.dwriteFactory->CreateTextFormat(fam, fontCollectionFor(app, fam), DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 13.5f),
             L"en-us", &b);
-        app.dwriteFactory->CreateTextFormat(app.uiCodeFont, fontCollectionFor(app, app.uiCodeFont), DWRITE_FONT_WEIGHT_NORMAL,
+        app.dwriteFactory->CreateTextFormat(codeFam, fontCollectionFor(app, codeFam), DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dpi(app, 12.5f),
             L"en-us", &m);
         float sx = spec.left + dpi(app, 18.0f);
@@ -4177,9 +4181,44 @@ void renderThemeEditor(App& app) {
         }
     }
 
-    // Font list: every system family, drawn in itself
+    // Which face the font list sets: text, headings or code (#256), drawn
+    // like the settings' segmented controls
     {
-        D2D1_RECT_F list = D2D1::RectF(xr, py + dpi(app, 230.0f),
+        const char* roleKeys[3] = {"theme.editor.font.text", "theme.editor.font.headings",
+                                   "theme.editor.font.code"};
+        float inset = dpi(app, 3.0f);
+        float segH = dpi(app, 24.0f);
+        float segY = py + dpi(app, 230.0f);
+        float segW = (xrw - inset * 4) / 3.0f;
+        D2D1_RECT_F container = D2D1::RectF(xr, segY - inset, xr + xrw, segY + segH + inset);
+        app.brush->SetColor(base.isDark ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.22f)
+                                        : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.07f));
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(container, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
+        for (int i = 0; i < 3; i++) {
+            float sx = container.left + inset + i * (segW + inset);
+            D2D1_RECT_F r = D2D1::RectF(sx, segY, sx + segW, segY + segH);
+            bool on = app.themeEditorFontRole == i;
+            if (on) {
+                app.brush->SetColor(settingsLift(app, 0.22f, 1.0f, 1.0f));
+                app.renderTarget->FillRoundedRectangle(
+                    D2D1::RoundedRect(r, dpi(app, 6.0f), dpi(app, 6.0f)), app.brush);
+            }
+            const wchar_t* text = tr(app, roleKeys[i]);
+            D2D1_COLOR_F c = base.text; c.a = on ? 0.95f : 0.55f;
+            app.brush->SetColor(c);
+            float tw = measureText(app, text, fmt);
+            app.renderTarget->DrawText(text, (UINT32)wcslen(text), fmt,
+                D2D1::RectF(sx + (segW - tw) * 0.5f, segY + dpi(app, 3.0f), sx + segW, segY + segH),
+                app.brush);
+            app.themeEditorHits.push_back({r, TE_FONT_TEXT + i});
+        }
+    }
+
+    // Font list: every system family, drawn in itself. For headings the
+    // first row follows the text face.
+    {
+        D2D1_RECT_F list = D2D1::RectF(xr, py + dpi(app, 262.0f),
                                        xr + xrw, py + panelH - dpi(app, 60.0f));
         app.themeEditorFontListRect = list;
         D2D1_COLOR_F c = base.text; c.a = 0.2f;
@@ -4188,17 +4227,25 @@ void renderThemeEditor(App& app) {
             D2D1::RoundedRect(list, dpi(app, 6.0f), dpi(app, 6.0f)), app.brush, 1.0f);
         app.renderTarget->PushAxisAlignedClip(list, D2D1_ANTIALIAS_MODE_ALIASED);
 
+        const std::wstring& chosen = app.themeEditorFontRole == 1 ? app.themeEditorHeadingFont
+                                   : app.themeEditorFontRole == 2 ? app.themeEditorCodeFont
+                                   : app.themeEditorFont;
+        const int lead = app.themeEditorFontRole == 1 ? 1 : 0;
+        const int rows = (int)app.systemFontFamilies.size() + lead;
         float fontRowHeight = dpi(app, 26.0f);
         float maxScroll = std::max(0.0f,
-            (float)app.systemFontFamilies.size() * fontRowHeight - (list.bottom - list.top));
+            (float)rows * fontRowHeight - (list.bottom - list.top));
         app.themeEditorFontScroll = std::max(0.0f, std::min(app.themeEditorFontScroll, maxScroll));
         int first = (int)(app.themeEditorFontScroll / fontRowHeight);
         int visible = (int)((list.bottom - list.top) / fontRowHeight) + 2;
-        for (int i = first; i < first + visible &&
-                            i < (int)app.systemFontFamilies.size(); i++) {
+        for (int i = first; i < first + visible && i < rows; i++) {
             float ry = list.top + i * fontRowHeight - app.themeEditorFontScroll;
-            const std::wstring& fam = app.systemFontFamilies[i];
-            bool selected = (_wcsicmp(fam.c_str(), app.themeEditorFont.c_str()) == 0);
+            const bool same = lead && i == 0;
+            const std::wstring fam = same ? (app.themeEditorFont.empty() ? std::wstring(L"Segoe UI")
+                                                                         : app.themeEditorFont)
+                                          : app.systemFontFamilies[i - lead];
+            const std::wstring shown = same ? std::wstring(tr(app, "theme.editor.font.same")) : fam;
+            bool selected = same ? chosen.empty() : _wcsicmp(fam.c_str(), chosen.c_str()) == 0;
             if (selected) {
                 D2D1_COLOR_F hl = base.accent; hl.a = 0.18f;
                 app.brush->SetColor(hl);
@@ -4212,7 +4259,7 @@ void renderThemeEditor(App& app) {
             D2D1_COLOR_F tc = base.text; tc.a = selected ? 1.0f : 0.8f;
             app.brush->SetColor(tc);
             if (ff) {
-                app.renderTarget->DrawText(fam.c_str(), (UINT32)fam.size(), ff,
+                app.renderTarget->DrawText(shown.c_str(), (UINT32)shown.size(), ff,
                     D2D1::RectF(list.left + dpi(app, 12.0f), ry + dpi(app, 3.0f),
                                 list.right - dpi(app, 8.0f), ry + fontRowHeight), app.brush);
                 ff->Release();
@@ -4222,7 +4269,7 @@ void renderThemeEditor(App& app) {
             D2D1_RECT_F hr = D2D1::RectF(list.left, std::max(ry, list.top),
                                          list.right, std::min(ry + fontRowHeight, list.bottom));
             if (hr.bottom > hr.top) {
-                app.themeEditorHits.push_back({hr, TE_FONT_BASE + i});
+                app.themeEditorHits.push_back({hr, same ? TE_FONT_SAME : TE_FONT_BASE + i - lead});
             }
         }
         app.renderTarget->PopAxisAlignedClip();
@@ -4266,7 +4313,7 @@ void renderThemeEditor(App& app) {
         app.themeEditorHits.push_back({cancel, TE_CANCEL});
 
         // themes.ini link, bottom-left: hand-tune what the editor exposes
-        // and everything it does not (syntax palette, blockquote, code font)
+        // and everything it does not (syntax palette, blockquote)
         const wchar_t* ini = tr(app, "theme.editor.open_ini");
         D2D1_RECT_F iniR = D2D1::RectF(px + dpi(app, 24.0f), by + dpi(app, 6.0f),
                                        cancel.left - dpi(app, 18.0f), by + bh);
