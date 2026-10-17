@@ -3,6 +3,7 @@
 // Line numbers live in the editor's own slim gutter beside it, and the
 // thread seam (also here) ties source blocks to their render.
 
+#include "emacs_keys.h"
 #include "editrail.h"
 #include "d2d_init.h"
 #include "overlays.h"
@@ -283,8 +284,8 @@ void renderEditRail(App& app) {
         IDWriteTextLayout* ll =
             railLayout(app, label, 12.0f, DWRITE_FONT_WEIGHT_NORMAL);
         IDWriteTextLayout* kl =
-            hovBtn->tipKeys[0]
-                ? railLayout(app, hovBtn->tipKeys, 10.5f,
+            profileChord(app, hovBtn->tipKeys)[0]
+                ? railLayout(app, profileChord(app, hovBtn->tipKeys), 10.5f,
                              DWRITE_FONT_WEIGHT_NORMAL)
                 : nullptr;
         if (ll) {
@@ -556,8 +557,9 @@ void renderEditCtxMenu(App& app) {
                              : railA(text, 0.92f * alpha));
             ll->Release();
         }
-        if (it.hint[0]) {
-            IDWriteTextLayout* hl = railLayout(app, it.hint, 11.0f,
+        const wchar_t* itemHint = profileChord(app, it.hint);
+        if (itemHint[0]) {
+            IDWriteTextLayout* hl = railLayout(app, itemHint, 11.0f,
                                                DWRITE_FONT_WEIGHT_NORMAL,
                                                app.uiCodeFont);
             if (hl) {

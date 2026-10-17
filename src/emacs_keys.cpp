@@ -308,3 +308,21 @@ bool emacsSysKeyDown(App& app, HWND hwnd, WPARAM key) {
     if (handled) app.emacsSwallowSysChar = true;
     return handled;
 }
+
+const wchar_t* profileChord(const App& app, const wchar_t* windowsChord) {
+    if (!windowsChord) return L"";
+    if (app.keyProfile != "emacs" || !*windowsChord) return windowsChord;
+    static const std::pair<const wchar_t*, const wchar_t*> chords[] = {
+        {L"Ctrl+C", L"M-w"},          {L"Ctrl+X", L"C-w"},     {L"Ctrl+V", L"C-y"},
+        {L"Ctrl+A", L"C-x h"},        {L"Ctrl+O", L"C-x C-f"}, {L"Ctrl+S", L"C-x C-s"},
+        {L"Ctrl+Shift+S", L"C-x C-w"}, {L"Alt+F4", L"C-x C-c"}, {L"Ctrl+W", L"C-x k"},
+        {L"Ctrl+F", L"C-s"},          {L"Ctrl+H", L"M-%"},
+        // Emacs commands now, with no chord of their own here
+        {L"Ctrl+P", L""}, {L"Ctrl+N", L""}, {L"Ctrl+B", L""}, {L"Ctrl+K", L""}, {L"Ctrl+E", L""},
+        {L"Ctrl+D", L""},
+    };
+    for (const auto& chord : chords) {
+        if (wcscmp(windowsChord, chord.first) == 0) return chord.second;
+    }
+    return windowsChord;
+}

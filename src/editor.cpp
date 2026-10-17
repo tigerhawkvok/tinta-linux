@@ -1,3 +1,4 @@
+#include "emacs_keys.h"
 #include "frontmatter_ui.h"
 #include "fs_path.h"
 #include "editor.h"
@@ -1803,7 +1804,7 @@ void renderQuickNoteEmptyState(App& app) {
     if (paneW < dpi(app, 180.0f)) return;  // pane too narrow to bother
 
     const wchar_t* label = tr(app, "empty.open_button");
-    const wchar_t* chip = L"Ctrl+O";
+    const wchar_t* chip = profileChord(app, L"Ctrl+O");
 
     IDWriteTextLayout* labelLayout = nullptr;
     IDWriteTextLayout* chipLayout = nullptr;

@@ -3,6 +3,7 @@
 // document surface with an accent underline, unsaved buffers show a dot,
 // a chevron opens the open-files switcher when the strip is crowded.
 
+#include "emacs_keys.h"
 #include "tabs.h"
 #include "d2d_init.h"
 #include "search.h"
@@ -1605,10 +1606,11 @@ void renderTabMenu(App& app) {
             D2D1::RectF(x + inset, textY, x + w - inset, top + itemH),
             app.brush);
 
-        if (TAB_MENU[i].shortcut[0]) {
+        const wchar_t* tabShortcut = profileChord(app, TAB_MENU[i].shortcut);
+        if (tabShortcut[0]) {
             IDWriteTextLayout* hint = nullptr;
             app.dwriteFactory->CreateTextLayout(
-                TAB_MENU[i].shortcut, (UINT32)wcslen(TAB_MENU[i].shortcut),
+                tabShortcut, (UINT32)wcslen(tabShortcut),
                 format, 1000.0f, itemH, &hint);
             if (hint) {
                 DWRITE_TEXT_METRICS metrics{};

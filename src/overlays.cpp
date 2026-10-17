@@ -1,3 +1,4 @@
+#include "emacs_keys.h"
 #include "search.h"
 #include "frontmatter_ui.h"
 #include "overlays.h"
@@ -2213,7 +2214,7 @@ void renderContextMenu(App& app) {
             case CTX_BROWSE: return keyLabel(app.keymap[KA_BROWSE]);
             case CTX_THEME:  return keyLabel(app.keymap[KA_THEME]);
             case CTX_HELP:   return keyLabel(app.keymap[KA_HELP]);
-            default:         return entry.shortcut;
+            default:         return profileChord(app, entry.shortcut);
         }
     };
 

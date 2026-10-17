@@ -284,6 +284,16 @@ int main() {
     key(app, 'V', C);
     check(!taken && app.scrollY == 0.0f, "the windows profile ignores Emacs chords");
 
+    // Menu hints follow the profile (the windows one is active again here)
+    check(std::wstring(profileChord(app, L"Ctrl+C")) == L"Ctrl+C", "windows menus show Ctrl+C");
+    settings.keyProfile = "emacs";
+    applyKeymap(app, settings);
+    check(std::wstring(profileChord(app, L"Ctrl+C")) == L"M-w" &&
+              std::wstring(profileChord(app, L"Ctrl+Shift+S")) == L"C-x C-w" &&
+              std::wstring(profileChord(app, L"Ctrl+P")).empty() &&
+              std::wstring(profileChord(app, L"Ctrl+,")) == L"Ctrl+,",
+          "emacs menus show its chords, none where Emacs took the key, the rest unchanged");
+
     std::cout << "emacs keys: " << failures << " failures\n";
     return failures == 0 ? 0 : 1;
 }
