@@ -1191,6 +1191,11 @@ struct App {
         float renderedY;
     };
     std::vector<ScrollAnchor> scrollAnchors;
+    // Linked scrolling in the split editor: the pane last scrolled leads
+    // and the other follows. The preview leads after its own wheel or
+    // scrollbar; any editor scroll (keys, caret, wheel) takes the lead back.
+    bool previewLeads = false;
+    float previewLedEditorScroll = 0.0f;  // the editor scroll the preview set
     std::vector<size_t> editorLineByteOffsets;  // UTF-8 byte offset per editor line
 
     size_t searchMatchCursor = 0;

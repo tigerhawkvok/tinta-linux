@@ -895,15 +895,24 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         return;
     }
 
-    // Edit mode: the wheel scrolls the editor from either pane — the preview
-    // follows through the scroll-anchor sync, so the panes cannot drift
-    // apart and both sides always respond (#77)
+    // Edit mode: linked scrolling. The wheel scrolls the pane under the
+    // pointer and the other follows through the scroll anchors, so the
+    // panes cannot drift apart (#77) and the preview moves by its own
+    // pixels, not by editor lines
     if (app.editMode && !app.editorReadingPreview) {
         float sepX = app.editorShowPreview
             ? app.width * app.editorSplitRatio
             : static_cast<float>(app.width);
         if (ctrl && app.mouseX < sepX) {
             applyZoomDelta(app, delta);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
+        if (!ctrl && app.editorShowPreview && app.mouseX >= sepX && !app.scrollAnchors.empty()) {
+            float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+            app.scrollY = std::clamp(app.scrollY - delta * dpi(app, 60.0f), 0.0f, maxScroll);
+            app.targetScrollY = app.scrollY;
+            editorPreviewTakesLead(app);
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
         }
@@ -1014,6 +1023,7 @@ static bool moveDocumentScrollbarDrag(App& app, HWND hwnd) {
                 const float deltaY = (float)app.mouseY - app.scrollbarDragStartY;
                 app.scrollY = std::clamp(app.scrollbarDragStartScroll + deltaY / trackHeight * maxScroll, 0.0f, maxScroll);
                 app.targetScrollY = app.scrollY;
+                editorPreviewTakesLead(app);  // linked scrolling: the source follows
             }
         }
     } else {
@@ -2217,6 +2227,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             clickPos = std::max(0.0f, std::min(clickPos, trackHeight));
             app.scrollY = (clickPos / trackHeight) * maxScroll;
             app.targetScrollY = app.scrollY;
+            editorPreviewTakesLead(app);  // linked scrolling: the source follows
             app.scrollbarDragStartScroll = app.scrollY;
             app.scrollbarDragStartY = (float)app.mouseY;
         }

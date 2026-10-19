@@ -113,7 +113,16 @@ void editorReplaceAll(App& app, HWND hwnd);
 // Navigate without changing the source buffer, including when preview is hidden.
 void editorScrollToSourceOffset(App& app, size_t byteOffset);
 void rebuildLineStarts(App& app);
-size_t editorTopVisibleLine(App& app);
+// Linked scrolling: the source byte offset at the editor's top edge,
+// within its line (wrapped rows included), and the editor scrolled so the
+// preview's top edge maps there (through app.scrollAnchors)
+double editorTopByteOffset(App& app);
+void editorFollowPreview(App& app);
+// The preview was scrolled by its own wheel or scrollbar: it leads, and
+// the source follows now and every frame until the source scrolls itself
+void editorPreviewTakesLead(App& app);
+// Once a frame: the pane last scrolled leads, the other follows
+void editorSyncPreviewScroll(App& app);
 std::string toUtf8(const std::wstring& wstr);
 
 #endif // TINTA_EDITOR_H

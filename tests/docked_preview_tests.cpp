@@ -354,6 +354,134 @@ void persistence() {
 }
 }
 
+// Linked scrolling: one frame of the source pane (it measures the
+// source's height), then the sync that runs before every split frame
+void sourceFrame(App& app) {
+    app.renderTarget->BeginDraw();
+    renderEditor(app, editorPaneWidth(app));
+    check(SUCCEEDED(app.renderTarget->EndDraw()), "the source pane paints");
+    editorSyncPreviewScroll(app);
+}
+
+void wheel(App& app, int notches) {
+    for (int i = 0; i < std::abs(notches); ++i) {
+        handleMouseWheel(app, app.hwnd, MAKEWPARAM(0, (WORD)(short)(notches < 0 ? -WHEEL_DELTA : WHEEL_DELTA)), 0);
+    }
+}
+
+// The panes follow each other: the preview moves with every step of the
+// source (not a source line, or a whole wrapped paragraph, at a time); the
+// wheel and scrollbar over the preview move the preview by its own step,
+// the source follows and the next frame leaves the preview there; handing
+// the lead back moves nothing
+void linkedScroll(App& app) {
+    const auto fixture = std::filesystem::path(TINTA_FIND_FIXTURE).parent_path() / L"linked-scroll.md";
+    std::ifstream input(fixture);
+    const std::wstring source = toWide(std::string((std::istreambuf_iterator<char>(input)), {}));
+    check(source.find(L"End of the linked scroll fixture") != std::wstring::npos, "the linked-scroll fixture loads");
+    for (bool wrap : {true, false}) {
+        app.width = 1050;
+        app.height = 900;
+        app.editorWordWrap = wrap;
+        updateTextFormats(app);
+        restoreEditBuffer(app, source, false, 0, 0);
+        app.editorShowPreview = true;
+        app.editorReadingPreview = false;
+        app.layoutDirty = true;
+        ensureLayoutComplete(app);
+        app.verticalScrollbarVisible = app.contentHeight > app.height;
+        app.editorScrollY = 0.0f;
+        app.scrollY = app.targetScrollY = 0.0f;
+        app.previewLeads = false;
+        sourceFrame(app);
+        const float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
+        const float previewMax = std::max(0.0f, app.contentHeight - (float)app.height);
+        check(editorMax > 2.0f * app.height && previewMax > 2.0f * app.height, "the fixture scrolls both panes");
+        check(app.scrollY == 0.0f, "both panes start at the top");
+
+        // The source leads, a few pixels at a time
+        const float step = 4.0f;
+        float last = 0.0f, biggest = 0.0f;
+        int backwards = 0, stalls = 0, steps = 0;
+        for (float y = step; y < editorMax - step; y += step) {
+            app.editorScrollY = y;
+            editorSyncPreviewScroll(app);
+            if (app.scrollY < last - 0.01f) ++backwards;
+            if (app.scrollY < previewMax - 0.5f) {
+                ++steps;
+                if (app.scrollY - last < 0.01f) ++stalls;
+                biggest = std::max(biggest, app.scrollY - last);
+            }
+            last = app.scrollY;
+        }
+        check(backwards == 0, "the preview never scrolls back while the source scrolls down");
+        check(steps > 100 && stalls == 0,
+              "the preview moves with every step of the source, within a source line too");
+        // Wrapped, a paragraph is many source rows: the preview moves a
+        // little with each (measured at most 3.9 times the mean), never
+        // the paragraph's height at once
+        if (wrap) {
+            check(biggest < 8.0f * step * previewMax / editorMax,
+                  "wrapped, the preview never jumps a whole paragraph");
+        }
+
+        // The preview leads: the wheel over it scrolls it by its own step
+        app.editorScrollY = 0.0f;
+        app.previewLeads = false;
+        editorSyncPreviewScroll(app);
+        hover(app, documentViewportX(app) + documentViewportWidth(app) / 2.0f, 400.0f);
+        wheel(app, -3);
+        const float wheelTo = 3.0f * dpi(app, 60.0f);
+        check(std::abs(app.scrollY - wheelTo) < 0.5f, "the wheel over the preview scrolls the preview by its own step");
+        check(app.previewLeads && app.editorScrollY > 0.0f, "the source follows the preview");
+        const float previewAt = app.scrollY, sourceAt = app.editorScrollY;
+        sourceFrame(app);
+        check(app.scrollY == previewAt && app.editorScrollY == sourceAt,
+              "the next frame leaves the preview where the wheel put it");
+
+        // Handing the lead back without scrolling moves neither pane,
+        // anywhere in the document
+        float worst = 0.0f;
+        for (float y = 40.0f; y < previewMax - 40.0f; y += 37.0f) {
+            app.scrollY = app.targetScrollY = y;
+            app.previewLeads = true;
+            editorFollowPreview(app);
+            app.previewLedEditorScroll = app.editorScrollY;
+            if (app.editorScrollY >= editorMax - 1.0f) continue;  // the preview's tail overshoots the source
+            app.previewLeads = false;
+            editorSyncPreviewScroll(app);
+            worst = std::max(worst, std::abs(app.scrollY - y));
+        }
+        check(worst < 1.0f, "handing the lead back to the source leaves the preview where it was");
+
+        // The source scrolling on its own takes the lead back
+        app.scrollY = app.targetScrollY = wheelTo;
+        app.previewLeads = true;
+        editorFollowPreview(app);
+        app.previewLedEditorScroll = app.editorScrollY;
+        hover(app, editorPaneWidth(app) / 2.0f, 400.0f);
+        wheel(app, -1);
+        sourceFrame(app);
+        check(!app.previewLeads && app.scrollY > wheelTo, "the wheel over the source takes the lead back");
+
+        // The preview's scrollbar: a click on its track jumps the preview,
+        // and the source follows instead of pulling it back
+        app.editorScrollY = 0.0f;
+        app.previewLeads = false;
+        editorSyncPreviewScroll(app);
+        const float trackX = documentViewportX(app) + documentViewportWidth(app) - dpi(app, 4.0f);
+        hover(app, trackX, (float)app.height * 0.75f);
+        click(app, trackX, (float)app.height * 0.75f);
+        const float jumped = app.scrollY;
+        sourceFrame(app);
+        check(jumped > previewMax / 2.0f, "a click low on the preview's scrollbar jumps the preview");
+        check(app.scrollY == jumped && app.editorScrollY > 0.0f,
+              "the source follows the preview's scrollbar instead of pulling it back");
+    }
+    app.editorWordWrap = false;
+    leaveEditMode(app);
+}
+
 int runDockedPreviewTests() {
     OleInitialize(nullptr);
     auto state = std::make_unique<App>();
@@ -380,6 +508,7 @@ int runDockedPreviewTests() {
     hintsLeaveWithTheMode(app, source);
     editorHints(app, source);
     readButton(app);
+    linkedScroll(app);
     persistence();
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;

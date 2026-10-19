@@ -190,6 +190,12 @@ if(BUILD_TESTING)
                     $<TARGET_FILE:tinta> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/paste-image.md
                     --out ${CMAKE_BINARY_DIR}/linux-render/print)
             set_tests_properties(linux_print PROPERTIES TIMEOUT 180)
+            # Linked scrolling: the wheel over either pane of the split editor
+            add_test(NAME linux_linked_scroll
+                COMMAND ${TINTA_GUI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/linked_scroll_check.py
+                    $<TARGET_FILE:tinta> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/linked-scroll.md
+                    --out ${CMAKE_BINARY_DIR}/linux-render/linked-scroll)
+            set_tests_properties(linux_linked_scroll PROPERTIES TIMEOUT 240)
         endif()
     endif()
 

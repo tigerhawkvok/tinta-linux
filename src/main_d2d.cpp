@@ -159,67 +159,7 @@ void render(App& app) {
                                               app.contentHeight);
     }
 
-    // Sync preview scroll to editor scroll position using source-offset anchors
-    if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
-        !app.editorLineByteOffsets.empty()) {
-        // Find the editor's top visible line (row-aware in wrap mode)
-        int topLine = (int)editorTopVisibleLine(app);
-        topLine = std::max(0, std::min(topLine, (int)app.editorLineByteOffsets.size() - 1));
-        size_t topByteOffset = app.editorLineByteOffsets[topLine];
-
-        // Binary search for the anchor just before this byte offset
-        size_t lo = 0, hi = app.scrollAnchors.size();
-        while (lo + 1 < hi) {
-            size_t mid = (lo + hi) / 2;
-            if (app.scrollAnchors[mid].sourceOffset <= topByteOffset) lo = mid;
-            else hi = mid;
-        }
-
-        // Interpolate between anchor[lo] and anchor[lo+1]
-        float targetY;
-        if (lo + 1 < app.scrollAnchors.size() &&
-            app.scrollAnchors[lo + 1].sourceOffset > app.scrollAnchors[lo].sourceOffset) {
-            float t = (float)(topByteOffset - app.scrollAnchors[lo].sourceOffset) /
-                      (float)(app.scrollAnchors[lo + 1].sourceOffset - app.scrollAnchors[lo].sourceOffset);
-            t = std::max(0.0f, std::min(t, 1.0f));
-            targetY = app.scrollAnchors[lo].renderedY +
-                       t * (app.scrollAnchors[lo + 1].renderedY - app.scrollAnchors[lo].renderedY);
-        } else {
-            // Last anchor or single anchor — use ratio for remaining content
-            targetY = app.scrollAnchors[lo].renderedY;
-            if (app.contentHeight > app.scrollAnchors[lo].renderedY) {
-                size_t lastOffset = app.scrollAnchors[lo].sourceOffset;
-                size_t totalBytes = app.editorLineByteOffsets.back();
-                if (totalBytes > lastOffset) {
-                    float t = (float)(topByteOffset - lastOffset) / (float)(totalBytes - lastOffset);
-                    t = std::max(0.0f, std::min(t, 1.0f));
-                    targetY += t * (app.contentHeight - app.scrollAnchors[lo].renderedY);
-                }
-            }
-        }
-
-        // The docked pane runs to the window's bottom edge (#245), so the
-        // preview scrolls exactly as far as the reader does
-        float previewMaxScroll =
-            std::max(0.0f, app.contentHeight - (float)app.height);
-        // renderedY includes the page's top padding below the strip;
-        // subtract it so an editor at its top means a page at its top, and
-        // snap the last half-line so the page top is always reachable
-        // (t11 feedback)
-        float alignY = targetY - documentContentTop(app);
-        float synced = std::max(0.0f, std::min(alignY, previewMaxScroll));
-        if (app.editorScrollY <= 0.5f) synced = 0.0f;
-        float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
-        if (app.editorScrollY >= editorMax - 1.0f) {
-            // The editor has bottomed out, but rendered content is taller
-            // than its source (images, diagrams): let the preview overshoot
-            // to reach its tail (#85). Scrolling the editor up re-syncs.
-            app.scrollY = std::min(std::max(app.scrollY, synced), previewMaxScroll);
-        } else {
-            app.scrollY = synced;
-        }
-        app.targetScrollY = app.scrollY;
-    }
+    editorSyncPreviewScroll(app);
 
     // Edit mode: split view rendering — the source on the desk surface,
     // the preview docked beside it on the reader's page (#245)
