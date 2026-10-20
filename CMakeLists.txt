@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.15)
-project(tinta VERSION 4.0.10 LANGUAGES C CXX)
+# The release version, compiled in as TINTA_VERSION_MAJOR/MINOR/PATCH.
+# -DTINTA_VERSION=X.Y.Z overrides it for one configure
+# (packaging/build-release.sh); the override is not kept, so the next
+# plain configure of the tree comes back to this default.
+set(TINTA_DEFAULT_VERSION 4.0.10)
+if(DEFINED CACHE{TINTA_VERSION})
+    set(TINTA_BUILD_VERSION "$CACHE{TINTA_VERSION}")
+    unset(TINTA_VERSION CACHE)
+else()
+    set(TINTA_BUILD_VERSION ${TINTA_DEFAULT_VERSION})
+endif()
+if(NOT TINTA_BUILD_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "TINTA_VERSION must be three numbers, X.Y.Z, not \"${TINTA_BUILD_VERSION}\"")
+endif()
+project(tinta VERSION ${TINTA_BUILD_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -16,10 +16,12 @@
 #     That download means accepting Microsoft's license terms, hence
 #     TINTA_ACCEPT_MSVC_LICENSE=1.
 # Portable mode (#147): a settings.ini beside tinta.exe keeps its settings
-# there instead of %APPDATA%\Tinta.
+# there instead of %APPDATA%\TintaMono.
+# TINTA_VERSION=X.Y.Z builds that version instead of CMakeLists.txt's
+# (packaging/build-release.sh sets it).
 set -eu
 
-[ $# -ge 1 ] || { sed -n '2,19p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,21p' "$0"; exit 2; }
 SRC=$(realpath "$(dirname "$0")/../..")
 mkdir -p "$1"
 OUT=$(realpath "$1")
@@ -81,7 +83,8 @@ fi
 
 cmake -S "$SRC" -B "$OUT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     -DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/toolchains/clang-cl-xwin.cmake" \
-    -DTINTA_LLVM_BIN="$CACHE/bin" -DTINTA_XWIN_SDK="$CACHE/msvc-sdk" -DTINTA_MERMAN=$MERMAN
+    -DTINTA_LLVM_BIN="$CACHE/bin" -DTINTA_XWIN_SDK="$CACHE/msvc-sdk" -DTINTA_MERMAN=$MERMAN \
+    ${TINTA_VERSION:+-DTINTA_VERSION=$TINTA_VERSION}
 cmake --build "$OUT/build" --target tinta
 cp "$OUT/build/tinta.exe" "$OUT/tinta.exe"
 

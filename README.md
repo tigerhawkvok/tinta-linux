@@ -212,6 +212,24 @@ cmake --build . --config Release
 
 The executable will be at `build/Release/tinta.exe`.
 
+### Both release downloads, from Linux
+
+```bash
+packaging/build-release.sh 4.0.11
+```
+
+This builds, for the version given:
+- the portable Windows exe, cross-compiled with clang-cl;
+- the Linux AppImage.
+
+It then checks both. Each must carry the version, and each must export a
+Mermaid document to HTML headless; the exe runs under Wine when Wine is
+installed. The results land in `build/release-4.0.11/` with `SHA256SUMS`
+and a `BUILD-INFO.txt` naming the commit and any uncommitted changes. The
+version applies to that build only; `CMakeLists.txt` is not edited. Nothing
+is committed, tagged or published. The script's header lists the
+first-run requirements.
+
 ## Usage
 
 ```bash

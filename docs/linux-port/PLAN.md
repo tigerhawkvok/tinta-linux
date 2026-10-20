@@ -329,6 +329,12 @@ because:
 and its GTK plugin. The `.desktop` file and hicolor icons are in, and
 `--register` adds the `.mmd` MIME type.
 
+`packaging/build-release.sh VERSION` (2026-10-19) builds both downloads,
+the exe and the AppImage, for one version without editing `CMakeLists.txt`.
+It checks the version in each, and that each exports a Mermaid document
+headless, the exe under Wine. It stages the files with `SHA256SUMS` and a
+`BUILD-INFO.txt`. Publishing stays a separate, manual step.
+
 *Status (2026-10-16):*
 - **Releases:** v4.0.1–v4.0.5 are GitHub releases with the AppImage, the
   exe, `SHA256SUMS` and, from 4.0.5, the third-party notices.
