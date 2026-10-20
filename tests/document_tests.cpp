@@ -1,5 +1,6 @@
 #include "document.h"
 
+#include <cstdint>
 #include <functional>
 #include <iostream>
 
@@ -328,6 +329,58 @@ int main() {
               "inline code shortcodes untouched");
         check(codeFlat.find(":fire:") != std::string::npos,
               "fenced code shortcodes untouched");
+    }
+
+    // md4c sends line breaks and code indents from its own string literals,
+    // not the input: blocks opening with one keep in-source offsets, in order
+    {
+        const std::string md =
+            "[A link](https://example.com)\nends the first line.\n\n"
+            "**Bold**\\\nthen a hard break.\n\n"
+            "- `code`\n  wraps in a tight item.\n\n"
+            "> *Quoted*\n> wraps.\n\n"
+            "```\n\nblank first line\n```\n\n"
+            "```\n    indented first line\n```\n\n"
+            "Last paragraph.\n";
+        auto doc = parseDocument(parser, md, "notes.md");
+        check(doc.success && doc.root && doc.root->children.size() == 7,
+              "soft-break offset document parses into seven blocks");
+        bool inSource = true;
+        std::function<void(const qmd::ElementPtr&)> walk = [&](const qmd::ElementPtr& node) {
+            if (node->sourceOffset != SIZE_MAX && node->sourceOffset >= md.size()) inSource = false;
+            for (const auto& child : node->children) walk(child);
+        };
+        // The block's own offset, else its first descendant's (as layout's scroll anchors)
+        std::function<size_t(const qmd::ElementPtr&)> firstIn = [&](const qmd::ElementPtr& node) {
+            if (node->sourceOffset != SIZE_MAX) return node->sourceOffset;
+            for (const auto& child : node->children) {
+                const size_t offset = firstIn(child);
+                if (offset != SIZE_MAX) return offset;
+            }
+            return SIZE_MAX;
+        };
+        if (doc.root) {
+            walk(doc.root);
+            size_t previous = 0;
+            bool ordered = true;
+            for (const auto& block : doc.root->children) {
+                const size_t offset = firstIn(block);
+                if (offset == SIZE_MAX || offset < previous) ordered = false;
+                previous = offset;
+            }
+            check(ordered, "every block maps to its own place in the source, in order");
+            if (doc.root->children.size() == 7) {
+                // Each sits on its first rendered character's source: the
+                // line break, the blank line, the indent
+                check(doc.root->children[0]->sourceOffset == md.find("\nends the first line"),
+                      "a paragraph opening with a soft break starts at that break");
+                check(doc.root->children[4]->sourceOffset == md.find("\nblank first line"),
+                      "a code block opening with a blank line starts at that line");
+                check(doc.root->children[5]->sourceOffset == md.find("    indented first line"),
+                      "a code block opening with an indent starts at that indent");
+            }
+        }
+        check(inSource, "no source offset points outside the source");
     }
 
     if (failures != 0) {

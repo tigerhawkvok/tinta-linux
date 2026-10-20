@@ -56,6 +56,9 @@ struct ParserContext {
     FootnoteData* notes = nullptr;
     size_t inputLength = 0;
     const char* inputStart = nullptr;  // start of markdown source for offset tracking
+    size_t inputEnd = 0;  // just past the last input text md4c sent
+    Element* literalOwner = nullptr;  // element whose text so far is md4c's literals
+    size_t literalBytes = 0;
     int openAnchors = 0;  // inline <a id> tags of this block awaiting their </a>
 
     ParserContext() {
@@ -100,19 +103,46 @@ struct ParserContext {
     }
 
     void addText(const char* text, MD_SIZE size) {
-        if (notes && inputStart) {
-            auto start = reinterpret_cast<uintptr_t>(inputStart);
-            auto pointer = reinterpret_cast<uintptr_t>(text);
-            if (pointer >= start && pointer - start < inputLength) {
-                size_t offset = pointer - start;
-                for (size_t i = 0; i < size; ++i) if (text[i] == '[') {
-                    size_t slashes = 0, p = offset + i;
-                    while (p && inputStart[--p] == '\\') ++slashes;
-                    if (slashes % 2) literalBrackets.push_back(currentText.size() + i);
-                }
+        size_t offset = notes ? inputOffset(text) : SIZE_MAX;
+        if (offset != SIZE_MAX) {
+            for (size_t i = 0; i < size; ++i) if (text[i] == '[') {
+                size_t slashes = 0, p = offset + i;
+                while (p && inputStart[--p] == '\\') ++slashes;
+                if (slashes % 2) literalBrackets.push_back(currentText.size() + i);
             }
         }
         currentText.append(text, size);
+    }
+
+    // Where text sits in the input; SIZE_MAX for md4c's own literals
+    // (line breaks, code indents), which point outside it
+    size_t inputOffset(const char* text) const {
+        if (!inputStart) return SIZE_MAX;
+        auto start = reinterpret_cast<uintptr_t>(inputStart);
+        auto pointer = reinterpret_cast<uintptr_t>(text);
+        return pointer >= start && pointer - start < inputLength ? pointer - start : SIZE_MAX;
+    }
+
+    // The current element's offset is where its first text sits. Literals
+    // opening it count back from the input text that follows them, not
+    // past text already sent: "[a](u)\nb" starts its paragraph at the "\n"
+    void trackOffset(const char* text, MD_SIZE size) {
+        Element* elem = current();
+        size_t offset = inputOffset(text);
+        if (offset == SIZE_MAX) {
+            if (elem && elem->sourceOffset == SIZE_MAX) {
+                if (literalOwner != elem) literalBytes = 0;
+                literalOwner = elem;
+                literalBytes += size;
+            }
+            return;
+        }
+        if (elem && elem->sourceOffset == SIZE_MAX) {
+            size_t back = literalOwner == elem ? std::min(offset, literalBytes) : 0;
+            elem->sourceOffset = back ? std::max(inputEnd, offset - back) : offset;
+        }
+        literalOwner = nullptr;
+        inputEnd = offset + size;
     }
 };
 
@@ -413,11 +443,7 @@ static AnchorTag anchorTag(const MD_CHAR* text, MD_SIZE size, std::string& id) {
 
 static int textCallback(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
     auto* ctx = static_cast<ParserContext*>(userdata);
-
-    // Track source offset: set on the current element if not already set
-    if (ctx->inputStart && ctx->current() && ctx->current()->sourceOffset == SIZE_MAX) {
-        ctx->current()->sourceOffset = (size_t)(text - ctx->inputStart);
-    }
+    ctx->trackOffset(text, size);
 
     switch (type) {
         case MD_TEXT_HTML:  // Capture HTML content
@@ -1125,7 +1151,7 @@ static ParseResult parseCore(const std::string& markdown, FootnoteData* notes) {
             MD_FLAG_TASKLISTS |
             // Real-world notes (especially AI-chat exports) indent list
             // continuations far enough that CommonMark turns them into code
-            // blocks — literal ** markers, no wrapping (#24). Fenced ```
+            // blocks - literal ** markers, no wrapping (#24). Fenced ```
             // blocks are unaffected and remain the way to write code.
             MD_FLAG_NOINDENTEDCODEBLOCKS |
             MD_FLAG_LATEXMATHSPANS

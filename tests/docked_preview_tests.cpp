@@ -374,11 +374,12 @@ void wheel(App& app, int notches) {
 // wheel and scrollbar over the preview move the preview by its own step,
 // the source follows and the next frame leaves the preview there; handing
 // the lead back moves nothing
-void linkedScroll(App& app) {
-    const auto fixture = std::filesystem::path(TINTA_FIND_FIXTURE).parent_path() / L"linked-scroll.md";
+void linkedScroll(App& app, const wchar_t* name, const wchar_t* endMarker) {
+    const auto fixture = std::filesystem::path(TINTA_FIND_FIXTURE).parent_path() / name;
     std::ifstream input(fixture);
-    const std::wstring source = toWide(std::string((std::istreambuf_iterator<char>(input)), {}));
-    check(source.find(L"End of the linked scroll fixture") != std::wstring::npos, "the linked-scroll fixture loads");
+    const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+    const std::wstring source = toWide(bytes);
+    check(source.find(endMarker) != std::wstring::npos, "the linked-scroll fixture loads");
     for (bool wrap : {true, false}) {
         app.width = 1050;
         app.height = 900;
@@ -389,6 +390,10 @@ void linkedScroll(App& app) {
         app.editorReadingPreview = false;
         app.layoutDirty = true;
         ensureLayoutComplete(app);
+        const size_t lastHeading = bytes.rfind("\n#");
+        check(!app.scrollAnchors.empty() && app.scrollAnchors.back().sourceOffset < bytes.size() &&
+                  app.scrollAnchors.back().sourceOffset > lastHeading,
+              "the scroll anchors stay inside the source and reach its last block");
         app.verticalScrollbarVisible = app.contentHeight > app.height;
         app.editorScrollY = 0.0f;
         app.scrollY = app.targetScrollY = 0.0f;
@@ -508,7 +513,8 @@ int runDockedPreviewTests() {
     hintsLeaveWithTheMode(app, source);
     editorHints(app, source);
     readButton(app);
-    linkedScroll(app);
+    linkedScroll(app, L"linked-scroll.md", L"End of the linked scroll fixture");
+    linkedScroll(app, L"linked-scroll-soft-breaks.md", L"End of the soft-break fixture");
     persistence();
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;

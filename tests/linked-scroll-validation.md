@@ -94,3 +94,55 @@ jump.
   source there.
 - Touchpad smooth scrolling and Windows precision touchpads were not
   exercised. Both arrive as wheel deltas on the same path.
+
+## Blocks that open with a line break
+
+Validated on Windows (MSVC 14.50, Ninja, Release) on 2026-10-19. Reported by
+Philip on Windows: in a private README, linked scrolling stopped at the
+first paragraph after one heading, in either pane.
+
+### Problem
+
+md4c sends soft and hard line breaks, and a code block's indents and blank
+lines, from its own string literals, not from the input. The parser set each
+element's offset at its first text callback as `text - inputStart`, so an
+element whose first text was such a literal got an address outside the
+source. That happens to a paragraph, tight list item or quote that opens
+with a link, emphasis or code span running to the end of its first line, and
+to a fenced block that opens with a blank or indented line. The anchor list
+only accepts increasing offsets, so the bad one shut out every later anchor:
+the preview stood still while the source scrolled on, and a preview-led
+scroll sent the source to its end.
+
+### Change
+
+`ParserContext::trackOffset` (`markdown.cpp`) takes offsets from input text
+only. Literals that open an element count back from the input text after
+them, never past text already sent, so the offset still lands on the
+element's first rendered character: the line break, the blank line, the
+indent.
+
+### Checked
+
+- `document_types` (ctest): a document with each case keeps every offset
+  inside the source and its blocks in source order; the paragraph and both
+  code blocks start exactly at their break, blank line and indent.
+- `docked_preview_and_hints` (ctest) also runs the linked-scroll checks on
+  `tests/fixtures/linked-scroll-soft-breaks.md`, wrapped and unwrapped, and
+  checks both fixtures' anchors stay inside the source and reach its last
+  block. Without the change the new fixture fails the anchor check and the
+  preview stalls; with it, both fixtures pass.
+- The private README, run through the same checks locally: its anchors
+  reach its end and the preview follows past the reported paragraph. Its
+  remaining stalls sit on one 2.5 KB source line (a link's URL) that renders
+  as two short lines.
+- Full ctest: 37/38. `math_layout` fails to link with and without the change
+  (`fontCollectionFor` is in `bundled_fonts.cpp`, which that target leaves
+  out).
+
+### Limitations
+
+- Not run on Linux.
+- A code line indented with tabs gets more literal spaces than its source
+  bytes, so its block's offset can land a few bytes early, never before the
+  previous text.
