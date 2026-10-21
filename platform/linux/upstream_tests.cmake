@@ -36,6 +36,7 @@ target_compile_definitions(input_tests PRIVATE
     TINTA_FIND_FIXTURE="${TINTA_FIXTURES}/find-table-focus.md"
     TINTA_WRAP_FIXTURE="${TINTA_FIXTURES}/wrapped-cursor-selection.md"
     TINTA_SEARCH_WRAP_FIXTURE="${TINTA_FIXTURES}/search-word-wrap-260.md"
+    TINTA_ZOOM_WRAP_FIXTURE="${TINTA_FIXTURES}/editor-zoom-wrap-266.md"
     TINTA_FRAGMENT_FIXTURE="${TINTA_FIXTURES}/file-fragments/index.md"
     TINTA_CONTEXT_FIXTURE="${TINTA_FIXTURES}/editor-context-selection.md"
     TINTA_MULTICURSOR_FIXTURE="${TINTA_FIXTURES}/editor-multicursor-251.md"

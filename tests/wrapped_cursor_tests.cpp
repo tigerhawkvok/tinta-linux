@@ -223,6 +223,82 @@ void searchMatchesOnScreen(App& app) {
     exitEditMode(app);
 }
 
+// Rows each logical line actually wraps into at the current editor font,
+// against the rows the editor reserved for it
+bool rowsMatchFont(App& app, std::string& where) {
+    const float textX=dpi(app,48)+editorGutterWidth(app);
+    const float width=std::max(10.0f,editorPaneWidth(app)-textX-dpi(app,16));
+    bool ok=app.editorRowStarts.size()==app.editorLineStarts.size()+1;
+    for (size_t line=0; ok && line<app.editorLineStarts.size(); ++line) {
+        size_t start=app.editorLineStarts[line];
+        size_t end=line+1<app.editorLineStarts.size() ? app.editorLineStarts[line+1]-1 : app.editorText.size();
+        UINT32 rows=1;
+        if (end>start) {
+            Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+            app.dwriteFactory->CreateTextLayout(app.editorText.data()+start,(UINT32)(end-start),
+                app.editorTextFormat,width,1e7f,layout.GetAddressOf());
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            Microsoft::WRL::ComPtr<IDWriteTextLayout2> layout2;
+            if (app.fontFallback && SUCCEEDED(layout.As(&layout2))) layout2->SetFontFallback(app.fontFallback);
+            DWRITE_TEXT_METRICS metrics{};
+            layout->GetMetrics(&metrics);
+            rows=metrics.lineCount;
+        }
+        size_t reserved=app.editorRowStarts[line+1]-app.editorRowStarts[line];
+        if (reserved!=rows) {
+            where="line "+std::to_string(line+1)+": "+std::to_string(rows)+" rows drawn in "+
+                  std::to_string(reserved)+" reserved";
+            ok=false;
+        }
+    }
+    return ok;
+}
+
+// #266: Ctrl+wheel over the source zooms its text. With word wrap on, the
+// rows reserved per line were kept from the old font size, so a line that
+// now wraps onto more rows was drawn over the next (and one that needs
+// fewer left a gap)
+void zoomKeepsWrappedRows(App& app) {
+    if (app.editMode) exitEditMode(app);
+    app.currentFile=TINTA_ZOOM_WRAP_FIXTURE;
+    enterEditMode(app); editorReparse(app);
+    check(app.editorText.find(L"\x6eda\x8f6e")!=std::wstring::npos,"zoom fixture opens in the editor");
+    const float zoom=app.zoomFactor;
+    BYTE original[256], pressed[256];
+    GetKeyboardState(original);
+    memcpy(pressed,original,sizeof pressed);
+    pressed[VK_CONTROL]=0x80;
+    for (int width : {650,1050}) for (bool preview : {true,false}) {
+        ++sequences;
+        app.width=width; app.editorShowPreview=preview;
+        app.editorWordWrap=true; app.zoomFactor=1.0f; updateTextFormats(app);
+        rebuildLineStarts(app); app.editorScrollY=app.editorScrollX=0; place(app,0); paint(app);
+        std::string where;
+        check(rowsMatchFont(app,where),"wrapped rows match the font before zooming");
+        // Up in steps to 2.0x, then down to 0.6x; each tick as the user
+        // makes it, then the zoom timer's catch-up, then a paint
+        for (int step=0; step<24; ++step) {
+            const short notches=step<10 ? WHEEL_DELTA : -WHEEL_DELTA;
+            app.mouseX=(int)(editorPaneWidth(app)/2); app.mouseY=app.height/2;
+            SetKeyboardState(pressed);
+            handleMouseWheel(app,app.hwnd,MAKEWPARAM(0,notches),0);
+            SetKeyboardState(original);
+            if (app.zoomFactor!=app.appliedZoomFactor) updateTextFormats(app);  // TIMER_ZOOM_APPLY
+            app.zoomApplyPending=false;
+            paint(app);
+            if (!rowsMatchFont(app,where)) {
+                std::cerr << "  zoom " << app.zoomFactor << " width " << width << " preview " << preview
+                          << ": " << where << '\n';
+                check(false,"after a zoom every wrapped line keeps exactly the rows it is drawn in");
+                break;
+            }
+        }
+    }
+    SetKeyboardState(original);
+    app.zoomFactor=zoom; updateTextFormats(app);
+    exitEditMode(app);
+}
+
 int runWrappedCursorTests() {
     auto state=std::make_unique<App>(); App& app=*state;
     app.hwnd=CreateWindowExW(0,L"STATIC",L"Wrapped cursor tests",WS_POPUP,0,0,1050,900,nullptr,nullptr,nullptr,nullptr);
@@ -247,6 +323,7 @@ int runWrappedCursorTests() {
     }
     check(app.editorText==original,"navigation leaves the mixed Markdown unchanged");
     searchMatchesOnScreen(app);
+    zoomKeepsWrappedRows(app);
     DestroyWindow(app.hwnd); app.hwnd=nullptr; state.reset(); CoUninitialize();
     std::cout << "Wrapped cursor: " << sequences << " sequences, " << failures << " failures\n";
     return failures ? 1 : 0;

@@ -611,6 +611,12 @@ void updateOverlayFormats(App& app) {
         app.editorTextFormat->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
             editorLineHeight, editorBaseline);
     }
+    // With word wrap, the rows each line takes were counted at the old size
+    // or face: a zoom left a line that now wraps onto more rows drawn over
+    // the next one (#266). Count them again, and lay lines out afresh, at
+    // the next paint.
+    app.editorRowMetricsWidth = -1.0f;
+    app.clearEditorLineLayoutCache();
 
     // Slim line-number gutter (design t11): small mono digits,
     // right-aligned against the gutter's inner edge

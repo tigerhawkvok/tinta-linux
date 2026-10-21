@@ -226,6 +226,7 @@ if(BUILD_TESTING)
         TINTA_FIND_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/find-table-focus.md"
         TINTA_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/wrapped-cursor-selection.md"
         TINTA_SEARCH_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/search-word-wrap-260.md"
+        TINTA_ZOOM_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-zoom-wrap-266.md"
         TINTA_FRAGMENT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/file-fragments/index.md"
         TINTA_CONTEXT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-context-selection.md"
         TINTA_MULTICURSOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-multicursor-251.md"
