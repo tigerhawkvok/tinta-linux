@@ -109,10 +109,15 @@ void applyTheme(App& app, int themeIndex) {
 
     // If the fonts are unchanged the existing text formats are identical —
     // skip recreating ~47 IDWriteTextFormat objects. Colors are baked into
-    // the cached layout runs, so a relayout is still needed.
+    // the cached layout runs, so a relayout is still needed. The check is
+    // against the faces the formats were built from, heading face included:
+    // after a theme-editor save over the theme in use, app.theme's strings
+    // already hold the new names, or were freed (#265).
+    auto face = [](const wchar_t* name) { return std::wstring(name ? name : L""); };
     bool sameFonts = app.textFormat &&
-        wcscmp(app.theme.fontFamily, newTheme.fontFamily) == 0 &&
-        wcscmp(app.theme.codeFontFamily, installedCodeFont(app, newTheme.codeFontFamily)) == 0;
+        app.formatsFontFamily == face(newTheme.fontFamily) &&
+        app.formatsCodeFontFamily == face(installedCodeFont(app, newTheme.codeFontFamily)) &&
+        app.formatsHeadingFontFamily == face(themeHeadingFont(newTheme));
 
     app.currentThemeIndex = themeIndex;
     app.theme = newTheme;
@@ -467,6 +472,11 @@ void updateTextFormats(App& app) {
     if (!app.fontFallback) {
         app.fontFallback = createFontFallback(app.dwriteFactory, windowsCjkOrder(), true);
     }
+
+    // What applyTheme compares a new theme with
+    app.formatsFontFamily = fontFamily ? fontFamily : L"";
+    app.formatsCodeFontFamily = codeFont ? codeFont : L"";
+    app.formatsHeadingFontFamily = headingFont ? headingFont : L"";
 
     updateOverlayFormats(app);
     app.appliedZoomFactor = app.zoomFactor;

@@ -442,6 +442,10 @@ struct App {
     IDWriteTextFormat* headingItalicFormats[6] = {};
     // Superscripts and subscripts in a heading, in proportion to it
     IDWriteTextFormat* headingScriptFormats[6] = {};
+    // The faces the document formats above were built from. A theme switch
+    // compares with these, not with app.theme: saving the theme in use from
+    // the theme editor rewrites the strings app.theme points into (#265)
+    std::wstring formatsFontFamily, formatsCodeFontFamily, formatsHeadingFontFamily;
 
     // Overlay text formats (cached)
     IDWriteTextFormat* searchTextFormat = nullptr;

@@ -172,6 +172,62 @@ void themeEditorFonts(const std::filesystem::path& dir) {
     app.hwnd = nullptr;
 }
 
+std::wstring formatFace(IDWriteTextFormat* format) {
+    wchar_t name[128]{};
+    if (!format || FAILED(format->GetFontFamilyName(name, 128))) return {};
+    return name;
+}
+
+// The faces the laid-out document actually uses, from each run's layout
+bool documentUses(const App& app, const wchar_t* face) {
+    for (const auto& run : app.layoutTextRuns) {
+        wchar_t name[128]{};
+        if (run.layout && SUCCEEDED(run.layout->GetFontFamilyName(0, name, 128)) &&
+            std::wstring(name) == face) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// #265: fonts saved in the theme editor take effect at once. The editor
+// saves its copy of the theme in use under the same name, which rewrote the
+// very strings the "fonts unchanged?" check read through app.theme, so it saw
+// no change; a heading-only change was never compared at all.
+void themeEditorFontsApply(App& app, const std::string& source) {
+    app.root = app.parser.parse(source).root;
+    app.width = 1050;
+    const std::wstring name = L"Editor fonts 265";
+    int index = saveCustomTheme(themeAt(0), name, L"Georgia", L"Consolas", L"");
+    applyTheme(app, index);
+    layoutDocument(app);
+    check(formatFace(app.textFormat) == L"Georgia" && documentUses(app, L"Georgia"),
+          "a saved custom theme lays out in its text font");
+
+    struct Save { const wchar_t* text; const wchar_t* code; const wchar_t* heading; const char* what; };
+    for (const auto& save : {
+            Save{L"Verdana", L"Courier New", L"", "new text and code fonts, saved over the theme in use"},
+            Save{L"Palatino Linotype", L"Lucida Console", L"", "longer names, so the theme's strings move"},
+            Save{L"Palatino Linotype", L"Lucida Console", L"Tahoma", "only the heading font changes"},
+            Save{L"Palatino Linotype", L"Lucida Console", L"", "the heading font goes back to the text font"}}) {
+        // As the editor's Save does: its copy of the theme in use, same name
+        const D2DTheme edited = app.theme;
+        index = saveCustomTheme(edited, name, save.text, save.code, save.heading);
+        app.layoutDirty = false;
+        applyTheme(app, index);
+        check(app.layoutDirty, save.what);
+        layoutDocument(app);
+        const std::wstring heading = *save.heading ? save.heading : save.text;
+        check(formatFace(app.textFormat) == save.text, save.what);
+        check(formatFace(app.codeFormat) == save.code, save.what);
+        for (auto* format : app.headingFormats)
+            check(formatFace(format) == heading, save.what);
+        check(documentUses(app, save.text) && documentUses(app, save.code) &&
+              documentUses(app, heading.c_str()),
+              "the open document is laid out in the saved fonts at once");
+    }
+}
+
 std::string docxRun(const std::string& zip, const std::string& marker) {
     // Tinta writes stored ZIP entries, so the actual XML can be inspected
     // here without introducing a ZIP dependency into the native tests.
@@ -307,6 +363,7 @@ int main(int argc, char** argv) {
         check(docxRun(zip, "linked_code").find("<w:color w:val=\"B85A3C\"/>") != std::string::npos,
               "DOCX linked code preserves the link color");
         failures += testThemeColours(app, dir);
+        themeEditorFontsApply(app, read(TINTA_THEME_FONTS_FIXTURE));
     }
     themeEditorFonts(dir);
     CoUninitialize();

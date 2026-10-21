@@ -357,7 +357,8 @@ if(BUILD_TESTING)
     target_include_directories(theme_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(theme_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(theme_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_THEME_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-color.md")
+        TINTA_THEME_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-color.md"
+        TINTA_THEME_FONTS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/theme-editor-fonts-265.md")
     add_test(NAME inline_code_theme COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:theme_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/theme-test-$<CONFIG>

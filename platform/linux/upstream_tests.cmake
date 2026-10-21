@@ -89,7 +89,8 @@ target_compile_definitions(blockquote_layout_tests PRIVATE TINTA_QUOTE_FIXTURE="
 add_test(NAME blockquote_layout COMMAND blockquote_layout_tests)
 
 tinta_upstream_test(theme_tests tests/theme_tests.cpp tests/theme_colour_tests.cpp)
-target_compile_definitions(theme_tests PRIVATE TINTA_THEME_FIXTURE="${TINTA_FIXTURES}/inline-code-color.md")
+target_compile_definitions(theme_tests PRIVATE TINTA_THEME_FIXTURE="${TINTA_FIXTURES}/inline-code-color.md"
+    TINTA_THEME_FONTS_FIXTURE="${TINTA_FIXTURES}/theme-editor-fonts-265.md")
 tinta_driver_test(inline_code_theme theme_tests theme-test run_portable_test.cmake)
 
 tinta_upstream_test(context_menu_tests tests/context_menu_tests.cpp)
