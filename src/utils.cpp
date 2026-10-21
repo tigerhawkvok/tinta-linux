@@ -245,6 +245,18 @@ bool copyToClipboard(HWND hwnd, const std::wstring& text) {
     return copied;
 }
 
+// The block text ends with its last line's break, which the copy button
+// leaves out, as GitHub's does. A blank line written before the closing
+// fence is content and stays.
+std::wstring codeCopyText(const std::wstring& code) {
+    std::wstring text = code;
+    if (!text.empty() && text.back() == L'\n') {
+        text.pop_back();
+        if (!text.empty() && text.back() == L'\r') text.pop_back();
+    }
+    return text;
+}
+
 std::wstring absoluteFilePath(const std::string& path) {
     if (path.empty()) return {};
     std::wstring wide = toWide(path);

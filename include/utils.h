@@ -29,6 +29,9 @@ void updateWindowTitle(App& app);
 void launchQuickNoteWindow();
 void openUrl(const std::string& url);
 bool copyToClipboard(HWND hwnd, const std::wstring& text);
+// What a code block's Copy button puts on the clipboard: its lines without
+// the line break that ends the last one (#269)
+std::wstring codeCopyText(const std::wstring& code);
 // Resolve UTF-8 document paths without a MAX_PATH-sized buffer (#203).
 std::wstring absoluteFilePath(const std::string& path);
 void copyFilePath(App& app, HWND hwnd, const std::string& path);

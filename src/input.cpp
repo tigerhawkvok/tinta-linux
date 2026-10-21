@@ -3353,9 +3353,11 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         // Releasing anywhere else on a code block must NOT consume the
         // mouse-up: a drag selection ending on the block would never
         // finalize, stay "selecting", and follow the next mouse move
-        copyToClipboard(hwnd, app.codeBlocks[app.hoveredCodeBlock].codeText);
-        {
-            // The Copied pill keeps its code-block anchor (t13)
+        if (copyToClipboard(
+                hwnd, codeCopyText(app.codeBlocks[app.hoveredCodeBlock].codeText))) {
+            // The Copied pill keeps its code-block anchor (t13). An empty
+            // block, or a clipboard held by another program, copies
+            // nothing and claims nothing.
             D2D1_RECT_F anchor = app.codeBlocks[app.hoveredCodeBlock].bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "codeblock.copied"), L"", L"", SIGA_NONE,

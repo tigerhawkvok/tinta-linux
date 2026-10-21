@@ -64,7 +64,8 @@ tinta_upstream_test(file_path_tests tests/file_path_tests.cpp)
 add_test(NAME copy_file_path COMMAND file_path_tests)
 
 tinta_upstream_test(code_block_layout_tests tests/code_block_layout_tests.cpp)
-target_compile_definitions(code_block_layout_tests PRIVATE TINTA_CODE_FIXTURE="${TINTA_FIXTURES}/code-block-spacing.md")
+target_compile_definitions(code_block_layout_tests PRIVATE TINTA_CODE_FIXTURE="${TINTA_FIXTURES}/code-block-spacing.md"
+    TINTA_COPY_FIXTURE="${TINTA_FIXTURES}/code-block-copy-269.md")
 add_test(NAME code_block_layout COMMAND code_block_layout_tests)
 
 tinta_upstream_test(syntax_tests tests/syntax_tests.cpp)
