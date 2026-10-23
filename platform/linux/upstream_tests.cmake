@@ -136,3 +136,11 @@ add_test(NAME plantuml_parser_selfcheck COMMAND ${CMAKE_COMMAND}
     -DTEST_ARGS=--expect-failure
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_plantuml_tests.cmake)
 set_tests_properties(plantuml_parser_selfcheck PROPERTIES WILL_FAIL TRUE)
+
+# PlantUML inside the app: layout, print preview, Word export, settings
+tinta_upstream_test(plantuml_app_tests tests/plantuml_app_tests.cpp)
+target_compile_definitions(plantuml_app_tests PRIVATE
+    TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
+    TINTA_TRANSPARENT_FIXTURE_DIR="${TINTA_FIXTURES}/plantuml-transparent")
+add_dependencies(plantuml_app_tests fake_plantuml)
+tinta_driver_test(plantuml_in_app plantuml_app_tests plantuml-app-test run_portable_test.cmake)

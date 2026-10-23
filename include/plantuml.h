@@ -19,8 +19,9 @@
 //     (injectPreamble);
 //   - `-failfast2` suppresses the error-image artifact on syntax errors;
 //   - a block named with the space form (`@startuml Flow`) makes the tool
-//     write `Flow.png` instead of `<input-stem>.png`, so renderSync resolves
-//     more than the canonical input name;
+//     write `Flow.png` instead of `<input-stem>.png`, and the tool renders
+//     every block of its input: a document would choose the tool's output
+//     file names, so only the first block reaches it, unnamed (toolInput);
 //   - exit 100 means "no diagram in this source", 200 a syntax error.
 
 #include <cstdint>
@@ -29,6 +30,13 @@
 #include <windows.h>
 
 namespace plantuml {
+
+// Joins work-directory paths: a '\' is part of a file name off Windows
+#ifdef _WIN32
+inline constexpr wchar_t kPathSeparator[] = L"\\";
+#else
+inline constexpr wchar_t kPathSeparator[] = L"/";
+#endif
 
 // Fence languages that route to the PlantUML renderer. The argument must
 // already be lowercased (callers normalize the markdown info string before
@@ -138,36 +146,46 @@ std::wstring buildCommandLine(const Tool& tool, int format,
 // environment says.
 std::wstring sandboxEnvironment(const wchar_t* inherited);
 
+// What the tool is given for a source: its first `@startuml` block alone,
+// with the anchor line reduced to a bare `@startuml`, up to the first line
+// beginning `@end` (written as a bare `@enduml`) or `@start` (any diagram
+// type, where the tool would open another block, which is left out). The tool names its output after a block
+// name and renders every block it reads, so a block name from a document
+// (`@startuml ..\..\x`) could otherwise pick where an image is written.
+// A source without an anchor is returned unchanged.
+std::string toolInput(const std::string& source);
+
 // Runs the tool synchronously in `workDir` and returns the rendered image.
-// Writes `workDir\input.puml` (UTF-8, no BOM), spawns the tool with
+// Writes toolInput(source) to `workDir\input.puml` (UTF-8, no BOM), spawns
+// the tool with
 // CREATE_NO_WINDOW in PlantUML's SANDBOX security profile
-// (sandboxEnvironment) and waits at most `timeoutMs`, terminating the
-// process on timeout (an INFINITE budget is rejected: every spawn stays
-// bounded).
+// (sandboxEnvironment) inside a job object, and waits at most `timeoutMs`.
+// A timeout, or `cancelEvent` (when non-null) being signalled, ends the
+// whole job: the tool and anything it started, such as Graphviz under
+// java.exe. An INFINITE budget is rejected: every spawn stays bounded.
 //
 // The exit code is validated FIRST: on any failure (non-zero exit, timeout,
 // or no usable artifact) the private workDir is scrubbed of every image
 // artifact the tool may have written plus the staged source, `error` is set
 // and `outFile` stays empty.
 //
-// A zero exit resolves the artifact in this order: the canonical
-// `workDir\input.png|svg`; then the named-block artifact `<Name>.png|svg`
-// parsed from the anchor line (`@startuml Flow` / `@startuml(Flow)`); then
-// the single remaining `*.png|svg` file in workDir (lexicographically first
-// when the tool wrote several). Only a resolved non-empty artifact returns
-// true and sets `outFile`.
+// A zero exit resolves the artifact: the canonical `workDir\input.png|svg`
+// (the block reaches the tool unnamed), else the single remaining
+// `*.png|svg` file in workDir (lexicographically first when the tool wrote
+// several). Only a resolved non-empty artifact returns true and sets
+// `outFile`.
 //
 // This is the deliberate synchronous entry point used by print and export;
 // the interactive layout path must schedule it off the UI thread instead.
 //
 // `exitCodeOut`, when non-null, receives the tool's outcome: 0 on success,
 // the tool's own exit code when the run completed but failed, and -1 for a
-// timeout, a spawn failure or any preflight failure. A clean exit that
-// still produced no usable image reports its exit code (0).
+// timeout, a cancellation, a spawn failure or any preflight failure. A
+// clean exit that still produced no usable image reports its exit code (0).
 bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
                 int format, const std::wstring& workDir, std::wstring& outFile,
                 DWORD timeoutMs, std::wstring& error,
-                int* exitCodeOut = nullptr);
+                int* exitCodeOut = nullptr, HANDLE cancelEvent = nullptr);
 
 }  // namespace plantuml
 

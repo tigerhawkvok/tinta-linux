@@ -1129,7 +1129,7 @@ std::string plantumlFenceSvg(ExportCtx& ctx, const std::string& code) {
                    std::to_wstring(GetCurrentProcessId());
     }
     const std::wstring workDir =
-        workRoot + L"\\export-html\\" + plantuml::keyHex(key);
+        workRoot + plantuml::kPathSeparator + L"export-html" + plantuml::kPathSeparator + plantuml::keyHex(key);
 
     std::wstring outFile;
     std::wstring error;

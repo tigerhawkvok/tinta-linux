@@ -309,6 +309,11 @@ void wordCount(App& app) {
     editorReparse(app, true);
     check(app.editorDocCounts.words == 3 && app.editorDocCounts.characters == 19,
           "plain-text documents count as they stand");
+    app.currentFile = "diagram.puml";
+    setText(app, L"@startuml\nAlice -> Bob: hi\n@enduml", 0);
+    editorReparse(app, true);
+    check(app.editorDocCounts.words > 0 && app.editorDocCounts.characters > 0,
+          "a PlantUML source counts as it stands");
     app.currentFile = saved;
     app.showWordCount = false;
     app.renderTarget->BeginDraw();

@@ -461,6 +461,19 @@ if(BUILD_TESTING)
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_plantuml_tests.cmake)
     set_tests_properties(plantuml_parser_selfcheck PROPERTIES WILL_FAIL TRUE)
 
+    # PlantUML inside the app: layout, print preview, Word export, settings
+    add_executable(plantuml_app_tests tests/plantuml_app_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(plantuml_app_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(plantuml_app_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(plantuml_app_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
+        TINTA_TRANSPARENT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/plantuml-transparent")
+    add_dependencies(plantuml_app_tests fake_plantuml)
+    add_test(NAME plantuml_in_app COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:plantuml_app_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/plantuml-app-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_portable_test.cmake)
+
     add_executable(document_tests
         tests/document_tests.cpp
         src/document.cpp src/frontmatter.cpp

@@ -2423,6 +2423,10 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                 const uint64_t key = plantuml::cacheKey(
                     code, preambleText, toolPath,
                     plantuml::toolStampFor(toolPath), 0 /*png*/);
+                // The fit ordinal is taken whether or not the image has
+                // arrived yet: a diagram still rendering must not shift
+                // the fit state of the diagrams after it
+                const unsigned fitKey = 0x80000000u | app.layoutDiagramSeq++;
                 // Adopt finished renders on this (owner) thread before
                 // deciding: a relayout may run before the posted
                 // WM_APP_PLANTUML_READY is dispatched, and drainFinished()
@@ -2441,8 +2445,6 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                     auto& image = getOrLoadImage(app, wideToUtf8(pngPath));
                     if (image.failed || !image.bitmap) return false;
                     const float scale = app.contentScale * app.zoomFactor;
-                    const unsigned fitKey =
-                        0x80000000u | app.layoutDiagramSeq++;
                     const bool fitActive = fitBlockEnabled(app, fitKey);
                     const float renderedW = (float)image.width * scale;
                     const float renderedH = (float)image.height * scale;
@@ -2496,11 +2498,11 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                     // relative \print-sync\<key>. Idempotent.
                     plantumlEnsureQueue(app);
                     const std::wstring workDir = app.plantumlWorkRoot +
-                        L"\\print-sync\\" + plantuml::keyHex(key);
+                        plantuml::kPathSeparator + L"print-sync" + plantuml::kPathSeparator + plantuml::keyHex(key);
                     // The post-print relayout at screen width reuses this
                     // file instead of spawning the tool again; the tool
                     // stamp is part of the key, so an upgrade invalidates.
-                    const std::wstring cachedPng = workDir + L"\\input.png";
+                    const std::wstring cachedPng = workDir + plantuml::kPathSeparator + L"input.png";
                     if (GetFileAttributesW(cachedPng.c_str()) !=
                             INVALID_FILE_ATTRIBUTES &&
                         layOutPng(cachedPng)) {

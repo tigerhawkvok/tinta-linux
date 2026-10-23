@@ -70,8 +70,14 @@ bool hasJarSuffix(const std::wstring& path) {
 // token followed by a block-name separator - whitespace (`@startuml Flow`)
 // or an opening parenthesis (`@startuml(Flow)`). A lookalike such as
 // `@startumlx`, and every non-UML start tag (`@startjson`, `@startyaml`,
-// ...), never matches.
+// ...), never matches. A UTF-8 byte order mark ahead of the line (a .puml
+// saved "UTF-8 with BOM") is skipped.
 bool isAnchorLine(const std::string& source, size_t begin, size_t end) {
+    if (end - begin >= 3 && static_cast<unsigned char>(source[begin]) == 0xEF &&
+        static_cast<unsigned char>(source[begin + 1]) == 0xBB &&
+        static_cast<unsigned char>(source[begin + 2]) == 0xBF) {
+        begin += 3;
+    }
     while (begin < end && (source[begin] == ' ' || source[begin] == '\t')) ++begin;
     while (end > begin && (source[end - 1] == ' ' || source[end - 1] == '\t' ||
                            source[end - 1] == '\r')) {
@@ -90,92 +96,27 @@ bool isAnchorLine(const std::string& source, size_t begin, size_t end) {
     return after == ' ' || after == '\t' || after == '(';
 }
 
-// UTF-8 (CP_UTF8) to wide for artifact names parsed out of the source.
-std::wstring utf8ToWide(const std::string& text) {
-    if (text.empty()) return std::wstring();
-    const int length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(),
-                                           static_cast<int>(text.size()),
-                                           nullptr, 0);
-    if (length <= 0) return std::wstring();
-    std::wstring out(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
-                        out.data(), length);
-    return out;
-}
-
-// A block name is used verbatim as an artifact file name, so anything that
-// could escape the private work directory or confuse the file APIs is
-// rejected and the unnamed path is taken instead.
-bool isSafeArtifactName(const std::string& name) {
-    if (name.empty() || name == "." || name == "..") return false;
-    for (char c : name) {
-        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' ||
-            c == '"' || c == '<' || c == '>' || c == '|') {
-            return false;
-        }
+// The line [begin, end), leading blanks skipped, starts with `tag`
+// case-insensitively. PlantUML starts a block on any line beginning
+// `@start` (`@startmindmap`, `@startjson`, even `@startumlz`) and ends it
+// on any line beginning `@end`.
+bool lineStartsWith(const std::string& source, size_t begin, size_t end, const char* tag) {
+    while (begin < end && (source[begin] == ' ' || source[begin] == '\t')) ++begin;
+    for (size_t i = 0; tag[i] != '\0'; ++i, ++begin) {
+        if (begin >= end) return false;
+        char c = source[begin];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != tag[i]) return false;
     }
     return true;
 }
 
-// The block name on the first `@startuml` anchor line, accepting both the
-// `@startuml Flow` and the `@startuml(Flow)` forms. Returns an empty string
-// when the first block is unnamed (or no anchor exists at all): the tool
-// then names its output after the input file stem.
-std::wstring namedBlockToken(const std::string& source) {
-    const size_t size = source.size();
-    size_t pos = 0;
-    while (pos <= size) {
-        const size_t newline = source.find('\n', pos);
-        const size_t lineEnd = newline == std::string::npos ? size : newline;
-        if (isAnchorLine(source, pos, lineEnd)) {
-            size_t begin = pos;
-            while (begin < lineEnd &&
-                   (source[begin] == ' ' || source[begin] == '\t')) {
-                ++begin;
-            }
-            const size_t after = begin + 9;  // strlen("@startuml")
-            std::string token;
-            if (after < lineEnd) {
-                const char separator = source[after];
-                if (separator == ' ' || separator == '\t') {
-                    size_t first = after;
-                    while (first < lineEnd && (source[first] == ' ' ||
-                                               source[first] == '\t')) {
-                        ++first;
-                    }
-                    size_t last = first;
-                    while (last < lineEnd && source[last] != ' ' &&
-                           source[last] != '\t' && source[last] != '\r') {
-                        ++last;
-                    }
-                    token.assign(source, first, last - first);
-                } else if (separator == '(') {
-                    const size_t close = source.find(')', after + 1);
-                    if (close != std::string::npos && close <= lineEnd) {
-                        token.assign(source, after + 1, close - (after + 1));
-                    }
-                }
-            }
-            if (!isSafeArtifactName(token)) return std::wstring();
-            return utf8ToWide(token);
-        }
-        if (newline == std::string::npos) break;
-        pos = newline + 1;
-    }
-    return std::wstring();
-}
-
-// Locates the image the tool produced in `workDir`, in the real tool's own
-// naming order:
-//   1. the canonical `input.<ext>` (an unnamed single block);
-//   2. the named-block artifact `<Name>.<ext>` parsed from the anchor line
-//      (the tool writes `Flow.png` for `@startuml Flow`);
-//   3. the only remaining `*.<ext>` file (lexicographically first when the
-//      source produced several, as in multi-block sources).
-// Every candidate must be a non-empty regular file. Returns an empty path
-// when nothing usable exists.
+// Locates the image the tool produced in `workDir`: the canonical
+// `input.<ext>` (toolInput hands the tool one unnamed block), else the only
+// remaining `*.<ext>` file (lexicographically first when there are
+// several). Every candidate must be a non-empty regular file. Returns an
+// empty path when nothing usable exists.
 std::filesystem::path resolveArtifact(const std::filesystem::path& workDir,
-                                      const std::string& sourceWithPreamble,
                                       int format, std::error_code& ec) {
     const std::wstring suffix = format == 1 ? L".svg" : L".png";
     auto usable = [](const std::filesystem::path& candidate) {
@@ -189,12 +130,6 @@ std::filesystem::path resolveArtifact(const std::filesystem::path& workDir,
 
     const std::filesystem::path canonical = workDir / (L"input" + suffix);
     if (usable(canonical)) return canonical;
-
-    const std::wstring token = namedBlockToken(sourceWithPreamble);
-    if (!token.empty()) {
-        const std::filesystem::path named = workDir / (token + suffix);
-        if (usable(named)) return named;
-    }
 
     std::vector<std::filesystem::path> candidates;
     std::filesystem::directory_iterator it(workDir, ec);
@@ -475,9 +410,40 @@ std::wstring sandboxEnvironment(const wchar_t* inherited) {
     return block;
 }
 
+std::string toolInput(const std::string& source) {
+    const size_t size = source.size();
+    size_t pos = 0;
+    while (pos < size) {
+        const size_t newline = source.find('\n', pos);
+        const size_t lineEnd = newline == std::string::npos ? size : newline;
+        if (isAnchorLine(source, pos, lineEnd)) {
+            std::string out = "@startuml\n";
+            size_t line = newline == std::string::npos ? size : newline + 1;
+            while (line < size) {
+                const size_t next = source.find('\n', line);
+                const size_t end = next == std::string::npos ? size : next;
+                // Any start tag opens another, nameable block: the copy ends
+                if (lineStartsWith(source, line, end, "@start")) break;
+                if (lineStartsWith(source, line, end, "@end")) {
+                    out += "@enduml\n";  // bare, whatever followed the tag
+                    break;
+                }
+                const size_t stop = next == std::string::npos ? size : next + 1;
+                out.append(source, line, stop - line);
+                line = stop;
+            }
+            return out;
+        }
+        if (newline == std::string::npos) break;
+        pos = newline + 1;
+    }
+    return source;
+}
+
 bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
                 int format, const std::wstring& workDir, std::wstring& outFile,
-                DWORD timeoutMs, std::wstring& error, int* exitCodeOut) {
+                DWORD timeoutMs, std::wstring& error, int* exitCodeOut,
+                HANDLE cancelEvent) {
     outFile.clear();
     error.clear();
     if (exitCodeOut != nullptr) *exitCodeOut = -1;
@@ -506,14 +472,14 @@ bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
     }
 
     const std::filesystem::path inputPath = dir / L"input.puml";
+    const std::string input = toolInput(sourceWithPreamble);
     {
         std::ofstream out(inputPath, std::ios::binary | std::ios::trunc);
         if (!out) {
             error = L"Cannot write the PlantUML input file";
             return false;
         }
-        out.write(sourceWithPreamble.data(),
-                  static_cast<std::streamsize>(sourceWithPreamble.size()));
+        out.write(input.data(), static_cast<std::streamsize>(input.size()));
         out.flush();
         if (!out) {
             error = L"Cannot write the PlantUML input file";
@@ -534,32 +500,63 @@ bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
         environment = sandboxEnvironment(nullptr);
     }
 
+    // The tool runs in a job that dies with it: a timeout or a cancel ends
+    // everything it started (Graphviz under java.exe, java.exe under a
+    // launcher), not just the direct child
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits,
+                                     sizeof(limits))) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                         environment.data(), workDir.c_str(), &si, &pi)) {
         const DWORD lastError = GetLastError();
+        if (job != nullptr) CloseHandle(job);
         scrubWorkDir(dir);
         error = L"Cannot start the PlantUML tool (error " +
                 std::to_wstring(lastError) + L")";
         return false;
     }
+    if (job != nullptr && !AssignProcessToJobObject(job, pi.hProcess)) {
+        CloseHandle(job);  // runs anyway, just without the tree kill
+        job = nullptr;
+    }
+    ResumeThread(pi.hThread);
 
-    const DWORD waitResult = WaitForSingleObject(pi.hProcess, timeoutMs);
+    const HANDLE waits[2] = {pi.hProcess, cancelEvent};
+    const DWORD waitResult =
+        WaitForMultipleObjects(cancelEvent != nullptr ? 2 : 1, waits, FALSE, timeoutMs);
     bool timedOut = false;
+    bool cancelled = false;
     DWORD exitCode = 1;
     if (waitResult == WAIT_OBJECT_0) {
         GetExitCodeProcess(pi.hProcess, &exitCode);
     } else {
-        timedOut = true;
-        TerminateProcess(pi.hProcess, 1);
+        cancelled = waitResult == WAIT_OBJECT_0 + 1;
+        timedOut = !cancelled;
+        if (job != nullptr) TerminateJobObject(job, 1);
+        else TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 5000);  // reap the killed process
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    if (job != nullptr) CloseHandle(job);  // ends whatever the tool left running
 
+    if (cancelled) {
+        scrubWorkDir(dir);
+        error = L"PlantUML render cancelled";
+        return false;
+    }
     if (timedOut) {
         scrubWorkDir(dir);
         error = L"PlantUML timed out after " + std::to_wstring(timeoutMs) + L" ms";
@@ -572,8 +569,7 @@ bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
         return false;
     }
 
-    const std::filesystem::path artifact =
-        resolveArtifact(dir, sourceWithPreamble, fmt, ec);
+    const std::filesystem::path artifact = resolveArtifact(dir, fmt, ec);
     if (artifact.empty()) {
         if (exitCodeOut != nullptr) *exitCodeOut = static_cast<int>(exitCode);
         scrubWorkDir(dir);

@@ -1717,6 +1717,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // One relayout for however many images arrived since armed
                 KillTimer(hwnd, TIMER_IMAGE_REFLOW);
                 app->layoutDirty = true;
+                // The open print preview draws its own cached pages: lay
+                // them out again so the diagram appears and paginates as
+                // it will print
+                printPreviewRefresh(*app);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (wParam == TIMER_ZOOM_APPLY && app) {

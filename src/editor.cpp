@@ -1368,7 +1368,8 @@ void scrollEditorToMatch(App& app) {
 // Counts what a reader sees: the parsed Markdown's prose, link text and
 // inline code. Plain-text and diagram documents count as they stand.
 static TextCounts editorCountSource(App& app, const std::wstring& source) {
-    if (isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile)) {
+    if (isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile) ||
+        isPlantUmlDocumentPath(app.currentFile)) {
         return countPlainText(source);
     }
     auto result = parseDocument(app.parser, toUtf8(source), app.currentFile);
@@ -1381,7 +1382,7 @@ static TextCounts editorCountSource(App& app, const std::wstring& source) {
 // buffer when the preview pane is hidden
 static void editorRefreshDocCounts(App& app, const ElementPtr& parsed) {
     if (parsed && !isPlainTextDocumentPath(app.currentFile) &&
-        !isMermaidDocumentPath(app.currentFile)) {
+        !isMermaidDocumentPath(app.currentFile) && !isPlantUmlDocumentPath(app.currentFile)) {
         std::wstring visible;
         appendCountableText(parsed, visible);
         app.editorDocCounts = countPlainText(visible);

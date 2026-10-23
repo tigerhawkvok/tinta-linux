@@ -48,6 +48,8 @@ void plantumlSetUserPath(App& app, const std::wstring& path) {
     Settings settings = loadSettings();
     settings.plantumlPath = toUtf8Str(path);
     saveSettings(settings);
+    // The open document's fences render with the new tool (its key differs)
+    app.layoutDirty = true;
 }
 
 void plantumlEnsureQueue(App& app) {

@@ -21,6 +21,11 @@
 //   TINTA_FAKE_PLANTUML_PROFILE_LOG=<path> append the PLANTUML_SECURITY_PROFILE
 //                                          the tool was started with, or
 //                                          "(unset)" (sandbox assertions)
+//   TINTA_FAKE_PLANTUML_CHILD_PIDFILE=<path> start a long-lived child (another
+//                                          copy of this tool, through cmd's
+//                                          start) that writes its process id
+//                                          to <path>, as java.exe starts dot.exe
+//                                          (process-tree assertions)
 //
 // The fixture directory is located via TINTA_FAKE_PLANTUML_FIXTURE_DIR first,
 // then by walking up from the current directory and from the directory of
@@ -31,6 +36,12 @@
 
 #include <chrono>
 #include <cctype>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#define _getpid getpid
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -119,26 +130,39 @@ void appendLog(const std::string& logPath, const std::vector<std::string>& args)
     log << '\n';
 }
 
-// The real CLI names a block's output after the block: when the first
-// `@startuml` line carries a name (` Name` or `(Name)` form) the tool writes
-// `<Name>.<ext>`. Returns an empty string when that block is unnamed (or the
-// input cannot be read), which selects the input-stem name.
+// The real CLI names a block's output after the block: when the line that
+// starts it carries a name (` Name` or `(Name)` form) the tool writes
+// `<Name>.<ext>`. Any `@start<type>` line starts a block, dropping one
+// already open, and the first `@end` line ends it, so the block rendered
+// is the last start line before that end. Returns an empty string when that
+// block is unnamed (or the input cannot be read), which selects the
+// input-stem name.
 std::string sourceBlockName(const std::filesystem::path& input) {
     std::ifstream in(input, std::ios::binary);
     if (!in) return {};
     std::string line;
+    std::string blockHead;
     while (std::getline(in, line)) {
         size_t begin = 0;
         while (begin < line.size() && (line[begin] == ' ' || line[begin] == '\t')) {
             ++begin;
         }
-        if (line.size() - begin < 9) continue;
-        std::string head = line.substr(begin, 9);
-        for (char& c : head) {
+        std::string lower = line.substr(begin);
+        for (char& c : lower) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
-        if (head != "@startuml") continue;
-        const size_t after = begin + 9;
+        if (lower.compare(0, 4, "@end") == 0) break;
+        if (lower.compare(0, 6, "@start") == 0) blockHead = line.substr(begin);
+    }
+    {
+        line = blockHead;
+        if (line.empty()) return {};
+        // The tag runs over letters and dashes: @startuml, @startmindmap, ...
+        size_t after = 6;
+        while (after < line.size() &&
+               (std::isalpha(static_cast<unsigned char>(line[after])) || line[after] == '-')) {
+            ++after;
+        }
         std::string token;
         if (after < line.size()) {
             const char separator = line[after];
@@ -173,7 +197,6 @@ std::string sourceBlockName(const std::filesystem::path& input) {
         }
         return token;
     }
-    return {};
 }
 
 } // namespace
@@ -185,6 +208,16 @@ int main(int argc, char* argv[]) {
     args.reserve(static_cast<size_t>(argc > 0 ? argc - 1 : 0));
     for (int i = 1; i < argc; ++i) {
         args.emplace_back(argv[i]);
+    }
+
+    // Child mode: record this process id, then outlive any sane timeout
+    if (args.size() == 2 && args[0] == "--fake-child") {
+        {
+            std::ofstream pid(args[1], std::ios::trunc);
+            pid << _getpid() << '\n';
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+        return 0;
     }
 
     // Record the spawn before anything else so callers can count invocations
@@ -238,6 +271,19 @@ int main(int argc, char* argv[]) {
     if (input.empty()) {
         std::cerr << "fake_plantuml: missing input file path\n";
         return 1;
+    }
+
+    const std::string childPidFile = envString("TINTA_FAKE_PLANTUML_CHILD_PIDFILE");
+    if (!childPidFile.empty() && argc > 0) {
+#ifdef _WIN32
+        const std::string command = "start \"\" /b \"" + std::string(argv[0]) +
+                                    "\" --fake-child \"" + childPidFile + "\"";
+#else
+        // A shell background job, in this process's group (the job's)
+        const std::string command = "\"" + std::string(argv[0]) + "\" --fake-child \"" +
+                                    childPidFile + "\" &";
+#endif
+        std::system(command.c_str());
     }
 
     // Sleep before writing (lets timeout tests hold the caller).

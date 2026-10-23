@@ -914,7 +914,8 @@ void testQueueLruEviction() {
     const std::filesystem::path logPath = scratch / L"spawn.log";
     const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
 
-    plantuml::PlantumlRenderQueue queue({}, 4);
+    // Pinning off: this checks the eviction order itself
+    plantuml::PlantumlRenderQueue queue({}, 4, std::chrono::milliseconds(0));
     const std::filesystem::path workRoot = scratch / L"work";
 
     uint64_t keys[6] = {};
@@ -943,7 +944,8 @@ void testQueueBackoffRetry() {
     std::filesystem::create_directories(scratch);
     const std::filesystem::path logPath = scratch / L"spawn.log";
     const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
-    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"200");
+    // Exit 1: a failure that may pass next time (a syntax error does not)
+    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"1");
 
     plantuml::BackoffConfig backoff;
     backoff.delaysMs = {50, 80, 120};
@@ -1045,13 +1047,14 @@ void testRenderNamedBlock() {
             std::cerr << "  renderSync error: " << toNarrow(error) << '\n';
             continue;
         }
-        check(std::filesystem::path(out).filename().wstring() == L"Flow.png",
-              "the named artifact is resolved instead of scrubbed");
+        // The tool never sees the name, so it cannot pick the output file
+        check(std::filesystem::path(out).filename().wstring() == L"input.png",
+              "a named block renders to the canonical input.png");
         check(std::filesystem::exists(out) &&
                   std::filesystem::file_size(out) > 0,
-              "the resolved named artifact exists and is non-empty");
-        check(!std::filesystem::exists(dir / L"input.png"),
-              "a named block leaves no canonical input.png behind");
+              "the named block's image exists and is non-empty");
+        check(!std::filesystem::exists(dir / L"Flow.png"),
+              "a named block leaves no Flow.png behind");
     }
 }
 
@@ -1074,8 +1077,8 @@ void testQueueNamedBlockAdoption() {
     if (hit) {
         check(hit->ok, "the named-block cache entry is a success");
         check(std::filesystem::path(hit->filePath).filename().wstring() ==
-                  L"Flow.png",
-              "the queue adopts the named artifact");
+                  L"input.png",
+              "the queue adopts the named block's canonical image");
         check(std::filesystem::exists(hit->filePath),
               "the adopted named artifact exists on disk");
     }
@@ -1089,7 +1092,7 @@ void testQueueRetryCap() {
     std::filesystem::create_directories(scratch);
     const std::filesystem::path logPath = scratch / L"spawn.log";
     const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
-    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"200");
+    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"1");
 
     plantuml::BackoffConfig backoff;
     backoff.delaysMs = {50, 80, 120};
@@ -1239,6 +1242,240 @@ void testSweepStaleTempRoots() {
     std::filesystem::remove_all(nonDigits, ec);
 }
 
+// ------------------------------------------------- PR #248 review hardening
+
+void testToolInput() {
+    // Only the first block reaches the tool, its anchor bare: the tool
+    // names its output after a block name and renders every block it reads
+    check(plantuml::toolInput("@startuml Flow\nA -> B\n@enduml\n") ==
+              "@startuml\nA -> B\n@enduml\n",
+          "a named anchor reaches the tool bare");
+    check(plantuml::toolInput("@startuml(..\\..\\x)\nA -> B\n@enduml\n") ==
+              "@startuml\nA -> B\n@enduml\n",
+          "a parenthesized name with a path reaches the tool bare");
+    check(plantuml::toolInput("title before\n  @STARTUML x\nskinparam a b\nA -> B\n"
+                              "@enduml\n@startuml ../second\nC -> D\n@enduml\n") ==
+              "@startuml\nskinparam a b\nA -> B\n@enduml\n",
+          "only the first block is kept, text around it dropped");
+    check(plantuml::toolInput("@startuml\nA -> B\n@startuml ../x\nC -> D\n@enduml\n") ==
+              "@startuml\nA -> B\n",
+          "an unterminated block stops at the next anchor");
+    check(plantuml::toolInput("@startuml Flow\r\nA -> B\r\n@enduml\r\n") ==
+              "@startuml\nA -> B\r\n@enduml\n",
+          "CRLF lines after the anchor are kept, the end line written bare");
+    check(plantuml::toolInput("A -> B\n") == "A -> B\n",
+          "a source without an anchor is unchanged");
+    // PlantUML opens a block on any @start line and ends one on any @end
+    // line: neither may bring a document's name or a second block along
+    check(plantuml::toolInput("@startuml\n@startmindmap ..\\..\\pwned\n* root\n@endmindmap\n") ==
+              "@startuml\n",
+          "a @startmindmap line ends the copy");
+    check(plantuml::toolInput("@startuml\nA -> B\n@enduml ' done\n@startjson ..\\x\n{}\n@endjson\n") ==
+              "@startuml\nA -> B\n@enduml\n",
+          "an @enduml with text after it ends the block, written bare");
+    check(plantuml::toolInput("@startuml\nA -> B\n@startumlz ..\\pwned\nC -> D\n") ==
+              "@startuml\nA -> B\n",
+          "a lookalike @startumlz line ends the copy");
+    check(plantuml::toolInput("@startuml\nA -> B\n@END\n") == "@startuml\nA -> B\n@enduml\n",
+          "an upper-case @END ends the block");
+    // A .puml saved as "UTF-8 with BOM" renders, and the tool never sees the mark
+    std::string withBom = "\xEF\xBB\xBF@startuml\nA -> B\n@enduml\n";
+    check(plantuml::injectPreamble(withBom, "skinparam shadowing false\n"),
+          "a byte order mark does not hide the @startuml anchor");
+    check(plantuml::toolInput(withBom) == "@startuml\nskinparam shadowing false\nA -> B\n@enduml\n",
+          "the tool's input starts with a bare anchor, no byte order mark");
+}
+
+void testRenderBlockNameNeverReachesTool() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path dir = freshScratch(L"block-name");
+    const std::string source =
+        "@startuml ../escaped-by-name\nA -> B\n@enduml\n@startuml Second\nC -> D\n@enduml\n";
+    std::wstring out;
+    std::wstring error;
+    const bool ok = plantuml::renderSync(tool, source, 0, dir.wstring(), out, 15000, error);
+    check(ok, "a document-named block still renders");
+    check(std::filesystem::path(out).filename().wstring() == L"input.png",
+          "the image keeps the canonical name");
+    const std::string staged = readTextFile(dir / L"input.puml");
+    check(staged == "@startuml\nA -> B\n@enduml\n",
+          "the tool reads one unnamed block, never the document's names");
+    check(!std::filesystem::exists(dir / L"Second.png") &&
+              !std::filesystem::exists(dir.parent_path() / L"escaped-by-name.png"),
+          "no image is written under a name from the document");
+}
+
+void testRenderOtherStartTagNeverNamesOutput() {
+    // The fake names its output from the block a @start<type> line opens,
+    // as the real CLI does: the document's block never reaches it
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path dir = freshScratch(L"start-type");
+    const std::string source = "@startuml\n@startmindmap Pwned\n* root\n@endmindmap\n";
+    std::wstring out;
+    std::wstring error;
+    const bool ok = plantuml::renderSync(tool, source, 0, dir.wstring(), out, 15000, error);
+    check(ok && std::filesystem::path(out).filename().wstring() == L"input.png",
+          "a @startmindmap block cannot name the image");
+    check(!std::filesystem::exists(dir / L"Pwned.png"), "no image is written as Pwned.png");
+}
+
+void testRenderTimeoutEndsChildren() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"timeout-children");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path pidFile = scratch / L"child.pid";
+    const ScopedEnv childEnv(L"TINTA_FAKE_PLANTUML_CHILD_PIDFILE", pidFile.c_str());
+    const ScopedEnv sleepEnv(L"TINTA_FAKE_PLANTUML_SLEEP_MS", L"10000");
+
+    std::wstring out;
+    std::wstring error;
+    const bool ok = plantuml::renderSync(tool, kQueueSource, 0,
+                                         (scratch / L"work").wstring(), out, 2500, error);
+    check(!ok, "the hung tool times out");
+
+    unsigned long pid = 0;
+    if (!pollUntil([&] {
+            std::ifstream in(pidFile);
+            return static_cast<bool>(in >> pid) && pid != 0;
+        }, 3000, "the tool's child records its process id")) {
+        return;
+    }
+    // The job ends what the tool started (Graphviz under java.exe), too
+    pollUntil([&] {
+        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+        if (process == nullptr) return true;
+        const DWORD state = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        return state == WAIT_OBJECT_0;
+    }, 3000, "a timeout ends the tool's children with it");
+    if (HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
+        TerminateProcess(process, 0);  // tidy up should the check have failed
+        CloseHandle(process);
+    }
+}
+
+void testQueueSyntaxErrorPermanent() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-syntax");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"200");
+
+    plantuml::BackoffConfig backoff;
+    backoff.delaysMs = {50, 80, 120};
+    plantuml::PlantumlRenderQueue queue(backoff);
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x9C01ULL;
+    queue.request(41, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == 1, "a syntax error (exit 200) spawns the tool once");
+
+    queue.request(41, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == 1, "and is not tried again on the next layout");
+}
+
+void testQueueWorkingSetStaysCached() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-working-set");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+
+    // Four diagrams over a cap of three, laid out again after every render
+    // as the app does: none may be evicted and rendered again
+    plantuml::PlantumlRenderQueue queue({}, 3);
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t keys[4] = {0xAD01ULL, 0xAD02ULL, 0xAD03ULL, 0xAD04ULL};
+    for (int pass = 0; pass < 10; ++pass) {
+        queue.drainFinished();
+        for (size_t i = 0; i < 4; ++i) {
+            if (!queue.lookup(keys[i])) {
+                queue.request(i, keys[i], kQueueSource, 0, tool, workRoot.wstring());
+            }
+        }
+        queue.waitForIdle(5000);
+    }
+    check(readLogLines(logPath).size() == 4,
+          "more diagrams than the cap each render once, not forever");
+    for (size_t i = 0; i < 4; ++i) {
+        check(queue.lookup(keys[i]) != nullptr, "every diagram in use stays cached");
+    }
+}
+
+void testQueueShutdownCancelsRender() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-cancel");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv sleepEnv(L"TINTA_FAKE_PLANTUML_SLEEP_MS", L"8000");
+
+    plantuml::PlantumlRenderQueue queue;
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0xC501ULL;
+    queue.request(1, key, kQueueSource, 0, tool, workRoot.wstring());
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= 1; }, 3000,
+                   "the render to cancel spawns")) {
+        return;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    queue.shutdown();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    check(elapsed < 1500, "closing the window cancels a hung render instead of waiting it out");
+    check(!std::filesystem::exists(workRoot / plantuml::keyHex(key)),
+          "the cancelled render's work directory is removed");
+}
+
+void testSweepKeepsLiveRoots() {
+    // A day-old root whose process still runs belongs to an open window
+    const std::filesystem::path scratch = freshScratch(L"sweep-live");
+    std::filesystem::create_directories(scratch);
+    std::wstring command = L"\"" + kFakeToolPath + L"\" --fake-child \"" +
+                           (scratch / L"live.pid").wstring() + L"\"";
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        check(false, "a stand-in for another running Tinta starts");
+        return;
+    }
+
+    wchar_t base[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, base);
+    const std::filesystem::path root =
+        std::filesystem::path(base) / (L"tinta-plantuml-" + std::to_wstring(pi.dwProcessId));
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    {
+        std::ofstream marker(root / L"marker.txt", std::ios::binary);
+        marker << "x";
+    }
+    const auto oldTime =
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(48);
+    std::filesystem::last_write_time(root / L"marker.txt", oldTime, ec);
+    std::filesystem::last_write_time(root, oldTime, ec);
+
+    plantuml::sweepStaleTempRoots();
+    check(std::filesystem::exists(root), "a running process keeps its day-old root");
+
+    TerminateProcess(pi.hProcess, 0);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    plantuml::sweepStaleTempRoots();
+    check(!std::filesystem::exists(root), "the root goes once its process has ended");
+    std::filesystem::remove_all(root, ec);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1289,6 +1526,14 @@ int main(int argc, char** argv) {
     testQueueKeyDedup();
     testQueueShutdown();
     testSweepStaleTempRoots();
+    testToolInput();
+    testRenderBlockNameNeverReachesTool();
+    testRenderOtherStartTagNeverNamesOutput();
+    testRenderTimeoutEndsChildren();
+    testQueueSyntaxErrorPermanent();
+    testQueueWorkingSetStaysCached();
+    testQueueShutdownCancelsRender();
+    testSweepKeepsLiveRoots();
     testNoNetworkApis();
 
     if (failures == 0) {

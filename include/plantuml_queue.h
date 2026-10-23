@@ -22,7 +22,13 @@
 // SCHEDULED, not busy - it does not slow waitForIdle() down (so a 60 s
 // backoff never blocks a caller), and its retry fires automatically. The
 // schedule is FINITE: once BackoffConfig::delaysMs is exhausted, and also
-// when the tool exits 0 without a usable artifact, the key is permanent.
+// when the tool exits 0 without a usable artifact or reports a syntax error
+// (exit 200), the key is permanent.
+//
+// Cache cap: the cap bounds what stays cached once unused. An entry adopted
+// or looked up within `pinWindow` is the open document's working set and is
+// never evicted, so a document with more diagrams than the cap does not
+// evict and re-render its own diagrams forever.
 
 #include <chrono>
 #include <condition_variable>
@@ -65,7 +71,9 @@ std::wstring keyHex(uint64_t key);
 class PlantumlRenderQueue {
 public:
     explicit PlantumlRenderQueue(BackoffConfig backoff = {},
-                                 size_t cacheCap = 32);
+                                 size_t cacheCap = 32,
+                                 std::chrono::milliseconds pinWindow =
+                                     std::chrono::seconds(60));
     ~PlantumlRenderQueue();
 
     PlantumlRenderQueue(const PlantumlRenderQueue&) = delete;
@@ -83,8 +91,9 @@ public:
     void request(size_t blockId, uint64_t key, std::string finalSource,
                  int format, const Tool& tool, std::wstring workRoot);
 
-    // Cache read only, NO locks: owner thread only. Null when `key` is
-    // not cached (never rendered, in flight, failed, or evicted).
+    // Cache read, NO locks: owner thread only. Null when `key` is not
+    // cached (never rendered, in flight, failed, or evicted). A hit marks
+    // the entry as in use, which keeps it from eviction for pinWindow.
     std::shared_ptr<const Cached> lookup(uint64_t key) const;
 
     // Completion notification, invoked FROM THE WORKER THREAD once per
@@ -102,8 +111,9 @@ public:
     // backoff window are scheduled, not busy, so they never delay it.
     void waitForIdle(int maxWaitMs = 30000);
 
-    // Idempotent: stops and joins the worker, then deletes the work
-    // directories of everything unadopted (pending jobs, leftover
+    // Idempotent: cancels the render in flight (ending the tool and
+    // anything it started), stops and joins the worker, then deletes the
+    // work directories of everything unadopted (pending jobs, leftover
     // finished records, queued deletions). Later request() calls are
     // no-ops; lookup() still reads the cache and waitForIdle() returns
     // immediately.
@@ -136,10 +146,14 @@ private:
 
     BackoffConfig backoff_;
     size_t cacheCap_;
+    std::chrono::milliseconds pinWindow_;
+    HANDLE cancel_ = nullptr;  // manual-reset; set by shutdown()
 
     // Owner-thread-only cache: read in lookup(), mutated in drainFinished().
     std::unordered_map<uint64_t, std::shared_ptr<const Cached>> cache_;
     std::deque<uint64_t> lru_;
+    // When each cached key was last looked up (owner thread only)
+    mutable std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> lastUse_;
 
     mutable std::mutex mutex_;
     std::condition_variable workCv_;
@@ -166,7 +180,8 @@ private:
 };
 
 // Removes leftover `%TEMP%\tinta-plantuml-<digits>` work roots older than
-// 24 hours, skipping the live process's own root. Names whose suffix is not
+// 24 hours whose process is no longer running (the live process's own root
+// included in that rule: it is always skipped). Names whose suffix is not
 // a pure digit run (for example the test suite's
 // `tinta-plantuml-tests-<pid>`) are never touched; failures are tolerated.
 void sweepStaleTempRoots();

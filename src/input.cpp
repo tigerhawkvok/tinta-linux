@@ -794,7 +794,10 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             ofn.lpstrFile = path;
             ofn.nMaxFile = MAX_PATH;
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-            if (GetOpenFileNameW(&ofn)) {
+            // Through the shared helper: the dialog must not move the
+            // working directory (#253), where a java.exe beside the jar
+            // would then be found before PATH
+            if (runOpenFileDialog(ofn)) {
                 plantumlSetUserPath(app, path);
             }
             break;

@@ -23,6 +23,18 @@ void removeDirTree(const std::wstring& dir) {
     std::filesystem::remove_all(std::filesystem::path(dir), ec);
 }
 
+// A root belongs to a running Tinta while its process lives; one that
+// cannot be queried (another user's, say) counts as alive
+bool processAlive(unsigned long pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 static_cast<DWORD>(pid));
+    if (process == nullptr) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD code = 0;
+    const bool alive = GetExitCodeProcess(process, &code) && code == STILL_ACTIVE;
+    CloseHandle(process);
+    return alive;
+}
+
 bool isAllDigits(const std::wstring& text) {
     if (text.empty()) return false;
     for (wchar_t c : text) {
@@ -93,6 +105,9 @@ void sweepStaleTempRoots() {
             pid = pid * 10ULL + static_cast<unsigned long long>(c - L'0');
         }
         if (pid == livePid) continue;
+        // An old timestamp only means no new diagram in a day: a window
+        // still open keeps its root
+        if (processAlive(static_cast<unsigned long>(pid))) continue;
 
         std::error_code typeEc;
         if (!entry.is_directory(typeEc) || typeEc) continue;
@@ -107,12 +122,17 @@ void sweepStaleTempRoots() {
 }
 
 PlantumlRenderQueue::PlantumlRenderQueue(BackoffConfig backoff,
-                                         size_t cacheCap)
-    : backoff_(std::move(backoff)), cacheCap_(cacheCap) {
+                                         size_t cacheCap,
+                                         std::chrono::milliseconds pinWindow)
+    : backoff_(std::move(backoff)), cacheCap_(cacheCap), pinWindow_(pinWindow),
+      cancel_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
     sweepStaleTempRoots();
 }
 
-PlantumlRenderQueue::~PlantumlRenderQueue() { shutdown(); }
+PlantumlRenderQueue::~PlantumlRenderQueue() {
+    shutdown();
+    if (cancel_ != nullptr) CloseHandle(cancel_);
+}
 
 void PlantumlRenderQueue::request(size_t blockId, uint64_t key,
                                   std::string finalSource, int format,
@@ -195,6 +215,7 @@ void PlantumlRenderQueue::request(size_t blockId, uint64_t key,
 std::shared_ptr<const Cached> PlantumlRenderQueue::lookup(uint64_t key) const {
     const auto it = cache_.find(key);
     if (it == cache_.end()) return std::shared_ptr<const Cached>();
+    lastUse_[key] = std::chrono::steady_clock::now();
     return it->second;
 }
 
@@ -228,9 +249,22 @@ size_t PlantumlRenderQueue::drainFinished() {
                        std::make_shared<const Cached>(std::move(cached)));
         lru_.push_back(record.key);
 
-        while (cache_.size() > cacheCap_) {
-            const uint64_t victim = lru_.front();
-            lru_.pop_front();
+        // Evict the oldest entries not in use: anything adopted (a layout
+        // just asked for it) or looked up within pinWindow stays, even past
+        // the cap
+        const auto now = std::chrono::steady_clock::now();
+        lastUse_[record.key] = now;
+        for (auto victimIt = lru_.begin();
+             cache_.size() > cacheCap_ && victimIt != lru_.end();) {
+            const uint64_t victim = *victimIt;
+            const auto used = lastUse_.find(victim);
+            if (victim == record.key ||
+                (used != lastUse_.end() && now - used->second < pinWindow_)) {
+                ++victimIt;
+                continue;
+            }
+            victimIt = lru_.erase(victimIt);
+            if (used != lastUse_.end()) lastUse_.erase(used);
             const auto it = cache_.find(victim);
             if (it == cache_.end()) continue;
             // The image lives in <workRoot>\\<hex>\\input.png|svg, so its
@@ -282,6 +316,8 @@ void PlantumlRenderQueue::shutdown() {
         if (shutDown_) return;
         stop_ = true;
     }
+    // A render in flight ends now instead of running out its timeout
+    if (cancel_ != nullptr) SetEvent(cancel_);
     workCv_.notify_all();
     idleCv_.notify_all();
     if (worker_.joinable()) worker_.join();
@@ -355,12 +391,21 @@ void PlantumlRenderQueue::workerLoop() {
         std::wstring error;
         int exitCode = -1;
         const bool ok = renderSync(job.tool, job.source, job.format, job.workDir,
-                                   outFile, 15000, error, &exitCode);
+                                   outFile, 15000, error, &exitCode, cancel_);
         // The queue intentionally does NOT mutate the cache here: the owner
         // thread adopts this record in drainFinished().
         std::function<void(uint64_t, bool)> callback;
         {
             std::unique_lock<std::mutex> lock(mutex_);
+            if (stop_) {
+                // Shut down mid-render: nothing to record or announce
+                running_ = false;
+                activeKey_ = 0;
+                activeBlockIds_.clear();
+                toDelete_.push_back(job.workDir);
+                idleCv_.notify_all();
+                return;
+            }
             running_ = false;
             activeKey_ = 0;
             std::vector<size_t> attemptBlocks = std::move(activeBlockIds_);
@@ -376,10 +421,11 @@ void PlantumlRenderQueue::workerLoop() {
                 finished_.push_back(std::move(record));
                 attempts_.erase(jobKey);
                 notBefore_.erase(jobKey);
-            } else if (exitCode == 100 || exitCode == 0) {
-                // Exit 100 means "no diagram in this source"; exit 0 without
-                // a usable artifact (after renderSync's resolution rules)
-                // means the same for this key. Both are permanent.
+            } else if (exitCode == 100 || exitCode == 200 || exitCode == 0) {
+                // Exit 100 means "no diagram in this source" and 200 a syntax
+                // error; exit 0 without a usable artifact (after renderSync's
+                // resolution rules) means the same for this key. The same
+                // source fails the same way again, so all are permanent.
                 permanentKeys_.insert(jobKey);
                 removeDirTree(job.workDir);
                 Finished record;
