@@ -1,5 +1,5 @@
 # tinta --register on Linux, in private XDG folders: the desktop entry (Exec
-# quoting the AppImage path), icons, the .mmd MIME type, Tinta as the
+# quoting the AppImage path), icons, the .mmd and .puml MIME types, Tinta as the
 # default in mimeapps.list with other entries kept, and GIO agreeing.
 #   cmake -DTINTA=<tinta> -DHOME_DIR=<scratch> -P register_check.cmake
 set(fail "")
@@ -38,7 +38,9 @@ expect_file("${entry}")
 if(EXISTS "${entry}")
     file(READ "${entry}" text)
     expect_text("${text}" "\nExec=\"${appimage}\" %f\n" "Exec line:\n${text}")
-    expect_text("${text}" "\nMimeType=text/markdown;text/x-markdown;text/vnd.mermaid;\n" "MimeType line")
+    expect_text("${text}" "\nMimeType=text/markdown;text/x-markdown;text/vnd.mermaid;text/x-plantuml;\n"
+        "MimeType line")
+    expect_text("${text}" "\nName=Tinta Mono\n" "Name line")
 endif()
 foreach(size 16 32 48 256)
     expect_file("${HOME_DIR}/data/icons/hicolor/${size}x${size}/apps/tinta.png")
@@ -46,7 +48,7 @@ endforeach()
 expect_file("${HOME_DIR}/data/mime/packages/tinta-mermaid.xml")
 
 file(READ "${HOME_DIR}/config/mimeapps.list" apps)
-foreach(type text/markdown text/x-markdown text/vnd.mermaid)
+foreach(type text/markdown text/x-markdown text/vnd.mermaid text/x-plantuml)
     expect_text("${apps}" "\n${type}=tinta.desktop;" "${type} default missing:\n${apps}")
 endforeach()
 expect_text("${apps}" "image/png=org.kde.gwenview.desktop" "an existing default was lost")
@@ -58,6 +60,14 @@ if(GIO)
     execute_process(COMMAND ${CMAKE_COMMAND} -E env ${env} ${GIO} mime text/markdown
         OUTPUT_VARIABLE gio ERROR_VARIABLE gio_err)
     expect_text("${gio}" "tinta.desktop" "gio mime text/markdown: ${gio}${gio_err}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env ${env} ${GIO} mime text/x-plantuml
+        OUTPUT_VARIABLE gio ERROR_VARIABLE gio_err)
+    expect_text("${gio}" "tinta.desktop" "gio mime text/x-plantuml: ${gio}${gio_err}")
+    # The MIME package maps a .puml file to the type
+    file(WRITE "${HOME_DIR}/diagram.puml" "@startuml\nA -> B\n@enduml\n")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E env ${env} ${GIO} info -a standard::content-type
+        "${HOME_DIR}/diagram.puml" OUTPUT_VARIABLE gio ERROR_VARIABLE gio_err)
+    expect_text("${gio}" "text/x-plantuml" "a .puml file's type: ${gio}${gio_err}")
 endif()
 
 if(fail)

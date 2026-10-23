@@ -1332,8 +1332,19 @@ bool fileDialog(OPENFILENAMEW* ofn, bool save) {
                 size_t end = patterns.find(L';', start);
                 std::wstring pattern =
                     patterns.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
-                if (pattern == L"*.*" || pattern == L"*") gtk_file_filter_add_pattern(filter, "*");
-                else if (pattern.rfind(L"*.", 0) == 0) gtk_file_filter_add_suffix(filter, utf8(pattern.c_str() + 2).c_str());
+                // Windows programs end in .exe; Linux ones carry no suffix
+                // (Pandoc, a plantuml launcher script): "*.exe" shows every
+                // file, and "pandoc.exe" the bare name as well
+                const bool exeName = pattern.size() > 4 && pattern.find(L'*') == std::wstring::npos &&
+                                     _wcsicmp(pattern.c_str() + pattern.size() - 4, L".exe") == 0;
+                if (pattern == L"*.*" || pattern == L"*" || _wcsicmp(pattern.c_str(), L"*.exe") == 0) {
+                    gtk_file_filter_add_pattern(filter, "*");
+                } else if (exeName) {
+                    gtk_file_filter_add_pattern(filter, utf8(pattern.substr(0, pattern.size() - 4).c_str()).c_str());
+                    gtk_file_filter_add_pattern(filter, utf8(pattern.c_str()).c_str());
+                } else if (pattern.rfind(L"*.", 0) == 0) {
+                    gtk_file_filter_add_suffix(filter, utf8(pattern.c_str() + 2).c_str());
+                }
                 if (end == std::wstring::npos) break;
                 start = end + 1;
             }

@@ -712,9 +712,27 @@ void testResolveToolWithPathSearch() {
         check(SearchPathW(nullptr, L"plantuml.exe", nullptr, MAX_PATH, probe,
                           nullptr) == 0,
               "control: no plantuml.exe in the search path");
+#ifndef _WIN32
+        // ...and none in the known install locations either
+        const std::vector<std::wstring> known = plantuml::knownInstallLocations();
+        plantuml::knownInstallLocations().clear();
+#endif
         const plantuml::Tool none = plantuml::resolveToolWithPathSearch(L"");
         check(!none.available,
               "an empty path without plantuml.exe is unavailable");
+#ifndef _WIN32
+        // A desktop session's PATH lacks Linuxbrew: a tool in a known
+        // location is found all the same
+        const std::filesystem::path knownTool = emptyDir / L"known" / L"plantuml";
+        std::filesystem::create_directories(knownTool.parent_path());
+        std::filesystem::copy_file(kFakeToolPath, knownTool);
+        plantuml::knownInstallLocations() = {(emptyDir / L"missing" / L"plantuml").wstring(),
+                                             knownTool.wstring()};
+        const plantuml::Tool found = plantuml::resolveToolWithPathSearch(L"");
+        check(found.available && found.program == knownTool.wstring(),
+              "with no plantuml on PATH, the first known install location that exists is used");
+        plantuml::knownInstallLocations() = known;
+#endif
     }
 
     // PATH branch 2: a temp dir holding a copy of the fake tool renamed

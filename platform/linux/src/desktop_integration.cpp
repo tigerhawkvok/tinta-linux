@@ -3,8 +3,9 @@
 // Per user, in the XDG folders:
 //   applications/tinta.desktop     Exec is the AppImage ($APPIMAGE) or the binary
 //   icons/hicolor/*/apps/tinta.png from the installation (or the source tree)
-//   mime/packages/tinta-mermaid.xml text/vnd.mermaid for *.mmd (shared-mime-info has none)
-//   mimeapps.list                  Tinta as the default for Markdown and Mermaid
+//   mime/packages/tinta-mermaid.xml text/vnd.mermaid for *.mmd and text/x-plantuml for
+//                                  *.puml (shared-mime-info has neither)
+//   mimeapps.list                  Tinta as the default for Markdown, Mermaid and PlantUML
 #include "compat_internal.h"
 
 #include <gio/gio.h>
@@ -14,7 +15,7 @@
 
 namespace {
 
-const char* const kMimeTypes[] = {"text/markdown", "text/x-markdown", "text/vnd.mermaid"};
+const char* const kMimeTypes[] = {"text/markdown", "text/x-markdown", "text/vnd.mermaid", "text/x-plantuml"};
 
 std::string exePath() {
     char buffer[4096];
@@ -103,15 +104,15 @@ bool tintaRegisterDesktopApp() {
     std::string entry =
         "[Desktop Entry]\n"
         "Type=Application\n"
-        "Name=Tinta\n"
+        "Name=Tinta Mono\n"
         "GenericName=Markdown Viewer\n"
-        "Comment=Fast Markdown and Mermaid viewer and editor\n"
+        "Comment=Fast Markdown, Mermaid and PlantUML viewer and editor\n"
         "Exec=" + execArgument(exec) + " %f\n"
         "Icon=tinta\n"
         "Terminal=false\n"
         "Categories=Office;Viewer;\n"
-        "MimeType=text/markdown;text/x-markdown;text/vnd.mermaid;\n"
-        "Keywords=markdown;md;mermaid;viewer;editor;\n"
+        "MimeType=text/markdown;text/x-markdown;text/vnd.mermaid;text/x-plantuml;\n"
+        "Keywords=markdown;md;mermaid;plantuml;viewer;editor;\n"
         "StartupWMClass=tinta\n"
         "StartupNotify=true\n";
     if (!writeFile(data + "/applications/tinta.desktop", entry)) return false;
@@ -124,6 +125,12 @@ bool tintaRegisterDesktopApp() {
               "    <sub-class-of type=\"text/plain\"/>\n"
               "    <glob pattern=\"*.mmd\"/>\n"
               "    <glob pattern=\"*.mermaid\"/>\n"
+              "  </mime-type>\n"
+              "  <mime-type type=\"text/x-plantuml\">\n"
+              "    <comment>PlantUML diagram</comment>\n"
+              "    <sub-class-of type=\"text/plain\"/>\n"
+              "    <glob pattern=\"*.puml\"/>\n"
+              "    <glob pattern=\"*.plantuml\"/>\n"
               "  </mime-type>\n"
               "</mime-info>\n");
     run("update-mime-database", data + "/mime");

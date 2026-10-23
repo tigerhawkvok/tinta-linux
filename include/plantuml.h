@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -74,6 +75,14 @@ Tool resolveTool(const std::wstring& userPath);
 // Keeping that precedence here - rather than in the App glue - makes it
 // instance. A missing plantuml.exe yields an unavailable tool.
 Tool resolveToolWithPathSearch(const std::wstring& userPath);
+
+#ifndef _WIN32
+// Where resolveToolWithPathSearch looks when PATH holds no PlantUML: a
+// desktop session's PATH often lacks a package manager's bin folder
+// (Linuxbrew, Homebrew), and the distributions ship bare jars too. Tests
+// replace the list.
+std::vector<std::wstring>& knownInstallLocations();
+#endif
 
 // Inserts `preambleLines` immediately after the first `@startuml` line
 // (matched after trimming surrounding whitespace, case-insensitively; a block

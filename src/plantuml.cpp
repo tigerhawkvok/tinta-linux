@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cwctype>
 #include <filesystem>
@@ -221,6 +222,34 @@ Tool resolveTool(const std::wstring& userPath) {
     return tool;
 }
 
+#ifndef _WIN32
+std::vector<std::wstring>& knownInstallLocations() {
+    static std::vector<std::wstring> locations = [] {
+        // The launcher scripts first, then the bare jars (run with Java
+        // from PATH)
+        std::vector<std::wstring> list = {L"/home/linuxbrew/.linuxbrew/bin/plantuml"};
+        if (const char* home = std::getenv("HOME")) {
+            list.push_back(std::filesystem::path(home).wstring() + L"/.linuxbrew/bin/plantuml");
+        }
+        for (const wchar_t* path : {L"/opt/homebrew/bin/plantuml", L"/usr/local/bin/plantuml", L"/usr/bin/plantuml",
+                                    L"/usr/share/plantuml/plantuml.jar", L"/usr/share/java/plantuml/plantuml.jar",
+                                    L"/usr/share/java/plantuml.jar"}) {
+            list.push_back(path);
+        }
+        return list;
+    }();
+    return locations;
+}
+
+static Tool knownInstallTool() {
+    for (const std::wstring& candidate : knownInstallLocations()) {
+        Tool tool = resolveTool(candidate);
+        if (tool.available) return tool;
+    }
+    return Tool();
+}
+#endif
+
 Tool resolveToolWithPathSearch(const std::wstring& userPath) {
     if (!userPath.empty()) return resolveTool(userPath);
     // SearchPathW runs its default search order, not PATH alone: the
@@ -231,6 +260,9 @@ Tool resolveToolWithPathSearch(const std::wstring& userPath) {
     DWORD length = SearchPathW(nullptr, L"plantuml.exe", nullptr,
                                static_cast<DWORD>(found.size()),
                                found.data(), nullptr);
+#ifndef _WIN32
+    if (length == 0) return knownInstallTool();
+#endif
     if (length == 0) return Tool();
     if (length >= found.size()) {
         found.resize(length);
