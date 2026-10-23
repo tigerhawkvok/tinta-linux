@@ -63,6 +63,11 @@ HOOK="$OUT/AppDir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
 sed -i 's|^export GDK_BACKEND=x11.*$|export GDK_BACKEND="${GDK_BACKEND:-wayland,x11}" # Tinta: native Wayland first|' "$HOOK"
 grep -q 'GDK_BACKEND="${GDK_BACKEND:-wayland,x11}"' "$HOOK"
 
-export LDAI_OUTPUT="$OUT/Tinta-x86_64.AppImage"
+# Written beside the AppImage, then renamed over it: a copy that is running
+# (perhaps the one --register pointed the desktop at) keeps the file it
+# started from, where writing in place fails with "Text file busy"
+export LDAI_OUTPUT="$OUT/Tinta-x86_64.AppImage.part"
+rm -f "$LDAI_OUTPUT"
 linuxdeploy-x86_64.AppImage --appdir "$OUT/AppDir" --output appimage
-ls -l "$LDAI_OUTPUT"
+mv -f "$LDAI_OUTPUT" "$OUT/Tinta-x86_64.AppImage"
+ls -l "$OUT/Tinta-x86_64.AppImage"
