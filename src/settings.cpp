@@ -517,17 +517,20 @@ bool registerFileAssociation() {
     HKEY hKey;
     LONG result;
     const wchar_t* progId = L"TintaMono.MarkdownFile";
+    // The class the associations below name: its own keys, never upstream
+    // Tinta's Tinta.MarkdownFile, whose open command must stay upstream's
+    const std::wstring classKey = std::wstring(L"Software\\Classes\\") + progId;
 
     // Create ProgID entry in Classes
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, classKey.c_str(), 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
-    const wchar_t* desc = L"Tinta Document";
+    const wchar_t* desc = L"Tinta Mono Document";
     RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)desc, (DWORD)((wcslen(desc) + 1) * sizeof(wchar_t)));
     RegCloseKey(hKey);
 
     // Create DefaultIcon entry
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile\\DefaultIcon", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, (classKey + L"\\DefaultIcon").c_str(), 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
     std::wstring iconPath = exePath;
@@ -536,7 +539,7 @@ bool registerFileAssociation() {
     RegCloseKey(hKey);
 
     // Create shell\open\command entry
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile\\shell\\open\\command", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, (classKey + L"\\shell\\open\\command").c_str(), 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
     std::wstring command = L"\"";
