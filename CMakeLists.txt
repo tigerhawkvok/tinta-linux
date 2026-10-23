@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 # -DTINTA_VERSION=X.Y.Z overrides it for one configure
 # (packaging/build-release.sh); the override is not kept, so the next
 # plain configure of the tree comes back to this default.
-set(TINTA_DEFAULT_VERSION 4.0.11)
+set(TINTA_DEFAULT_VERSION 4.0.12)
 if(DEFINED CACHE{TINTA_VERSION})
     set(TINTA_BUILD_VERSION "$CACHE{TINTA_VERSION}")
     unset(TINTA_VERSION CACHE)
