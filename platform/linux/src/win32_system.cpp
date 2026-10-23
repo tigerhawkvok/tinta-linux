@@ -94,23 +94,45 @@ struct FindHandle final : TintaHandle {
 
 struct ProcessHandle final : TintaHandle {
     ProcessHandle(pid_t pid, bool child) : pid(pid), child(child) {}
-    // Waits up to `ms` (INFINITE: forever) for a child to exit
+    // Waits up to `ms` (INFINITE: forever) for the process to exit: a child
+    // is reaped with its exit code; another process (OpenProcess) counts as
+    // exited once it is gone or a zombie, its exit code unknown (0)
     bool wait(DWORD ms) {
-        if (!child) return false;
         if (exited) return true;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
         while (true) {
-            int status = 0;
-            pid_t r = waitpid(pid, &status, WNOHANG);
-            if (r == pid) {
+            if (child) {
+                int status = 0;
+                pid_t r = waitpid(pid, &status, WNOHANG);
+                if (r == pid) {
+                    exited = true;
+                    exitCode = WIFEXITED(status) ? static_cast<DWORD>(WEXITSTATUS(status)) : 1;
+                    return true;
+                }
+                if (r < 0 && errno != EINTR) return false;
+            } else if (gone()) {
                 exited = true;
-                exitCode = WIFEXITED(status) ? static_cast<DWORD>(WEXITSTATUS(status)) : 1;
+                exitCode = 0;
                 return true;
             }
-            if (r < 0 && errno != EINTR) return false;
             if (ms != INFINITE && std::chrono::steady_clock::now() >= deadline) return false;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+    }
+    // Another process's end: no such process, or a zombie its parent has
+    // not reaped yet
+    bool gone() const {
+        if (::kill(pid, 0) != 0) return errno == ESRCH;
+        char path[64];
+        std::snprintf(path, sizeof path, "/proc/%d/stat", static_cast<int>(pid));
+        FILE* f = std::fopen(path, "r");
+        if (!f) return true;
+        char stat[512];
+        size_t n = std::fread(stat, 1, sizeof stat - 1, f);
+        std::fclose(f);
+        stat[n] = 0;
+        const char* name = std::strrchr(stat, ')');  // the state follows the name
+        return name && name[1] == ' ' && name[2] == 'Z';
     }
     pid_t pid;
     bool child;
