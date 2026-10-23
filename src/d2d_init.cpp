@@ -356,6 +356,9 @@ void updateTextFormats(App& app) {
     for (auto& fmt : app.headingFormats) {
         if (fmt) { fmt->Release(); fmt = nullptr; }
     }
+    for (auto& fmt : app.headingItalicFormats) {
+        if (fmt) { fmt->Release(); fmt = nullptr; }
+    }
 
     // Create text formats with current zoom and theme fonts
     float scale = app.contentScale * app.zoomFactor;
@@ -422,6 +425,9 @@ void updateTextFormats(App& app) {
         app.dwriteFactory->CreateTextFormat(headingFont, fontCollectionFor(app, headingFont),
             DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
             headingSizes[i] * scale, L"en-us", &app.headingFormats[i]);
+        app.dwriteFactory->CreateTextFormat(headingFont, fontCollectionFor(app, headingFont),
+            DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
+            headingSizes[i] * scale, L"en-us", &app.headingItalicFormats[i]);
     }
 
     // Set consistent baseline alignment for all formats
@@ -436,6 +442,9 @@ void updateTextFormats(App& app) {
     if (app.codeBoldItalicFormat) app.codeBoldItalicFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     if (app.supSubFormat) app.supSubFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     for (auto* fmt : app.headingFormats) {
+        if (fmt) fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    }
+    for (auto* fmt : app.headingItalicFormats) {
         if (fmt) fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     }
 

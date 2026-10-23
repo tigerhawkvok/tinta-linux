@@ -798,6 +798,24 @@ public:
             this, riid, object);
     }
 
+    // -- IDWriteTextLayout getters by position
+    using FormatMethods<IDWriteTextLayout2>::GetFontFamilyName;
+    HRESULT GetFontFamilyName(UINT32 position, WCHAR* name, UINT32 size, DWRITE_TEXT_RANGE* range) override {
+        const std::wstring& family = baseFamilyAt(position);
+        if (!name || size <= family.size()) return E_INVALIDARG;
+        wmemcpy(name, family.c_str(), family.size() + 1);
+        if (range) {
+            *range = {0, static_cast<UINT32>(text_.size())};
+            for (auto it = familyRanges_.rbegin(); it != familyRanges_.rend(); ++it) {
+                if (position >= it->start && position < it->end) {
+                    *range = {it->start, it->end - it->start};
+                    break;
+                }
+            }
+        }
+        return S_OK;
+    }
+
     // -- IDWriteTextLayout setters
     HRESULT SetMaxWidth(FLOAT width) override { maxWidth_ = width; changed(); return S_OK; }
     HRESULT SetMaxHeight(FLOAT height) override { maxHeight_ = height; changed(); return S_OK; }

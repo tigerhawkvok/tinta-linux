@@ -520,6 +520,13 @@ struct IDWriteTextLayout : IDWriteTextFormat {
     virtual HRESULT Draw(void* clientDrawingContext, IDWriteTextRenderer* renderer, FLOAT originX, FLOAT originY) {
         (void)clientDrawingContext; (void)renderer; (void)originX; (void)originY; return E_NOTIMPL;
     }
+    // The family the text sets at a position (a SetFontFamilyName range, or
+    // the format's), as DirectWrite reports it: never the fallback's
+    using IDWriteTextFormat::GetFontFamilyName;
+    virtual HRESULT GetFontFamilyName(UINT32 currentPosition, WCHAR* fontFamilyName, UINT32 nameSize,
+                                      DWRITE_TEXT_RANGE* textRange = nullptr) {
+        (void)currentPosition; (void)fontFamilyName; (void)nameSize; (void)textRange; return E_NOTIMPL;
+    }
 };
 
 struct IDWriteTextLayout1 : IDWriteTextLayout {

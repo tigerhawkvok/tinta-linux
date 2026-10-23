@@ -8,7 +8,9 @@
 #include "tabs.h"
 #include "utils.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -90,6 +92,95 @@ void scriptLayout(App& app, const std::string& fixture) {
           "mixed fixture renders through the final paragraph");
     check(app.docText.find(L"x^2^ H~2~O") != std::wstring::npos,
           "inline code keeps script delimiters literal");
+}
+// Inline code sits on the baseline of the words beside it (#259, #262),
+// whatever the ascents of the body and code fonts
+std::wstring familyOf(const App::LayoutTextRun& run) {
+    wchar_t name[128]{};
+    run.layout->GetFontFamilyName(0, name, 128, nullptr);
+    return name;
+}
+void codeBaselines(App& app, const std::string& fixture) {
+    struct Fonts { const wchar_t* body; const wchar_t* code; };
+    const Fonts pairs[] = {{nullptr, nullptr}, {L"Segoe UI", L"Courier New"},
+                           {L"Georgia", L"Lucida Console"},
+                           {L"Microsoft YaHei UI", L"Cascadia Mono"}, {L"SimSun", L"Consolas"}};
+    for (int theme : {0, 5}) {
+        for (const auto& fonts : pairs) {
+            for (float scale : {1.0f, 2.0f}) {
+                applyTheme(app, theme);
+                if (fonts.body) {
+                    app.theme.fontFamily = fonts.body;
+                    app.theme.codeFontFamily = fonts.code;
+                }
+                app.contentScale = scale;
+                app.zoomFactor = 1;
+                updateTextFormats(app);
+                for (int width : {650, 1050}) {
+                    app.width = static_cast<int>(width * scale);
+                    layout(app, fixture);
+                    int codeRuns = 0, compared = 0, misaligned = 0, pinned = 0, displaced = 0;
+                    auto inBlock = [&](const App::LayoutTextRun& run) {
+                        for (const auto& block : app.codeBlocks) {
+                            if (run.bounds.top >= block.bounds.top - 1 && run.bounds.bottom <= block.bounds.bottom + 1) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    for (const auto& code : app.layoutTextRuns) {
+                        if (!code.docLength || _wcsicmp(familyOf(code).c_str(), app.theme.codeFontFamily) != 0) continue;
+                        if (inBlock(code)) continue;  // the fenced block
+                        ++codeRuns;
+                        for (const auto& text : app.layoutTextRuns) {
+                            // Text on the same line, Latin or drawn by a fallback font
+                            if (&text == &code || !text.docLength || std::abs(text.bounds.top - code.bounds.top) > 0.5f ||
+                                _wcsicmp(familyOf(text).c_str(), app.theme.codeFontFamily) == 0) continue;
+                            ++compared;
+                            const float gap = baseline(code) - baseline(text);
+                            if (std::abs(gap) > 0.6f) {
+                                ++misaligned;
+                                std::cerr << "  code '" << toUtf8(app.docText.substr(code.docStart, code.docLength))
+                                          << "' vs '" << toUtf8(app.docText.substr(text.docStart, text.docLength))
+                                          << "': " << gap << " px (theme " << theme << ", scale " << scale
+                                          << ", width " << width << ")\n";
+                            }
+                        }
+                    }
+                    check(codeRuns >= 16 && compared >= 16, "the fixture's inline code meets text on its lines");
+                    check(misaligned == 0, "inline code shares the baseline of the text beside it");
+                    // Plain Latin text keeps the place its own font gives it
+                    // in the line box: the reference code is aligned to
+                    for (const auto& text : app.layoutTextRuns) {
+                        if (!text.docLength || inBlock(text) ||
+                            _wcsicmp(familyOf(text).c_str(), app.theme.codeFontFamily) == 0) continue;
+                        const std::wstring s = app.docText.substr(text.docStart, text.docLength);
+                        if (!std::all_of(s.begin(), s.end(), [](wchar_t c) { return c < 128; })) continue;
+                        ++pinned;
+                        if (std::abs(text.pos.y - text.bounds.top) > 0.01f) {
+                            ++displaced;
+                            std::cerr << "  text '" << toUtf8(s) << "' moved " << text.pos.y - text.bounds.top
+                                      << " px (theme " << theme << ", scale " << scale << ")\n";
+                        }
+                    }
+                    check(pinned >= 20 && displaced == 0, "Latin text sits where its own font puts it");
+                    // Emphasis in a heading keeps the heading's size
+                    auto sizeOf = [&](const wchar_t* word) {
+                        const size_t at = app.docText.find(word);
+                        for (const auto& run : app.layoutTextRuns) {
+                            if (run.docLength && run.docStart <= at && at < run.docStart + run.docLength) {
+                                return run.layout->GetFontSize();
+                            }
+                        }
+                        return 0.0f;
+                    };
+                    check(sizeOf(L"The ") > 0 && sizeOf(L"emphasis") == sizeOf(L"The "),
+                          "italic heading words keep the heading size");
+                }
+            }
+        }
+    }
+    applyTheme(app, 0);
 }
 void learnCopies(App& app, const std::filesystem::path& dir) {
     for (const char* profile : {"windows", "vim", "custom"}) {
@@ -203,6 +294,9 @@ int runSuperscriptTests() {
                 }
             }
         }
+        const auto codeFixture = read(TINTA_CODE_BASELINE_FIXTURE);
+        check(!codeFixture.empty(), "inline code baseline fixture loads");
+        codeBaselines(app, codeFixture);
         app.contentScale = app.zoomFactor = 1;
         updateTextFormats(app);
         learnCopies(app, dir);

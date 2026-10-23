@@ -220,6 +220,7 @@ if(BUILD_TESTING)
         TINTA_TAB_HOVER_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/tab-hover-card"
         TINTA_SEARCH_PANEL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/search-panel"
         TINTA_SUPERSCRIPT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/superscript-subscript.md"
+        TINTA_CODE_BASELINE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-baseline-259.md"
         TINTA_PANEL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/toc-browser-resize.md"
         TINTA_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/image-cache-large.md"
         TINTA_FIND_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/find-table-focus.md"

@@ -30,6 +30,7 @@ target_compile_definitions(input_tests PRIVATE
     TINTA_TAB_HOVER_FIXTURE_DIR="${TINTA_FIXTURES}/tab-hover-card"
     TINTA_SEARCH_PANEL_FIXTURE_DIR="${TINTA_FIXTURES}/search-panel"
     TINTA_SUPERSCRIPT_FIXTURE="${TINTA_FIXTURES}/superscript-subscript.md"
+    TINTA_CODE_BASELINE_FIXTURE="${TINTA_FIXTURES}/inline-code-baseline-259.md"
     TINTA_PANEL_FIXTURE="${TINTA_FIXTURES}/toc-browser-resize.md"
     TINTA_IMAGE_FIXTURE="${TINTA_FIXTURES}/image-cache-large.md"
     TINTA_FIND_FIXTURE="${TINTA_FIXTURES}/find-table-focus.md"

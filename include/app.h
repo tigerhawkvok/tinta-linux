@@ -435,6 +435,8 @@ struct App {
     IDWriteTextFormat* codeItalicFormat = nullptr;
     IDWriteTextFormat* codeBoldItalicFormat = nullptr;
     IDWriteTextFormat* headingFormats[6] = {};
+    // *Emphasis* inside a heading keeps the heading's size and face
+    IDWriteTextFormat* headingItalicFormats[6] = {};
 
     // Overlay text formats (cached)
     IDWriteTextFormat* searchTextFormat = nullptr;
@@ -1566,6 +1568,9 @@ struct App {
         if (codeItalicFormat) { codeItalicFormat->Release(); codeItalicFormat = nullptr; }
         if (codeBoldItalicFormat) { codeBoldItalicFormat->Release(); codeBoldItalicFormat = nullptr; }
         for (auto& fmt : headingFormats) {
+            if (fmt) { fmt->Release(); fmt = nullptr; }
+        }
+        for (auto& fmt : headingItalicFormats) {
             if (fmt) { fmt->Release(); fmt = nullptr; }
         }
         if (bodyTypography) { bodyTypography->Release(); bodyTypography = nullptr; }

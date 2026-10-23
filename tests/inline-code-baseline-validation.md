@@ -62,3 +62,28 @@ the compat layer's metrics at 100%:
   Linux stand-ins for the defaults, 21.9 px instead of 27.2 px at 100%
   (code line 16.3 px + 2 × 2.8 px). The Windows value is unmeasured.
 - Highlight backgrounds (`==text==`) still fill the whole line box.
+
+## Upstream #259 additions (ported 2026-10-23)
+
+Upstream fixed #262 differently in b1d8020 (Tinta 3.8.1), and also #259.
+The port keeps this fork's code-span alignment and chip, and takes what
+upstream adds beyond it:
+
+- Each text run is placed by its own first-line baseline, so a run that
+  draws fallback glyphs (Chinese beside a Latin face, emoji) stays on its
+  format's Latin baseline instead of dropping by the fallback font's taller
+  ascent. Code spans get the same correction.
+- Code spans line up with the face of the style around them (a heading's
+  bold face), and the source shown for unsupported TeX sits on the
+  surrounding baseline.
+- Emphasis inside a heading keeps the heading's size, through bold-italic
+  heading faces. They load from the bundled-font collection like the other
+  heading faces (upstream passes none).
+- Upstream's app-wide baseline cache is not taken; `layoutInlineContent`
+  keeps its per-format cache.
+- The Linux compat layer gains `IDWriteTextLayout::GetFontFamilyName` by
+  position, which upstream's test uses.
+
+Checked on Linux: upstream's `codeBaselines` checks in `superscript_and_learn`
+on `fixtures/inline-code-baseline-259.md` pass, and `inline_code_baseline`
+passes 856 comparisons.

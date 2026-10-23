@@ -70,6 +70,15 @@ bool resolveFileRef(App& app, const std::string& raw, std::string& absOut) {
 }  // namespace
 
 IDWriteTextFormat* emphasisFormat(App& app, IDWriteTextFormat* base, bool bold, bool italic) {
+    // A heading is bold already; its emphasis keeps the heading's size
+    // rather than dropping to the body faces (and, inside it, inline code
+    // keeps the heading's baseline, #259)
+    for (int i = 0; i < 6; i++) {
+        if (base && (base == app.headingFormats[i] || base == app.headingItalicFormats[i])) {
+            if (italic && app.headingItalicFormats[i]) return app.headingItalicFormats[i];
+            return app.headingFormats[i] ? app.headingFormats[i] : base;
+        }
+    }
     IDWriteTextFormat* fmt = nullptr;
     if (bold && italic) fmt = app.boldItalicFormat ? app.boldItalicFormat : app.boldFormat;
     else if (bold) fmt = app.boldFormat;

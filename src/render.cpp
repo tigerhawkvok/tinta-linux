@@ -457,6 +457,18 @@ static void noteDocSource(App& app, size_t docStart, size_t length, const Elemen
     app.docSourceSpans.push_back(std::move(span));
 }
 
+// First-line baseline of a layout, measured from its top; negative
+// when the layout has no line to measure
+static float layoutBaseline(IDWriteTextLayout* layout) {
+    if (!layout) return -1.0f;
+    UINT32 count = 0;
+    layout->GetLineMetrics(nullptr, 0, &count);
+    if (!count) return -1.0f;
+    std::vector<DWRITE_LINE_METRICS> lines(count);
+    if (FAILED(layout->GetLineMetrics(lines.data(), count, &count))) return -1.0f;
+    return lines.front().baseline;
+}
+
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
@@ -477,6 +489,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     float mathTextOffset = 0;
     float maxX = startX + maxWidth;
     float spaceWidth = getSpaceWidth(app, baseFormat);
+
 
     std::string inlineAnchor;
     auto addLinkSegment = [&](float lineStartX, float lineEndX, float lineY,
@@ -546,6 +559,15 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         return faceLines.back();
     };
     auto baselineOf = [&](IDWriteTextFormat* format) { return faceLine(format).baseline; };
+    // Every run sits on the baseline its format's own font gives Latin
+    // text (#259): DirectWrite hangs a run from the line top on the ascent
+    // of the fonts it uses, so a run drawing fallback glyphs (Chinese
+    // beside a Latin face, emoji) would otherwise drop. A run's own
+    // baseline counts its fallback fonts; its format's does not.
+    auto runBaseline = [&](IDWriteTextLayout* layout, IDWriteTextFormat* format) {
+        float baseline = layoutBaseline(layout);
+        return baseline >= 0.0f ? baseline : baselineOf(format);
+    };
     // A code chip hugs its glyphs' line box, padded by a fifth of the code
     // size, and stays inside the text line so cells never clip it (#262)
     auto codeChip = [&](float left, float right, float lineTop, float codeTop, IDWriteTextFormat* format) {
@@ -581,6 +603,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         const auto& run = runs[runIndex];
         const ElementPtr& elem = run.elem;
         IDWriteTextFormat* format = run.style.format;
+        IDWriteTextFormat* textFormat = format ? format : baseFormat;
         D2D1_COLOR_F color = run.style.color;
         const std::string& linkUrl = run.style.linkUrl;
         inlineAnchor = run.style.anchorId;
@@ -611,8 +634,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 LayoutInfo info = createLayout(app, text, format, lineHeight, app.codeTypography);
                 float textWidth = info.width;
 
-                // On the surrounding text's baseline (#262)
-                const float codeBaselineShift = baselineOf(baseFormat) - baselineOf(format);
+                // On the surrounding text's baseline (#259, #262): the face
+                // of the style around it, such as a heading's bold face
+                const float codeBaselineShift = baselineOf(textFormat) - baselineOf(format);
                 // Keep fitting code spans atomic. Oversized ones share the
                 // Unicode/cluster-aware wrapping path below, including during
                 // table row measurement, so their chips cannot cover the next
@@ -629,7 +653,8 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     y += lineHeight;
                 }
 
-                D2D1_POINT_2F pos = D2D1::Point2F(x, y + mathTextOffset + codeBaselineShift);
+                D2D1_POINT_2F pos = D2D1::Point2F(
+                    x, y + mathTextOffset + codeBaselineShift + baselineOf(format) - runBaseline(info.layout, format));
                 app.layoutRects.push_back({codeChip(x - 2, x + textWidth + kCodeSpanPadding,
                                                     y + mathTextOffset, pos.y, format),
                                            app.theme.codeBackground});
@@ -657,6 +682,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     // Unsupported TeX: show the raw source in code style
                     format = inlineCodeFormat(app, run.style.bold, run.style.italic);
                     if (!isLink) color = themeInlineCodeColor(app.theme);
+                    drawYOffset += baselineOf(textFormat) - baselineOf(format);
                     text = L"$" + latex + L"$";
                     break;
                 }
@@ -896,7 +922,12 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                                            D2D1::Point2F(segX + segWidth, strikeY),
                                            color, 1.0f});
             }
-            D2D1_POINT_2F segPos = D2D1::Point2F(segX, y + drawYOffset);
+            // A run that draws fallback glyphs (Chinese beside a Latin
+            // font, emoji) gets a taller line ascent from DirectWrite; put
+            // it back on its format's baseline like every other run (#259)
+            float segTop = drawYOffset + baselineOf(format) -
+                           runBaseline(info.layout, format);
+            D2D1_POINT_2F segPos = D2D1::Point2F(segX, y + segTop);
             D2D1_RECT_F segBounds = D2D1::RectF(segX, y, segX + segWidth, y + lineHeight);
             size_t runsBefore = app.layoutTextRuns.size();
             addTextRun(app, std::move(info), segPos, segBounds, color,
