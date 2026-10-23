@@ -120,3 +120,19 @@ add_test(NAME inline_code_baseline COMMAND inline_code_baseline_tests)
 # The default code face (Monaspace Argon) and its fallback
 tinta_upstream_test(code_font_tests tests/code_font_tests.cpp)
 add_test(NAME code_font COMMAND code_font_tests)
+
+# PlantUML (#248): the CLI test double (no Java needed) and the core suite,
+# through upstream's portable driver; the self-check must fail
+add_executable(fake_plantuml tests/fake_plantuml.cpp)
+tinta_upstream_test(plantuml_tests tests/plantuml_tests.cpp)
+target_compile_definitions(plantuml_tests PRIVATE
+    TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
+    TINTA_PLANTUML_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/plantuml.cpp")
+add_dependencies(plantuml_tests fake_plantuml)
+tinta_driver_test(plantuml_parser plantuml_tests plantuml-test run_plantuml_tests.cmake)
+add_test(NAME plantuml_parser_selfcheck COMMAND ${CMAKE_COMMAND}
+    -DTEST_BINARY=$<TARGET_FILE:plantuml_tests>
+    -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/plantuml-selfcheck-test
+    -DTEST_ARGS=--expect-failure
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_plantuml_tests.cmake)
+set_tests_properties(plantuml_parser_selfcheck PROPERTIES WILL_FAIL TRUE)

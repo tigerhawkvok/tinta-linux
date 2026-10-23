@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 
 #include <string>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 #include <chrono>
@@ -24,6 +25,8 @@
 
 #include "markdown.h"
 #include "keymap.h"
+#include "plantuml.h"
+#include "plantuml_queue.h"
 #include "wordcount.h"
 
 using namespace qmd;
@@ -77,6 +80,11 @@ inline int64_t usElapsed(Clock::time_point start) {
 // Linux: how a tab drag the desktop carried ended (TINTA_TAB_DRAG_* in
 // wParam); see tabDragDone
 #define WM_APP_TAB_DRAG_DONE (WM_APP + 8)
+
+// PlantUML render-queue worker finished a render for `key`; the queue's
+// completion callback posts this from the worker thread with (WPARAM)key
+// (upstream numbers it WM_APP + 7, which this fork already uses)
+#define WM_APP_PLANTUML_READY (WM_APP + 9)
 
 // Startup metrics
 struct StartupMetrics {
@@ -291,6 +299,8 @@ struct Settings {
     fm::Settings frontmatter;
     // User-chosen pandoc executable ("" = auto-detect)
     std::string pandocPath;
+    // User-chosen PlantUML tool: plantuml.exe or plantuml.jar ("" = PATH)
+    std::string plantumlPath;
 };
 
 // Application state
@@ -950,6 +960,11 @@ struct App {
         unsigned fitKey = 0;      // per-layout ordinal for the fit toggle
         bool fitCandidate = false;
         bool fitActive = false;
+        // Rendered PlantUML diagram: the cached PNG's render key and
+        // format (0=png), so copy-as-image can find the image again
+        bool isPlantuml = false;
+        uint64_t plantumlKey = 0;
+        int plantumlFormat = 0;
     };
     std::vector<CodeBlockInfo> codeBlocks;
     int hoveredCodeBlock = -1;
@@ -1335,6 +1350,23 @@ struct App {
     std::wstring pandocUserPath;
     bool pandocChecked = false;
     bool pandocRunning = false;
+
+    // PlantUML bridge (plantuml_app.cpp): the resolved tool (a plantuml.exe
+    // or java.exe + plantuml.jar), the user's settings override, and the
+    // resolve-once guard
+    plantuml::Tool plantumlTool;
+    std::wstring plantumlUserPath;
+    bool plantumlChecked = false;
+    // Async render queue (created lazily by plantumlEnsureQueue) and the
+    // per-process work root under %TEMP%; unique_ptr keeps App.h the only
+    // owner and joins the worker before exit via WM_DESTROY
+    std::unique_ptr<plantuml::PlantumlRenderQueue> plantumlQueue;
+    std::wstring plantumlWorkRoot;
+    // Print/PDF re-layouts run synchronously without a message pump: the
+    // async queue can never complete there, so the layout may render
+    // inline under this flag and the shared millisecond budget
+    bool plantumlPrintLayout = false;
+    int plantumlPrintBudgetMsLeft = 0;
 
     // Unified editor (design t11): one raw buffer, live render beside it;
     // the left tool rail slides in with edit mode carrying the controls
