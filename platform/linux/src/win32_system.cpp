@@ -129,6 +129,33 @@ struct ThreadHandle final : TintaHandle {
     std::shared_ptr<ThreadState> state;
 };
 
+struct EventHandle final : TintaHandle {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool manualReset = false;
+    bool signaled = false;
+    // Takes the signal if it is set (an auto-reset event lets one waiter in)
+    bool tryTake() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!signaled) return false;
+        if (!manualReset) signaled = false;
+        return true;
+    }
+};
+
+// A job's process groups; with KILL_ON_JOB_CLOSE, closing the job ends
+// whatever is still running in them
+struct JobHandle final : TintaHandle {
+    ~JobHandle() override {
+        if (killOnClose) killAll();
+    }
+    void killAll() {
+        for (pid_t group : groups) ::kill(-group, SIGKILL);
+    }
+    std::vector<pid_t> groups;
+    bool killOnClose = false;
+};
+
 TintaHandle* handleOf(HANDLE h) {
     if (!h || h == INVALID_HANDLE_VALUE) return nullptr;
     return static_cast<TintaHandle*>(h);
@@ -171,6 +198,32 @@ void fillFindData(const std::string& dir, const std::string& name, WIN32_FIND_DA
     wmemcpy(data.cFileName, w.c_str(), n);
     data.cFileName[n] = 0;
 }
+
+}  // namespace
+
+BOOL GetFileAttributesExW(LPCWSTR path, GET_FILEEX_INFO_LEVELS level, void* info) {
+    if (!path || !info || level != GetFileExInfoStandard) {
+        lastError = 87;
+        return FALSE;
+    }
+    std::string full = native(path);
+    struct stat st {};
+    if (stat(full.c_str(), &st) != 0) {
+        lastError = errno == ENOENT ? ERROR_FILE_NOT_FOUND : 5;
+        return FALSE;
+    }
+    auto* data = static_cast<WIN32_FILE_ATTRIBUTE_DATA*>(info);
+    data->dwFileAttributes = attributesOf(full, st);
+    fileTimeFrom(st.st_ctim, data->ftCreationTime);
+    fileTimeFrom(st.st_atim, data->ftLastAccessTime);
+    fileTimeFrom(st.st_mtim, data->ftLastWriteTime);
+    auto size = static_cast<unsigned long long>(st.st_size);
+    data->nFileSizeHigh = static_cast<DWORD>(size >> 32);
+    data->nFileSizeLow = static_cast<DWORD>(size & 0xFFFFFFFFULL);
+    return TRUE;
+}
+
+namespace {
 
 // ---- Command lines (CommandLineToArgvW rules) ------------------------------------------------
 std::vector<std::wstring> splitCommandLine(const std::wstring& line) {
@@ -598,6 +651,21 @@ DWORD GetEnvironmentVariableW(LPCWSTR name, LPWSTR buffer, DWORD size) {
     return copyOut(wide(value), buffer, size);
 }
 
+// A null value removes the variable
+BOOL SetEnvironmentVariableW(LPCWSTR name, LPCWSTR value) {
+    if (!name || !*name) {
+        lastError = 87;
+        return FALSE;
+    }
+    std::string key = tinta::toUtf8(name, wcslen(name));
+    int result = value ? setenv(key.c_str(), tinta::toUtf8(value, wcslen(value)).c_str(), 1) : unsetenv(key.c_str());
+    if (result != 0) {
+        failWithErrno();
+        return FALSE;
+    }
+    return TRUE;
+}
+
 // %VAR% from the environment (unknown names stay as written), plus a
 // leading ~ for the home folder, which Linux users type in path boxes
 DWORD ExpandEnvironmentStringsW(LPCWSTR source, LPWSTR dest, DWORD size) {
@@ -690,7 +758,8 @@ BOOL QueryFullProcessImageNameW(HANDLE process, DWORD, LPWSTR name, DWORD* size)
 }
 
 BOOL CreateProcessW(LPCWSTR application, LPWSTR commandLine, SECURITY_ATTRIBUTES*, SECURITY_ATTRIBUTES*, BOOL,
-                    DWORD, void*, LPCWSTR currentDirectory, STARTUPINFOW*, PROCESS_INFORMATION* info) {
+                    DWORD flags, void* environment, LPCWSTR currentDirectory, STARTUPINFOW*,
+                    PROCESS_INFORMATION* info) {
     std::vector<std::wstring> args = splitCommandLine(commandLine ? commandLine : L"");
     if (application) {
         if (args.empty()) args.push_back(application);
@@ -707,12 +776,38 @@ BOOL CreateProcessW(LPCWSTR application, LPWSTR commandLine, SECURITY_ATTRIBUTES
     for (std::string& a : utf8) argv.push_back(a.data());
     argv.push_back(nullptr);
 
+    // An environment block: NAME=VALUE strings, each ended by a NUL, the
+    // block by a second one (UTF-16 with CREATE_UNICODE_ENVIRONMENT)
+    std::vector<std::string> envStrings;
+    std::vector<char*> envp;
+    if (environment) {
+        if (flags & CREATE_UNICODE_ENVIRONMENT) {
+            for (auto* p = static_cast<const wchar_t*>(environment); *p; p += wcslen(p) + 1) {
+                envStrings.push_back(tinta::toUtf8(p, wcslen(p)));
+            }
+        } else {
+            for (auto* p = static_cast<const char*>(environment); *p; p += strlen(p) + 1) envStrings.push_back(p);
+        }
+        for (std::string& e : envStrings) envp.push_back(e.data());
+        envp.push_back(nullptr);
+    }
+
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     std::string dir = currentDirectory ? native(currentDirectory) : std::string();
     if (!dir.empty()) posix_spawn_file_actions_addchdir_np(&actions, dir.c_str());
+    // The job pattern (create suspended, assign to a job, resume): the child
+    // starts now, in a process group of its own that the job can end whole
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    if (flags & CREATE_SUSPENDED) {
+        posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+        posix_spawnattr_setpgroup(&attributes, 0);
+    }
     pid_t pid = 0;
-    int error = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
+    int error = posix_spawnp(&pid, argv[0], &actions, &attributes, argv.data(),
+                             environment ? envp.data() : environ);
+    posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     if (error != 0) {
         lastError = errorFromErrno(error);
@@ -744,6 +839,86 @@ BOOL TerminateProcess(HANDLE process, UINT exitCode) {
     return TRUE;
 }
 
+// The child already runs (CreateProcessW cannot start one suspended here)
+DWORD ResumeThread(HANDLE) { return 1; }
+
+HANDLE CreateJobObjectW(SECURITY_ATTRIBUTES*, LPCWSTR) { return static_cast<TintaHandle*>(new JobHandle()); }
+
+BOOL SetInformationJobObject(HANDLE job, JOBOBJECTINFOCLASS infoClass, void* info, DWORD size) {
+    auto* h = dynamic_cast<JobHandle*>(handleOf(job));
+    if (!h || !info) return FALSE;
+    if (infoClass == JobObjectExtendedLimitInformation && size >= sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)) {
+        const auto* limits = static_cast<const JOBOBJECT_EXTENDED_LIMIT_INFORMATION*>(info);
+        h->killOnClose = (limits->BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) != 0;
+        return TRUE;
+    }
+    lastError = 87;
+    return FALSE;
+}
+
+// Only a process that leads its own group (CREATE_SUSPENDED) can join: a
+// job must never take its parent's group, Tinta's own, with it
+BOOL AssignProcessToJobObject(HANDLE job, HANDLE process) {
+    auto* h = dynamic_cast<JobHandle*>(handleOf(job));
+    auto* p = dynamic_cast<ProcessHandle*>(handleOf(process));
+    if (!h || !p || getpgid(p->pid) != p->pid) {
+        lastError = 5;  // ERROR_ACCESS_DENIED
+        return FALSE;
+    }
+    h->groups.push_back(p->pid);
+    return TRUE;
+}
+
+BOOL TerminateJobObject(HANDLE job, UINT) {
+    auto* h = dynamic_cast<JobHandle*>(handleOf(job));
+    if (!h) return FALSE;
+    h->killAll();
+    return TRUE;
+}
+
+LPWSTR GetEnvironmentStringsW() {
+    std::wstring block;
+    for (char** e = environ; e && *e; ++e) {
+        block += wide(*e);
+        block += L'\0';
+    }
+    block += L'\0';
+    auto* out = new wchar_t[block.size()];
+    wmemcpy(out, block.data(), block.size());
+    return out;
+}
+
+BOOL FreeEnvironmentStringsW(LPWSTR block) {
+    delete[] block;
+    return TRUE;
+}
+
+HANDLE CreateEventW(SECURITY_ATTRIBUTES*, BOOL manualReset, BOOL initialState, LPCWSTR) {
+    auto* h = new EventHandle();
+    h->manualReset = manualReset != FALSE;
+    h->signaled = initialState != FALSE;
+    return static_cast<TintaHandle*>(h);
+}
+
+BOOL SetEvent(HANDLE event) {
+    auto* h = dynamic_cast<EventHandle*>(handleOf(event));
+    if (!h) return FALSE;
+    {
+        std::lock_guard<std::mutex> lock(h->mutex);
+        h->signaled = true;
+    }
+    h->changed.notify_all();
+    return TRUE;
+}
+
+BOOL ResetEvent(HANDLE event) {
+    auto* h = dynamic_cast<EventHandle*>(handleOf(event));
+    if (!h) return FALSE;
+    std::lock_guard<std::mutex> lock(h->mutex);
+    h->signaled = false;
+    return TRUE;
+}
+
 HANDLE CreateThread(SECURITY_ATTRIBUTES*, SIZE_T, LPTHREAD_START_ROUTINE start, void* parameter, DWORD,
                     DWORD* threadId) {
     auto* handle = new ThreadHandle();
@@ -766,6 +941,14 @@ DWORD WaitForSingleObject(HANDLE handle, DWORD milliseconds) {
     if (auto* process = dynamic_cast<ProcessHandle*>(h)) {
         return process->wait(milliseconds) ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
     }
+    if (auto* event = dynamic_cast<EventHandle*>(h)) {
+        std::unique_lock<std::mutex> lock(event->mutex);
+        auto set = [&] { return event->signaled; };
+        if (milliseconds == INFINITE) event->changed.wait(lock, set);
+        else if (!event->changed.wait_for(lock, std::chrono::milliseconds(milliseconds), set)) return WAIT_TIMEOUT;
+        if (!event->manualReset) event->signaled = false;
+        return WAIT_OBJECT_0;
+    }
     if (auto* thread = dynamic_cast<ThreadHandle*>(h)) {
         if (!thread->state) return WAIT_OBJECT_0;
         std::unique_lock<std::mutex> lock(thread->state->mutex);
@@ -776,6 +959,44 @@ DWORD WaitForSingleObject(HANDLE handle, DWORD milliseconds) {
         return WAIT_OBJECT_0;
     }
     return 0xFFFFFFFF;  // WAIT_FAILED
+}
+
+// Processes, threads and events, polled every 5 ms (a process has no
+// descriptor to block on together with an event)
+DWORD WaitForMultipleObjects(DWORD count, const HANDLE* handles, BOOL waitAll, DWORD milliseconds) {
+    if (count == 0 || !handles) return WAIT_FAILED;
+    auto signaled = [](HANDLE handle) {
+        TintaHandle* h = handleOf(handle);
+        if (auto* process = dynamic_cast<ProcessHandle*>(h)) return process->wait(0);
+        if (auto* event = dynamic_cast<EventHandle*>(h)) {
+            std::lock_guard<std::mutex> lock(event->mutex);
+            return event->signaled;
+        }
+        if (dynamic_cast<ThreadHandle*>(h)) return WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+        return false;
+    };
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+    while (true) {
+        if (waitAll) {
+            bool all = true;
+            for (DWORD i = 0; i < count && all; ++i) all = signaled(handles[i]);
+            if (all) {
+                for (DWORD i = 0; i < count; ++i)
+                    if (auto* event = dynamic_cast<EventHandle*>(handleOf(handles[i]))) event->tryTake();
+                return WAIT_OBJECT_0;
+            }
+        } else {
+            for (DWORD i = 0; i < count; ++i) {
+                if (auto* event = dynamic_cast<EventHandle*>(handleOf(handles[i]))) {
+                    if (event->tryTake()) return WAIT_OBJECT_0 + i;
+                } else if (signaled(handles[i])) {
+                    return WAIT_OBJECT_0 + i;
+                }
+            }
+        }
+        if (milliseconds != INFINITE && std::chrono::steady_clock::now() >= deadline) return WAIT_TIMEOUT;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 void Sleep(DWORD milliseconds) { std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds)); }

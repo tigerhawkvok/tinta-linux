@@ -576,6 +576,11 @@ LONG ImmGetCompositionStringW(HIMC imc, DWORD index, void* buffer, DWORD length)
 #define ERROR_ALREADY_EXISTS 183L
 #define ERROR_NO_ASSOCIATION 1155L
 #define CREATE_NO_WINDOW 0x08000000
+#define CREATE_SUSPENDED 0x00000004
+#define CREATE_UNICODE_ENVIRONMENT 0x00000400
+#define STILL_ACTIVE 259
+#define WAIT_FAILED 0xFFFFFFFF
+#define JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 0x00002000
 #define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
 #define STARTF_USESHOWWINDOW 0x00000001
 #define STARTF_USESTDHANDLES 0x00000100
@@ -585,6 +590,44 @@ struct SECURITY_ATTRIBUTES {
     void* lpSecurityDescriptor;
     BOOL bInheritHandle;
 };
+struct WIN32_FILE_ATTRIBUTE_DATA {
+    DWORD dwFileAttributes;
+    FILETIME ftCreationTime;
+    FILETIME ftLastAccessTime;
+    FILETIME ftLastWriteTime;
+    DWORD nFileSizeHigh;
+    DWORD nFileSizeLow;
+};
+enum GET_FILEEX_INFO_LEVELS { GetFileExInfoStandard, GetFileExMaxInfoLevel };
+
+// Job objects: on Linux a job owns process groups. A process created
+// CREATE_SUSPENDED (the job pattern: create, assign, resume) starts at once
+// in a group of its own, so everything it starts belongs to the job too
+struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    long long PerProcessUserTimeLimit;  // LARGE_INTEGER on Windows; unused here
+    long long PerJobUserTimeLimit;
+    DWORD LimitFlags;
+    SIZE_T MinimumWorkingSetSize;
+    SIZE_T MaximumWorkingSetSize;
+    DWORD ActiveProcessLimit;
+    ULONG_PTR Affinity;
+    DWORD PriorityClass;
+    DWORD SchedulingClass;
+};
+struct IO_COUNTERS {
+    ULONGLONG ReadOperationCount, WriteOperationCount, OtherOperationCount;
+    ULONGLONG ReadTransferCount, WriteTransferCount, OtherTransferCount;
+};
+struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    IO_COUNTERS IoInfo;
+    SIZE_T ProcessMemoryLimit;
+    SIZE_T JobMemoryLimit;
+    SIZE_T PeakProcessMemoryUsed;
+    SIZE_T PeakJobMemoryUsed;
+};
+enum JOBOBJECTINFOCLASS { JobObjectExtendedLimitInformation = 9 };
+
 struct WIN32_FIND_DATAW {
     DWORD dwFileAttributes;
     FILETIME ftCreationTime;
@@ -643,6 +686,7 @@ BOOL SetCurrentDirectoryW(LPCWSTR path);
 DWORD GetTempPathW(DWORD size, LPWSTR buffer);
 UINT GetSystemDirectoryW(LPWSTR buffer, UINT size);
 DWORD GetEnvironmentVariableW(LPCWSTR name, LPWSTR buffer, DWORD size);
+BOOL SetEnvironmentVariableW(LPCWSTR name, LPCWSTR value);
 DWORD ExpandEnvironmentStringsW(LPCWSTR source, LPWSTR dest, DWORD size);
 DWORD SearchPathW(LPCWSTR path, LPCWSTR fileName, LPCWSTR extension, DWORD size, LPWSTR buffer, LPWSTR* filePart);
 DWORD GetCurrentProcessId();
@@ -653,6 +697,18 @@ BOOL CreateProcessW(LPCWSTR application, LPWSTR commandLine, SECURITY_ATTRIBUTES
                     LPCWSTR currentDirectory, STARTUPINFOW* startup, PROCESS_INFORMATION* info);
 BOOL GetExitCodeProcess(HANDLE process, DWORD* exitCode);
 BOOL TerminateProcess(HANDLE process, UINT exitCode);
+DWORD ResumeThread(HANDLE thread);
+HANDLE CreateJobObjectW(SECURITY_ATTRIBUTES* security, LPCWSTR name);
+BOOL SetInformationJobObject(HANDLE job, JOBOBJECTINFOCLASS infoClass, void* info, DWORD size);
+BOOL AssignProcessToJobObject(HANDLE job, HANDLE process);
+BOOL TerminateJobObject(HANDLE job, UINT exitCode);
+LPWSTR GetEnvironmentStringsW();
+BOOL FreeEnvironmentStringsW(LPWSTR block);
+HANDLE CreateEventW(SECURITY_ATTRIBUTES* security, BOOL manualReset, BOOL initialState, LPCWSTR name);
+BOOL SetEvent(HANDLE event);
+BOOL ResetEvent(HANDLE event);
+DWORD WaitForMultipleObjects(DWORD count, const HANDLE* handles, BOOL waitAll, DWORD milliseconds);
+BOOL GetFileAttributesExW(LPCWSTR path, GET_FILEEX_INFO_LEVELS level, void* info);
 typedef DWORD (*LPTHREAD_START_ROUTINE)(void* parameter);
 HANDLE CreateThread(SECURITY_ATTRIBUTES* security, SIZE_T stackSize, LPTHREAD_START_ROUTINE start,
                     void* parameter, DWORD flags, DWORD* threadId);
