@@ -4217,6 +4217,135 @@ void ensureLayoutComplete(App& app) {
     }
 }
 
+namespace {
+
+size_t documentSourceSize(const App& app) {
+    return app.root && app.root->source ? app.root->source->mapped.size() : 0;
+}
+
+// The source offset drawn at document y, between the scroll anchors around
+// it (past the last one, spread over the rest of the source); false when y
+// lies beyond what the layout has reached
+bool sourceOffsetAtY(const App& app, float y, double& offset) {
+    const auto& anchors = app.scrollAnchors;
+    if (anchors.empty()) return false;
+    size_t lo = 0, hi = anchors.size();
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (anchors[mid].renderedY <= y) lo = mid;
+        else hi = mid;
+    }
+    offset = (double)anchors[lo].sourceOffset;
+    if (y <= anchors[lo].renderedY) return true;
+    if (lo + 1 < anchors.size()) {
+        if (anchors[lo + 1].renderedY > anchors[lo].renderedY) {
+            double t = (double)(y - anchors[lo].renderedY) /
+                       (double)(anchors[lo + 1].renderedY - anchors[lo].renderedY);
+            offset += std::clamp(t, 0.0, 1.0) *
+                      ((double)anchors[lo + 1].sourceOffset - (double)anchors[lo].sourceOffset);
+        }
+        return true;
+    }
+    if (!app.layoutComplete) return false;
+    size_t end = documentSourceSize(app);
+    if (app.contentHeight > anchors[lo].renderedY && end > anchors[lo].sourceOffset) {
+        double t = (double)(y - anchors[lo].renderedY) / (double)(app.contentHeight - anchors[lo].renderedY);
+        offset += std::clamp(t, 0.0, 1.0) * (double)(end - anchors[lo].sourceOffset);
+    }
+    return true;
+}
+
+// The inverse: the document y that draws a source offset
+float yForSourceOffset(const App& app, double offset) {
+    const auto& anchors = app.scrollAnchors;
+    if (anchors.empty()) return 0.0f;
+    size_t lo = 0, hi = anchors.size();
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if ((double)anchors[mid].sourceOffset <= offset) lo = mid;
+        else hi = mid;
+    }
+    float y = anchors[lo].renderedY;
+    if (offset <= (double)anchors[lo].sourceOffset) return y;
+    if (lo + 1 < anchors.size()) {
+        double span = (double)anchors[lo + 1].sourceOffset - (double)anchors[lo].sourceOffset;
+        if (span > 0) {
+            double t = std::clamp((offset - (double)anchors[lo].sourceOffset) / span, 0.0, 1.0);
+            y += (float)(t * (anchors[lo + 1].renderedY - anchors[lo].renderedY));
+        }
+        return y;
+    }
+    size_t end = documentSourceSize(app);
+    if (end > anchors[lo].sourceOffset && app.contentHeight > y) {
+        double t = std::clamp((offset - (double)anchors[lo].sourceOffset) /
+                                  (double)(end - anchors[lo].sourceOffset), 0.0, 1.0);
+        y += (float)(t * (app.contentHeight - y));
+    }
+    return y;
+}
+
+}  // namespace
+
+void reflowForViewportWidth(App& app) {
+    float width = documentViewportWidth(app);
+    if (width <= 0.0f || width == app.lastViewportWidth) return;
+    const bool laidOut = app.lastViewportWidth > 0.0f;
+    app.lastViewportWidth = width;
+    app.layoutDirty = true;
+    // The reader only: the edit-mode preview follows the source instead,
+    // and a document still restoring its saved place keeps that
+    app.readingPlacePending = false;
+    if (!laidOut || app.editMode || !app.root || app.scrollAnchors.empty() ||
+        app.pendingScrollRestore >= 0.0f) {
+        return;
+    }
+    // A heading Contents just jumped to, with no scrolling since
+    app.readingPlaceHeading = -1;
+    if (app.tocSpyOverride >= 0 && app.tocSpyOverride < (int)app.headings.size() &&
+        std::fabs(app.targetScrollY - app.tocSpyOverrideScroll) < 1.0f) {
+        app.readingPlaceHeading = app.tocSpyOverride;
+    }
+    app.readingPlaceAtTop = app.targetScrollY <= 0.5f;
+    double offset = 0.0;
+    if (app.readingPlaceHeading < 0 && !app.readingPlaceAtTop &&
+        !sourceOffsetAtY(app, app.targetScrollY + readingLineOffset(app), offset)) {
+        return;  // past the incremental layout's reach: nothing to anchor to
+    }
+    app.readingPlaceOffset = offset;
+    app.readingPlacePending = true;
+}
+
+void restoreReadingPlace(App& app) {
+    if (!app.readingPlacePending || app.layoutDirty) return;
+    app.readingPlacePending = false;
+    if (app.readingPlaceAtTop) {
+        app.scrollY = app.targetScrollY = 0.0f;
+        return;
+    }
+    if (app.readingPlaceHeading >= 0) {
+        if (app.readingPlaceHeading >= (int)app.headings.size()) ensureLayoutComplete(app);
+        if (app.readingPlaceHeading >= (int)app.headings.size()) return;
+        float headingY = app.headings[app.readingPlaceHeading].y;
+        if (!app.layoutComplete && headingY - readingLineOffset(app) > app.contentHeight - app.height) {
+            ensureLayoutComplete(app);  // the scroll limit needs the whole document
+        }
+        scrollToHeadingY(app, app.headings[app.readingPlaceHeading].y);
+        app.tocSpyOverride = app.readingPlaceHeading;
+        app.tocSpyOverrideScroll = app.targetScrollY;
+        return;
+    }
+    // The viewport-first layout stops two screens below the old place; the
+    // place may have moved further down in a narrower column
+    if (!app.layoutComplete && (app.scrollAnchors.empty() ||
+                                (double)app.scrollAnchors.back().sourceOffset <= app.readingPlaceOffset)) {
+        ensureLayoutComplete(app);
+    }
+    float target = yForSourceOffset(app, app.readingPlaceOffset) - readingLineOffset(app);
+    if (!app.layoutComplete && target > app.contentHeight - app.height) ensureLayoutComplete(app);
+    float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+    app.scrollY = app.targetScrollY = std::clamp(target, 0.0f, maxScroll);
+}
+
 
 // Public face of the role resolver for the exporters (the implementation
 // lives in this file's anonymous namespace beside the palette helpers)

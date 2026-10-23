@@ -35,6 +35,9 @@ void copyFilePath(App& app, HWND hwnd, const std::string& path);
 void extractText(const ElementPtr& elem, std::wstring& out);
 
 std::string slugifyHeading(const std::wstring& text);
+// Where a jump lands its target, below the top of the view: clear of the
+// title-bar tab strip that draws over the document's top band
+float readingLineOffset(const App& app);
 void scrollToHeadingY(App& app, float headingY);
 // Document Y of an in-document link target: a footnote, a heading slug, or
 // an <a id>/<a name> anchor (#255)

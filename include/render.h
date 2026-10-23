@@ -18,6 +18,13 @@ bool layoutDocumentContinue(App& app, int64_t budgetUs);
 // Synchronously finishes any incomplete/dirty layout (search, TOC, End key)
 void ensureLayoutComplete(App& app);
 
+// Once a frame, before layout: a new viewport width (a side panel opening
+// or closing, the window resizing) marks the layout dirty and notes the
+// reader's place. restoreReadingPlace, after the layout, scrolls back to
+// it, so the text under the reading line stays there
+void reflowForViewportWidth(App& app);
+void restoreReadingPlace(App& app);
+
 // UI-thread completion for WM_APP_IMAGE_READY: takes ownership of the
 // AsyncImageResult, updates the image cache, and triggers a reflow
 void completeAsyncImage(App& app, void* asyncResult);

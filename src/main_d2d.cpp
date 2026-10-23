@@ -113,15 +113,10 @@ void render(App& app) {
         return;
     }
 
-    // Any viewport width change (folder browser toggle, preview split)
-    // re-flows the reading column for the space that remains
-    {
-        float vw = documentViewportWidth(app);
-        if (vw > 0.0f && vw != app.lastViewportWidth) {
-            app.lastViewportWidth = vw;
-            app.layoutDirty = true;
-        }
-    }
+    // Any viewport width change (a side panel, the window, the preview
+    // split) re-flows the reading column for the space that remains; the
+    // reader keeps its place
+    reflowForViewportWidth(app);
 
     if (app.layoutDirty) {
         if (app.editMode && !editorPreviewVisible(app)) {
@@ -146,6 +141,7 @@ void render(App& app) {
             }
         }
     }
+    restoreReadingPlace(app);
 
     // Incremental layout grows contentHeight in small steps. Keep scrollbar
     // visibility latched for the duration of that layout and only let its

@@ -1165,6 +1165,13 @@ struct App {
     // Viewport width at the last layout: a change (folder browser toggle,
     // preview split drag) triggers a relayout in the render loop
     float lastViewportWidth = -1.0f;
+    // The reader's place across that relayout (reflowForViewportWidth):
+    // the source offset at the reading line, or the heading Contents just
+    // jumped to, or the top of the document
+    bool readingPlacePending = false;
+    double readingPlaceOffset = 0.0;
+    int readingPlaceHeading = -1;
+    bool readingPlaceAtTop = false;
     std::vector<LayoutTextRun> layoutTextRuns;
     std::vector<LayoutRect> layoutRects;
     std::vector<LayoutLine> layoutLines;

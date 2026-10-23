@@ -161,10 +161,14 @@ std::string slugifyHeading(const std::wstring& text) {
     return out;
 }
 
+float readingLineOffset(const App& app) {
+    return chromeTopHeight(app) + dpi(app, 14.0f);
+}
+
 void scrollToHeadingY(App& app, float headingY) {
     // The title-bar tab strip draws over the document's top band, so the
     // landing margin must clear it or the heading arrives half-hidden
-    float targetY = headingY - chromeTopHeight(app) - dpi(app, 14.0f);
+    float targetY = headingY - readingLineOffset(app);
     float maxScroll = std::max(0.0f, app.contentHeight - app.height);
     app.scrollY = std::max(0.0f, std::min(targetY, maxScroll));
     app.targetScrollY = app.scrollY;

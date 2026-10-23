@@ -361,6 +361,122 @@ void longContents(App& app) {
 }
 }
 
+namespace {
+// One frame's layout as render() runs it: a new viewport width re-flows the
+// column and the reader keeps its place; the remaining chunks follow
+void frame(App& app) {
+    reflowForViewportWidth(app);
+    if (app.layoutDirty) layoutDocumentViewportFirst(app);
+    restoreReadingPlace(app);
+    ensureLayoutComplete(app);
+}
+
+// Where a heading lands relative to the reading line, allowing for the
+// document's end, which a late heading cannot scroll past
+bool atReadingLine(App& app, int heading) {
+    const float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+    const float wanted = std::clamp(app.headings[heading].y - readingLineOffset(app), 0.0f, maxScroll);
+    return std::abs(app.scrollY - wanted) < 1.0f && std::abs(app.targetScrollY - wanted) < 1.0f;
+}
+
+// The reading line's place: the block it falls in (by source offset) and
+// how far down that block
+std::pair<size_t, float> placeAt(const App& app) {
+    const float y = app.scrollY + readingLineOffset(app);
+    const auto& anchors = app.scrollAnchors;
+    size_t i = 0;
+    while (i + 1 < anchors.size() && anchors[i + 1].renderedY <= y) ++i;
+    const float height = i + 1 < anchors.size() ? anchors[i + 1].renderedY - anchors[i].renderedY : 1.0f;
+    return {anchors[i].sourceOffset, (y - anchors[i].renderedY) / height};
+}
+
+// A Contents jump stays put when the panel closes and the column widens,
+// and any width change keeps the reader's place (tests/fixtures/toc-jump-reflow.md)
+void readingPlace(App& app) {
+    app.contentScale = app.zoomFactor = 1;
+    updateTextFormats(app);
+    app.width = 1050;
+    app.height = 700;
+    app.showFolderBrowser = false;
+    app.folderBrowserAnimation = 0;
+    app.showToc = false;
+    app.tocAnimation = 0;
+    app.tocPinned = false;
+    app.tocWidth = 280;
+    app.tocFilter.clear();
+    app.pendingScrollRestore = -1.0f;
+    const auto fixture = std::filesystem::path(TINTA_PANEL_FIXTURE).parent_path() / "toc-jump-reflow.md";
+    app.root = app.parser.parse(read(fixture)).root;
+    check(app.root != nullptr, "the Contents reflow fixture parses");
+    if (!app.root) return;
+    app.scrollY = app.targetScrollY = 0;
+    app.lastViewportWidth = -1.0f;
+    app.layoutDirty = true;
+    frame(app);
+    check(app.headings.size() == 26, "the Contents reflow fixture has 26 headings");
+    if (app.headings.size() != 26) return;
+
+    for (bool left : {false, true}) {
+        for (int target : {5, 17, 25}) {
+            app.tocOnLeft = left;
+            app.scrollY = app.targetScrollY = 0;
+            frame(app);
+            // Contents opens: the column narrows and re-flows
+            app.showToc = true;
+            app.tocAnimation = 1;
+            frame(app);
+            const float narrowY = app.headings[target].y;
+            app.tocFilter = app.headings[target].text;
+            app.tocScroll = 0;
+            const auto list = tocListRect(app);
+            const float rowX = list.left + 15, rowY = list.top + 10;
+            check(tocItemIndexAt(app, rowX, rowY) == target, "the filtered Contents row is the target heading");
+            handleMouseUp(app, app.hwnd, 0, MAKELPARAM((int)rowX, (int)rowY));
+            check(!app.showToc, "an unpinned Contents closes after the jump");
+            check(atReadingLine(app, target), "the jump lands the heading at the reading line");
+            // The next frame widens the column: the heading moves, the view follows
+            frame(app);
+            check(std::abs(app.headings[target].y - narrowY) > 20.0f,
+                  "the wider column moves the heading (the fixture exercises the reflow)");
+            check(atReadingLine(app, target),
+                  "the heading Contents jumped to stays at the reading line after the panel closes");
+            check(app.tocSpyOverride == target, "Contents still marks the heading it jumped to");
+        }
+    }
+
+    // Any width change keeps the reader's place mid-paragraph: a side
+    // panel opening, then the window narrowing
+    app.tocOnLeft = false;
+    app.showToc = false;
+    frame(app);
+    const float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+    app.scrollY = app.targetScrollY = maxScroll * 0.45f;
+    app.tocSpyOverride = -1;
+    frame(app);
+    const auto before = placeAt(app);
+    app.showFolderBrowser = true;
+    app.folderBrowserAnimation = 1;
+    frame(app);
+    auto after = placeAt(app);
+    check(after.first == before.first && std::abs(after.second - before.second) < 0.01f,
+          "opening the file browser keeps the reading line in the same place in the same paragraph");
+    app.width = 800;
+    frame(app);
+    after = placeAt(app);
+    check(after.first == before.first && std::abs(after.second - before.second) < 0.01f,
+          "a narrower window keeps the reading line in the same place in the same paragraph");
+
+    // The top stays the top
+    app.scrollY = app.targetScrollY = 0;
+    frame(app);
+    app.showFolderBrowser = false;
+    app.width = 1050;
+    frame(app);
+    check(app.scrollY == 0.0f && app.targetScrollY == 0.0f, "a document at its top stays at its top");
+    app.folderBrowserAnimation = 0;
+}
+}
+
 int runSidePanelTests() {
     namespace fs = std::filesystem;
     wchar_t exe[MAX_PATH]{};
@@ -414,6 +530,7 @@ int runSidePanelTests() {
     quietPanelEdges(app);
     scrollbarAcrossPanels(app);
     longContents(app);
+    readingPlace(app);
 
     app.contentScale = app.zoomFactor = 1;
     app.width = 1050;
