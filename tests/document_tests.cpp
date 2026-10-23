@@ -1,8 +1,10 @@
+#include "admonition.h"
 #include "document.h"
 
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -12,6 +14,216 @@ void check(bool condition, const char* message) {
     if (condition) return;
     std::cerr << "FAIL: " << message << '\n';
     failures++;
+}
+
+// Admonitions in every dialect (admonition.h): the kind, keyword, title,
+// fold and body each one parses to, nesting, offsets, and what stays text
+std::string plainText(const qmd::ElementPtr& e) {
+    if (!e) return {};
+    if (e->type == qmd::ElementType::Text || e->type == qmd::ElementType::Code) {
+        std::string out = e->text;
+        for (const auto& c : e->children) out += plainText(c);
+        return out;
+    }
+    if (e->type == qmd::ElementType::SoftBreak || e->type == qmd::ElementType::HardBreak) return " ";
+    std::string out;
+    for (const auto& c : e->children) {
+        if (!out.empty() && c->type != qmd::ElementType::Text && c->type != qmd::ElementType::SoftBreak &&
+            e->type != qmd::ElementType::Paragraph && e->type != qmd::ElementType::Emphasis &&
+            e->type != qmd::ElementType::Strong) {
+            out += " ";
+        }
+        out += plainText(c);
+    }
+    return out;
+}
+
+const qmd::ElementPtr* findBox(const qmd::ElementPtr& e) {
+    if (!e) return nullptr;
+    for (const auto& c : e->children) {
+        if (c->type == qmd::ElementType::BlockQuote && c->alertKind != 0) return &c;
+        if (const auto* inner = findBox(c)) return inner;
+    }
+    return nullptr;
+}
+
+int countBoxes(const qmd::ElementPtr& e) {
+    int n = 0;
+    for (const auto& c : e->children) n += (c->type == qmd::ElementType::BlockQuote && c->alertKind != 0) + countBoxes(c);
+    return n;
+}
+
+void admonitionTests(qmd::MarkdownParser& parser) {
+    struct Case {
+        const char* name;
+        std::string source;
+        int kind;
+        const char* keyword;
+        const char* title;
+        int fold;
+        const char* body;
+    };
+    const Case cases[] = {
+        {"GitHub alert", "> [!WARNING]\n> Mind the gap.\n", qmd::AdmonitionWarning, "warning", "", 0,
+         "Mind the gap."},
+        {"GitHub caution", "> [!CAUTION]\n> Careful.\n", qmd::AdmonitionCaution, "caution", "", 0, "Careful."},
+        {"Obsidian title and fold", "> [!faq]- Why *fold*?\n> Because.\n", qmd::AdmonitionQuestion, "faq",
+         "Why fold?", 2, "Because."},
+        {"Obsidian open fold", "> [!example]+ Shown\n> Body.\n", qmd::AdmonitionExample, "example", "Shown", 1,
+         "Body."},
+        {"Obsidian unknown type", "> [!recipe] Soup\n> Water.\n", qmd::AdmonitionNote, "recipe", "Soup", 0,
+         "Water."},
+        {"GitLab title", "> [!note] Trailing words\n", qmd::AdmonitionNote, "note", "Trailing words", 0, ""},
+        {"Docusaurus", ":::tip[Fast **path**]\n\nUse it.\n\n:::\n", qmd::AdmonitionTip, "tip", "Fast path", 0,
+         "Use it."},
+        {"Docusaurus, old title, no blank lines", ":::danger Take care\nHot.\n:::\n", qmd::AdmonitionDanger,
+         "danger", "Take care", 0, "Hot."},
+        {"Docusaurus attributes", ":::info[Read me]{#id .class}\nText.\n:::\n", qmd::AdmonitionInfo, "info",
+         "Read me", 0, "Text."},
+        {"VitePress", "::: details Click me\nHidden.\n:::\n", qmd::AdmonitionDetails, "details", "Click me", 2,
+         "Hidden."},
+        {"VitePress warning", "::: warning\nCareful.\n:::\n", qmd::AdmonitionWarning, "warning", "", 0, "Careful."},
+        {"MyST colon fence", ":::{important}\nRead.\n:::\n", qmd::AdmonitionImportant, "important", "", 0,
+         "Read."},
+        {"MyST backtick fence", "```{seealso}\nOther page.\n```\n", qmd::AdmonitionNote, "seealso", "", 0,
+         "Other page."},
+        {"MyST admonition with a class", "```{admonition} Custom\n:class: tip\nBody.\n```\n", qmd::AdmonitionTip,
+         "admonition", "Custom", 0, "Body."},
+        {"MyST dropdown", ":::{note} Folded\n:class: dropdown\nInside.\n:::\n", qmd::AdmonitionNote, "note",
+         "Folded", 2, "Inside."},
+        {"MkDocs", "!!! note \"Heads up\"\n    Indented body.\n", qmd::AdmonitionNote, "note", "Heads up", 0,
+         "Indented body."},
+        {"MkDocs folded", "??? bug\n    Crash.\n", qmd::AdmonitionBug, "bug", "", 2, "Crash."},
+        {"MkDocs open fold", "???+ example \"Try\"\n    Run it.\n", qmd::AdmonitionExample, "example", "Try", 1,
+         "Run it."},
+        {"MkDocs alias", "!!! tldr\n    Short.\n", qmd::AdmonitionAbstract, "tldr", "", 0, "Short."},
+        {"reStructuredText", ".. warning::\n   Indented.\n", qmd::AdmonitionWarning, "warning", "", 0, "Indented."},
+        {"reStructuredText inline start", ".. tip:: Inline start\n   and more.\n", qmd::AdmonitionTip, "tip", "", 0,
+         "Inline start and more."},
+        {"reStructuredText admonition", ".. admonition:: My title\n\n   Body.\n", qmd::AdmonitionNote, "admonition",
+         "My title", 0, "Body."},
+        {"Hugo alert", "{{< alert \"warning\" >}}\nHot.\n{{< /alert >}}\n", qmd::AdmonitionWarning, "warning", "", 0,
+         "Hot."},
+        {"Hugo Docsy", "{{% alert title=\"Watch\" color=\"danger\" %}}\nOops.\n{{% /alert %}}\n",
+         qmd::AdmonitionDanger, "danger", "Watch", 0, "Oops."},
+        {"Hugo on one line", "{{< tip >}}One line{{< /tip >}}\n", qmd::AdmonitionTip, "tip", "", 0, "One line"},
+        {"HTML", "<div class=\"admonition danger\">\n<p class=\"admonition-title\">Stop</p>\n\nDo not.\n\n</div>\n",
+         qmd::AdmonitionDanger, "danger", "Stop", 0, "Do not."},
+    };
+    for (const auto& c : cases) {
+        auto parsed = parseDocument(parser, c.source, "notes.md");
+        const qmd::ElementPtr* boxPtr = parsed.success ? findBox(parsed.root) : nullptr;
+        if (!boxPtr) {
+            std::cerr << "  case: " << c.name << '\n';
+            check(false, "the admonition parses to a box");
+            continue;
+        }
+        const qmd::ElementPtr& box = *boxPtr;
+        const std::string title = box->alertTitle ? plainText(box->alertTitle) : std::string();
+        std::string body;
+        for (const auto& child : box->children) body += (body.empty() ? "" : " ") + plainText(child);
+        const bool ok = box->alertKind == c.kind && box->alertKeyword == c.keyword && title == c.title &&
+                        box->alertFold == c.fold && body == c.body;
+        if (!ok) {
+            std::cerr << "  case: " << c.name << " -> kind " << box->alertKind << ", keyword '" << box->alertKeyword
+                      << "', title '" << title << "', fold " << box->alertFold << ", body '" << body << "'\n";
+        }
+        check(ok, "an admonition dialect parses to its kind, keyword, title, fold and body");
+        const size_t marker = c.source[0] == '>' ? c.source.find("[!") : 0;
+        check(box->sourceOffset == marker, "the box starts at its marker");
+    }
+
+    // A title-less MkDocs box keeps no title bar
+    {
+        auto parsed = parseDocument(parser, "!!! info \"\"\n    Plain.\n", "notes.md");
+        const auto* box = findBox(parsed.root);
+        check(box && (*box)->alertNoTitle, "!!! info \"\" has no title bar");
+    }
+    // Offsets point at the source: the body and the title
+    {
+        const std::string src = "Intro.\n\n:::tip[Fast **path**]\n\nUse it.\n\n:::\n";
+        auto parsed = parseDocument(parser, src, "notes.md");
+        const auto* box = findBox(parsed.root);
+        check(box && (*box)->sourceOffset == src.find(":::tip"), "the box's offset is its marker line");
+        check(box && !(*box)->children.empty() && (*box)->children[0]->sourceOffset == src.find("Use it."),
+              "the body's offsets point into the source");
+        check(box && (*box)->alertTitle && (*box)->alertTitle->sourceOffset == src.find("Fast"),
+              "the title's offsets point into the source");
+    }
+    // Nesting, in each style
+    {
+        auto parsed = parseDocument(parser, "::::info Parent\n\n:::tip Child\nInner.\n:::\n\nOuter.\n\n::::\n",
+                                    "notes.md");
+        const auto* outer = findBox(parsed.root);
+        check(outer && (*outer)->alertKind == qmd::AdmonitionInfo && (*outer)->children.size() == 2 &&
+                  (*outer)->children[0]->alertKind == qmd::AdmonitionTip &&
+                  plainText((*outer)->children[0]) == "Inner." && plainText((*outer)->children[1]) == "Outer.",
+              "Docusaurus nests by colon count");
+    }
+    {
+        auto parsed = parseDocument(parser, "> [!note] Outer\n> > [!warning] Inner\n> > Deep.\n", "notes.md");
+        const auto* outer = findBox(parsed.root);
+        check(outer && (*outer)->alertKind == qmd::AdmonitionNote && !(*outer)->children.empty() &&
+                  (*outer)->children[0]->alertKind == qmd::AdmonitionWarning,
+              "Obsidian nests with > >");
+    }
+    {
+        auto parsed = parseDocument(parser, "!!! note\n    Outer.\n\n    !!! tip\n        Inner.\n\nAfter.\n",
+                                    "notes.md");
+        const auto* outer = findBox(parsed.root);
+        check(outer && (*outer)->alertKind == qmd::AdmonitionNote && (*outer)->children.size() == 2 &&
+                  (*outer)->children[1]->alertKind == qmd::AdmonitionTip &&
+                  plainText((*outer)->children[1]) == "Inner.",
+              "MkDocs nests by indentation");
+        check(parsed.root->children.size() == 2 && plainText(parsed.root->children[1]) == "After.",
+              "a dedent ends the MkDocs body");
+    }
+    // In a list item
+    {
+        auto parsed = parseDocument(parser, "- item\n\n  :::note\n  Inside.\n  :::\n", "notes.md");
+        const auto* box = findBox(parsed.root);
+        check(box && (*box)->parent && (*box)->parent->type == qmd::ElementType::ListItem &&
+                  plainText(*box) == "Inside.",
+              "a container in a list item stays in it");
+    }
+    // What stays as written
+    {
+        auto parsed = parseDocument(parser, "```\n:::note\nx\n:::\n!!! tip\n```\n", "notes.md");
+        check(countBoxes(parsed.root) == 0 && !parsed.root->children.empty() &&
+                  parsed.root->children[0]->type == qmd::ElementType::CodeBlock &&
+                  plainText(parsed.root->children[0]).find(":::note") != std::string::npos,
+              "markers inside fenced code stay code");
+    }
+    check(countBoxes(parseDocument(parser, ":::foo\nx\n:::\n", "notes.md").root) == 0,
+          "an unknown ::: type stays text");
+    check(countBoxes(parseDocument(parser, ".. code-block:: python\n   x = 1\n", "notes.md").root) == 0,
+          "other reStructuredText directives stay text");
+    check(countBoxes(parseDocument(parser, "> [!note]x\n", "notes.md").root) == 0,
+          "[!note] must end at a space or the line's end");
+    check(countBoxes(parseDocument(parser, "Text with :::note in it.\n", "notes.md").root) == 0,
+          "::: mid-line is text");
+    // Empty and unclosed
+    {
+        auto parsed = parseDocument(parser, ":::note[Empty]\n:::\n\nAfter.\n", "notes.md");
+        const auto* box = findBox(parsed.root);
+        check(box && (*box)->children.empty() && parsed.root->children.size() == 2, "an empty box has no body");
+    }
+    {
+        auto parsed = parseDocument(parser, ":::warning\nNo end.\n\nStill inside.\n", "notes.md");
+        const auto* box = findBox(parsed.root);
+        check(box && (*box)->children.size() == 2, "an unclosed container runs to the end");
+    }
+    // A callout with a title only
+    {
+        auto parsed = parseDocument(parser, "> [!tip] Just a title\n", "notes.md");
+        const auto* box = findBox(parsed.root);
+        check(box && (*box)->children.empty() && (*box)->alertTitle && plainText((*box)->alertTitle) == "Just a title",
+              "a callout can be a title alone");
+    }
+    // Labels
+    check(qmd::admonitionLabel("seealso") == "See also" && qmd::admonitionLabel("tldr") == "TL;DR" &&
+              qmd::admonitionLabel("warning") == "Warning",
+          "default titles read as words");
 }
 
 } // namespace
@@ -130,10 +342,13 @@ int main() {
     check(caution.success && !caution.root->children.empty() &&
           caution.root->children[0]->alertKind == 5,
           "alert markers match case-insensitively");
-    auto notAlert = parseDocument(parser, "> [!NOTE] trailing words\n", "notes.md");
-    check(notAlert.success && !notAlert.root->children.empty() &&
-          notAlert.root->children[0]->alertKind == 0,
-          "marker with trailing text on the same line stays a plain quote");
+    // Text after the marker is the callout's title (Obsidian, GitLab), not
+    // a plain quote as on github.com
+    auto titled = parseDocument(parser, "> [!NOTE] trailing words\n", "notes.md");
+    check(titled.success && !titled.root->children.empty() &&
+          titled.root->children[0]->alertKind == 1 && titled.root->children[0]->alertTitle,
+          "marker with trailing text on the same line is a titled callout");
+    admonitionTests(parser);
 
     // Inline <br> becomes a hard break (#45)
     auto br = parseDocument(parser, "line one<br>line two<BR/>line three<br />end\n", "notes.md");

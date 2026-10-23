@@ -48,6 +48,7 @@ static HCURSOR cursorIBeam = LoadCursor(nullptr, IDC_IBEAM);
 static HCURSOR cursorSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
 
 static const App::TaskRect* taskRectAt(const App& app);
+static const App::FoldRect* admonitionFoldAt(const App& app);
 static void startPageInvoke(App& app, HWND hwnd, int id);
 static int tableCopyButtonAt(const App& app, int mouseX, int mouseY);
 static bool diagramPngButtonAt(const App& app, int mouseX, int mouseY);
@@ -1627,7 +1628,7 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
                 annotationCopyButtonHit(app, (float)app.mouseX,
                                         (float)app.mouseY))) {
         SetCursor(cursorHand);
-    } else if (taskRectAt(app) != nullptr) {
+    } else if (taskRectAt(app) != nullptr || admonitionFoldAt(app) != nullptr) {
         SetCursor(cursorHand);
     } else if (app.hoveredCodeBlock >= 0) {
         // Show hand cursor only when over the copy button area
@@ -2625,6 +2626,20 @@ void navigateForward(App& app, HWND hwnd) {
     }
 }
 
+// A foldable admonition's title bar under the mouse, or nullptr (viewer)
+static const App::FoldRect* admonitionFoldAt(const App& app) {
+    if (app.editMode) return nullptr;
+    float docX = (app.mouseX - documentViewportX(app)) + app.scrollX;
+    float docY = app.mouseY + app.scrollY;
+    for (const auto& fold : app.admonitionFoldRects) {
+        if (docX >= fold.rect.left && docX <= fold.rect.right && docY >= fold.rect.top &&
+            docY <= fold.rect.bottom) {
+            return &fold;
+        }
+    }
+    return nullptr;
+}
+
 // Task checkbox under the mouse, or nullptr (viewer mode only)
 static const App::TaskRect* taskRectAt(const App& app) {
     if (app.editMode) return nullptr;
@@ -3470,6 +3485,13 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                 // Click on a task checkbox: flip the mark in the file
                 toggleTaskOnDisk(app, hwnd, task->markOffset, task->checked);
                 app.hasSelection = false;
+            } else if (const App::FoldRect* fold = admonitionFoldAt(app)) {
+                // Click on a foldable admonition's title bar: fold or unfold
+                const std::string key = fold->key;
+                if (!app.admonitionFoldToggled.erase(key)) app.admonitionFoldToggled.insert(key);
+                app.hasSelection = false;
+                app.layoutDirty = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
             } else if (!app.hoveredLink.empty()) {
                 // It was just a click on a link
                 if (app.hoveredLink.rfind("wiki:", 0) == 0) {

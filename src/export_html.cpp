@@ -4,6 +4,7 @@
 // re-uses the TeX layout engine through mathBoxSvg. No third-party code,
 // no external assets: local images are embedded as data URIs.
 
+#include "admonition.h"
 #include "export.h"
 #include "fs_path.h"
 
@@ -1304,28 +1305,32 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             break;
         }
         case ElementType::BlockQuote: {
-            // GitHub alert callouts: class for the palette plus the same
-            // icon-and-label title line the viewer draws
-            static const struct {
-                const char* cls;
-                const char* title;  // icon (text presentation) + label
-            } kAlert[] = {
-                {"note", "\xE2\x93\x98\xEF\xB8\x8E  Note"},
-                {"tip", "\xF0\x9F\x92\xA1\xEF\xB8\x8E  Tip"},
-                {"important", "\xE2\x9D\x97\xEF\xB8\x8E  Important"},
-                {"warning", "\xE2\x9A\xA0\xEF\xB8\x8E  Warning"},
-                {"caution", "\xE2\x9B\x94\xEF\xB8\x8E  Caution"},
-            };
-            int kind =
-                elem->alertKind >= 1 && elem->alertKind <= 5 ? elem->alertKind
-                                                             : 0;
-            if (kind) {
-                const auto& a = kAlert[kind - 1];
-                ctx.out += std::string("<blockquote class=\"alert-") + a.cls +
-                           "\"><p class=\"alert-title\">" + a.title + "</p>";
-            } else {
-                ctx.out += "<blockquote>";
+            if (elem->alertKind != 0) {
+                // An admonition in any dialect (admonition.h): the viewer's
+                // box, as a <details> when it folds
+                const AdmonitionStyle& style = admonitionStyle(elem->alertKind);
+                const bool foldable = elem->alertFold != 0;
+                const std::string tag = foldable ? "details" : "div";
+                ctx.out += "<" + tag + " class=\"admonition " + style.cls + "\"" +
+                           (elem->alertFold == 1 ? " open" : "") + ">";
+                if (!elem->alertNoTitle) {
+                    const std::string titleTag = foldable ? "summary" : "p";
+                    ctx.out += "<" + titleTag + " class=\"admonition-title\">";
+                    if (style.iconUtf8[0]) {
+                        ctx.out += std::string("<span class=\"admonition-icon\">") + style.iconUtf8 + "</span>";
+                    }
+                    if (elem->alertTitle && !elem->alertTitle->children.empty()) {
+                        walkChildren(ctx, elem->alertTitle);
+                    } else {
+                        ctx.out += htmlEscape(admonitionLabel(elem->alertKeyword));
+                    }
+                    ctx.out += "</" + titleTag + ">";
+                }
+                walkChildren(ctx, elem);
+                ctx.out += "</" + tag + ">\n";
+                break;
             }
+            ctx.out += "<blockquote>";
             walkChildren(ctx, elem);
             ctx.out += "</blockquote>\n";
             break;
@@ -1527,28 +1532,26 @@ std::string themeCss(const App& app, const std::string& bodyFont,
            colorCss(t.blockquoteBorder) +
            ";margin:1em 0;padding:2px 18px;color:" + colorCss(mutedText) +
            ";}";
-    // github.com's alert accents, light or dark side picked by the theme
-    // (the same table the viewer uses)
-    {
-        static const struct {
-            const char* cls;
-            uint32_t light;
-            uint32_t dark;
-        } kAlertCss[] = {
-            {"note", 0x0969DA, 0x4493F8},
-            {"tip", 0x1A7F37, 0x3FB950},
-            {"important", 0x8250DF, 0xAB7DF8},
-            {"warning", 0x9A6700, 0xD29922},
-            {"caution", 0xCF222E, 0xF85149},
-        };
-        css += ".alert-title{font-weight:600;margin:0 0 4px 0;}";
-        for (const auto& a : kAlertCss) {
-            std::string hex = colorCss(hexColor(t.isDark ? a.dark : a.light));
-            css += std::string("blockquote.alert-") + a.cls +
-                   "{border-color:" + hex + ";}";
-            css += std::string("blockquote.alert-") + a.cls +
-                   " .alert-title{color:" + hex + ";}";
-        }
+    // Admonitions (admonition.h): the viewer's palette, tint and bar,
+    // light or dark side picked by the theme; <details> for the foldable
+    css += ".admonition{margin:1em 0;padding:8px 16px;border-left:4px solid;}";
+    css += ".admonition>.admonition-title{font-weight:700;margin:4px 0 8px 0;}";
+    css += ".admonition-icon{margin-right:8px;}";
+    css += ".admonition>:last-child{margin-bottom:4px;}";
+    css += "details.admonition>summary{cursor:pointer;list-style:none;}";
+    css += "details.admonition>summary::-webkit-details-marker{display:none;}";
+    css += "details.admonition>summary::after{content:\"\\25BE\";float:right;}";
+    css += "details.admonition:not([open])>summary::after{content:\"\\25B8\";}";
+    css += "details.admonition:not([open])>summary{margin-bottom:4px;}";
+    for (int kind = 1; kind < AdmonitionKindCount; ++kind) {
+        if (kind != AdmonitionNote && std::string(admonitionStyle(kind).cls) == "note") continue;
+        const AdmonitionStyle& style = admonitionStyle(kind);
+        D2D1_COLOR_F accent = hexColor(t.isDark ? style.dark : style.light);
+        D2D1_COLOR_F tint = accent;
+        tint.a = t.isDark ? 0.14f : 0.09f;
+        css += std::string(".admonition.") + style.cls + "{border-color:" + colorCss(accent) +
+               ";background:" + colorCss(tint) + ";}";
+        css += std::string(".admonition.") + style.cls + ">.admonition-title{color:" + colorCss(accent) + ";}";
     }
     css += "table{border-collapse:collapse;margin:1em 0;}";
     css += "th,td{border:1px solid " + colorCss(border) +

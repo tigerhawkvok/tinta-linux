@@ -1,6 +1,7 @@
 #include "frontmatter_ui.h"
 #include "fs_path.h"
 #include "render.h"
+#include "admonition.h"
 #include "file_utils.h"
 #include "inline_style.h"
 #include "utils.h"
@@ -2692,43 +2693,102 @@ static float contentBottomSince(const App& app, const LayoutSnapshot& since, flo
     return bottom;
 }
 
+// An admonition or callout (admonition.h), in every dialect: a box tinted
+// with its kind's accent, a bar down the left, and a title bar with the
+// kind's icon and the title (the type's label when none is given). A
+// foldable box shows a chevron and folds on a click; on paper every box is
+// open
+static void layoutAdmonition(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    const float scale = app.contentScale * app.zoomFactor;
+    const AdmonitionStyle& style = admonitionStyle(elem->alertKind);
+    const D2D1_COLOR_F accent = hexColor(app.theme.isDark ? style.dark : style.light);
+    D2D1_COLOR_F tint = accent;
+    tint.a = app.theme.isDark ? 0.14f : 0.09f;
+    const float bar = 4.0f * scale;
+    const float pad = 12.0f * scale;
+    const float left = indent + bar + pad;
+    const float inner = std::max(40.0f * scale, maxWidth - bar - 2.0f * pad);
+    const float startY = y;
+    const size_t tintIndex = app.layoutRects.size();
+    app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + maxWidth, startY), tint});
+    const size_t barIndex = app.layoutRects.size();
+    app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + bar, startY), accent});
+    const LayoutSnapshot contentStart = takeSnapshot(app);
+
+    const std::string foldKey = app.currentFile + "#" + std::to_string(elem->sourceOffset);
+    bool folded = elem->alertFold == 2;
+    if (elem->alertFold != 0 && app.admonitionFoldToggled.count(foldKey)) folded = !folded;
+    if (app.printLayout) folded = false;
+
+    float cursor = startY + pad * 0.75f;
+    if (!elem->alertNoTitle) {
+        IDWriteTextFormat* titleFormat = app.boldFormat ? app.boldFormat : app.textFormat;
+        const float lineH = app.textFormat->GetFontSize() * 1.7f;
+        float titleX = left;
+        if (style.icon[0]) {
+            std::wstring icon = style.icon;
+            LayoutInfo info = createLayout(app, icon, app.textFormat, lineH, app.bodyTypography);
+            const float iconW = info.width;
+            addTextRun(app, std::move(info), D2D1::Point2F(left, cursor),
+                       D2D1::RectF(left, cursor, left + iconW, cursor + lineH), accent, 0, 0, false);
+            titleX = left + iconW + 8.0f * scale;
+        }
+        float chevronW = 0.0f;
+        if (elem->alertFold != 0) {
+            std::wstring chevron = folded ? L"▸" : L"▾";
+            LayoutInfo info = createLayout(app, chevron, app.textFormat, lineH, app.bodyTypography);
+            chevronW = info.width + 4.0f * scale;
+            const float chevronX = indent + maxWidth - pad - info.width;
+            addTextRun(app, std::move(info), D2D1::Point2F(chevronX, cursor),
+                       D2D1::RectF(chevronX, cursor, chevronX + chevronW, cursor + lineH), accent, 0, 0, false);
+        }
+        float titleY = cursor;
+        if (elem->alertTitle && !elem->alertTitle->children.empty()) {
+            // Inline layout leaves titleY below its last line
+            layoutInlineContent(app, elem->alertTitle->children, titleX, titleY,
+                                std::max(20.0f * scale, left + inner - titleX - chevronW), titleFormat, accent);
+        } else {
+            std::wstring label = toWide(admonitionLabel(elem->alertKeyword));
+            LayoutInfo info = createLayout(app, label, titleFormat, lineH, app.bodyTypography);
+            const float w = info.width;
+            const size_t docStart = app.docText.size();
+            addTextRun(app, std::move(info), D2D1::Point2F(titleX, cursor),
+                       D2D1::RectF(titleX, cursor, titleX + w, cursor + lineH), accent, docStart, label.size(),
+                       false);
+            app.docText += label;
+            titleY = cursor + lineH;
+        }
+        app.docText += L"\n\n";
+        if (elem->alertFold != 0 && elem->sourceOffset != SIZE_MAX && !app.printLayout) {
+            app.admonitionFoldRects.push_back(
+                {D2D1::RectF(indent, startY, indent + maxWidth, titleY + pad * 0.25f), foldKey});
+        }
+        cursor = titleY + (folded ? 0.0f : pad * 0.5f);
+    }
+
+    if (!folded) {
+        for (const auto& child : elem->children) {
+            layoutElement(app, child, cursor, left, inner);
+        }
+    }
+    // Children advance past their own trailing margins; the box ends at
+    // the last drawn content (the title, for a folded box), padded
+    const float bottom = std::max(startY + pad * 0.75f, contentBottomSince(app, contentStart, startY)) + pad * 0.75f;
+    app.layoutRects[tintIndex].rect.bottom = bottom;
+    app.layoutRects[barIndex].rect.bottom = bottom;
+    y = bottom + 14.0f * scale;
+}
+
 static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    if (elem->alertKind != 0) {
+        layoutAdmonition(app, elem, y, indent, maxWidth);
+        return;
+    }
     float scale = app.contentScale * app.zoomFactor;
     float quoteIndent = 20.0f * scale;
     float startY = y;
     const LayoutSnapshot contentStart = takeSnapshot(app);
-
-    // GitHub alert callouts: accent-colored bar plus a bold title line.
-    // Colors are github.com's light/dark alert accents, picked by theme.
-    static const struct {
-        const wchar_t* title;
-        uint32_t light;
-        uint32_t dark;
-    } ALERT_STYLES[] = {
-        {L"\u24D8  Note",            0x0969DA, 0x4493F8},  // circled info
-        {L"\U0001F4A1\uFE0E  Tip",   0x1A7F37, 0x3FB950},  // bulb, text presentation
-        {L"\u2757\uFE0E  Important", 0x8250DF, 0xAB7DF8},  // exclamation
-        {L"\u26A0\uFE0E  Warning",   0x9A6700, 0xD29922},  // warning triangle
-        {L"\u26D4\uFE0E  Caution",   0xCF222E, 0xF85149},  // no-entry
-    };
-
     D2D1_COLOR_F barColor = app.theme.blockquoteBorder;
-    if (elem->alertKind >= 1 && elem->alertKind <= 5) {
-        const auto& style = ALERT_STYLES[elem->alertKind - 1];
-        barColor = hexColor(app.theme.isDark ? style.dark : style.light);
-
-        std::wstring title = style.title;
-        LayoutInfo info = createLayout(app, title, app.textFormat, 24.0f, app.bodyTypography);
-        if (info.layout) {
-            DWRITE_TEXT_RANGE range = {0, (UINT32)title.length()};
-            info.layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range);
-        }
-        D2D1_POINT_2F pos = D2D1::Point2F(indent + quoteIndent, y);
-        D2D1_RECT_F bounds = D2D1::RectF(indent + quoteIndent, y,
-                                         indent + maxWidth, y + 24 * scale);
-        addTextRun(app, std::move(info), pos, bounds, barColor, 0, 0, false);
-        y += 30 * scale;
-    }
 
     for (const auto& child : elem->children) {
         layoutElement(app, child, y, indent + quoteIndent, maxWidth - quoteIndent);

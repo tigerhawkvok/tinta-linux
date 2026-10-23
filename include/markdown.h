@@ -81,8 +81,18 @@ struct Element {
     std::string language;     // for code blocks
     int align = 0;            // for table cells (0=default, 1=left, 2=center, 3=right)
     int col_count = 0;        // for tables (number of columns)
-    int alertKind = 0;        // for blockquotes: GitHub alert (0=none, 1=note, 2=tip,
-                              // 3=important, 4=warning, 5=caution)
+    // A blockquote that is an admonition or callout (admonition.h): any of
+    // the dialects becomes one of these. alertKind is an AdmonitionKind
+    // (0: a plain quote; 1-5 are GitHub's note, tip, important, warning and
+    // caution); alertKeyword the type as written, lowercase; alertTitle the
+    // title's inline content (null: the keyword's label); alertFold 0 (not
+    // foldable), 1 (foldable, open) or 2 (folded); alertNoTitle a box with
+    // no title bar (MkDocs' !!! note "")
+    int alertKind = 0;
+    std::string alertKeyword;
+    std::shared_ptr<Element> alertTitle;
+    int alertFold = 0;
+    bool alertNoTitle = false;
 
     size_t sourceOffset = SIZE_MAX; // byte offset in original markdown source
 

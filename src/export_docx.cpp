@@ -4,6 +4,7 @@
 // baked in; mermaid diagrams and math rasterize to PNG at 2x through the
 // same primitives the viewer draws, and land as embedded pictures.
 
+#include "admonition.h"
 #include "export.h"
 #include "image_loader.h"
 #include "fs_path.h"
@@ -1248,18 +1249,6 @@ void emitDiagramOrCode(DocxCtx& ctx, const std::string& source,
 }
 
 // GitHub alert palette (light/dark hex pairs, same table as the viewer)
-struct AlertInfo {
-    const char* title;
-    uint32_t light;
-    uint32_t dark;
-};
-const AlertInfo kAlerts[] = {
-    {"\xE2\x93\x98\xEF\xB8\x8E  Note", 0x0969DA, 0x4493F8},
-    {"\xF0\x9F\x92\xA1\xEF\xB8\x8E  Tip", 0x1A7F37, 0x3FB950},
-    {"\xE2\x9D\x97\xEF\xB8\x8E  Important", 0x8250DF, 0xAB7DF8},
-    {"\xE2\x9A\xA0\xEF\xB8\x8E  Warning", 0x9A6700, 0xD29922},
-    {"\xE2\x9B\x94\xEF\xB8\x8E  Caution", 0xCF222E, 0xF85149},
-};
 
 std::string hexOfRgb(uint32_t rgb) {
     char buf[8];
@@ -1304,22 +1293,32 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
             break;
         case ElementType::BlockQuote: {
             ParaProps quote = props;
-            int kind = elem->alertKind >= 1 && elem->alertKind <= 5
-                           ? elem->alertKind
-                           : 0;
-            if (kind) {
-                const auto& alert = kAlerts[kind - 1];
+            if (elem->alertKind != 0) {
+                // An admonition in any dialect (admonition.h): the viewer's
+                // accent down the left, then its icon and title
+                const AdmonitionStyle& style = admonitionStyle(elem->alertKind);
                 std::string color = hexOfRgb(
-                    ctx.app.theme.isDark ? alert.dark : alert.light);
+                    ctx.app.theme.isDark ? style.dark : style.light);
                 quote.borderColor = color;
                 quote.indentTwips = 240;
-                // Title line with the viewer's icon and label
-                ctx.body += "<w:p><w:pPr><w:pBdr><w:left w:val=\"single\" "
-                            "w:sz=\"24\" w:space=\"12\" w:color=\"" + color +
-                            "\"/></w:pBdr><w:ind w:left=\"240\"/></w:pPr>"
-                            "<w:r><w:rPr><w:b/><w:color w:val=\"" + color +
-                            "\"/></w:rPr><w:t xml:space=\"preserve\">" +
-                            xmlEscape(alert.title) + "</w:t></w:r></w:p>";
+                std::function<void(const ElementPtr&, std::string&)> plain =
+                    [&](const ElementPtr& e, std::string& out) {
+                        if (e->type == ElementType::Text || e->type == ElementType::Code) out += e->text;
+                        else if (e->type == ElementType::SoftBreak || e->type == ElementType::HardBreak) out += " ";
+                        for (const auto& c : e->children) plain(c, out);
+                    };
+                std::string title;
+                if (elem->alertTitle) plain(elem->alertTitle, title);
+                if (title.empty()) title = admonitionLabel(elem->alertKeyword);
+                if (style.iconUtf8[0]) title = std::string(style.iconUtf8) + "  " + title;
+                if (!elem->alertNoTitle) {
+                    ctx.body += "<w:p><w:pPr><w:pBdr><w:left w:val=\"single\" "
+                                "w:sz=\"24\" w:space=\"12\" w:color=\"" + color +
+                                "\"/></w:pBdr><w:ind w:left=\"240\"/></w:pPr>"
+                                "<w:r><w:rPr><w:b/><w:color w:val=\"" + color +
+                                "\"/></w:rPr><w:t xml:space=\"preserve\">" +
+                                xmlEscape(title) + "</w:t></w:r></w:p>";
+                }
             } else {
                 quote.borderColor = ctx.quoteBorderHex;
                 quote.indentTwips = 240;

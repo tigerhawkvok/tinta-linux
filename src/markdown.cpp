@@ -1,4 +1,5 @@
 #include "markdown.h"
+#include "admonition.h"
 #include "footnotes.h"
 #include <cstdint>
 #include <md4c.h>
@@ -787,47 +788,6 @@ static ElementPtr makeTextElement(std::string text, Element* parent) {
     return node;
 }
 
-// GitHub alerts: a blockquote whose first line is exactly [!NOTE], [!TIP],
-// [!IMPORTANT], [!WARNING] or [!CAUTION] renders as a styled callout.
-// The marker must be alone on its line, matching github.com behavior.
-static void detectGitHubAlerts(const ElementPtr& parent) {
-    static const char* MARKERS[] = {"[!note]", "[!tip]", "[!important]", "[!warning]", "[!caution]"};
-
-    for (auto& child : parent->children) {
-        detectGitHubAlerts(child);
-    }
-
-    if (parent->type != ElementType::BlockQuote || parent->children.empty()) return;
-    const ElementPtr& para = parent->children.front();
-    if (para->type != ElementType::Paragraph || para->children.empty()) return;
-    const ElementPtr& first = para->children.front();
-    if (first->type != ElementType::Text) return;
-
-    std::string marker = first->text;
-    while (!marker.empty() && (marker.back() == ' ' || marker.back() == '\t')) marker.pop_back();
-    for (auto& c : marker) c = (char)tolower((unsigned char)c);
-
-    int kind = 0;
-    for (int i = 0; i < 5; i++) {
-        if (marker == MARKERS[i]) { kind = i + 1; break; }
-    }
-    if (kind == 0) return;
-
-    // Marker must be the whole first line: alone in the paragraph, or
-    // followed by a line break
-    if (para->children.size() > 1 &&
-        para->children[1]->type != ElementType::SoftBreak &&
-        para->children[1]->type != ElementType::HardBreak) {
-        return;
-    }
-
-    parent->alertKind = kind;
-    size_t remove = std::min<size_t>(2, para->children.size());  // marker text + line break
-    para->children.erase(para->children.begin(), para->children.begin() + remove);
-    if (para->children.empty()) {
-        parent->children.erase(parent->children.begin());
-    }
-}
 
 // Inline HTML spans (#263) sit inside a run of text the post-passes read
 // as one string, so ~~H<sub>2</sub>O~~ and [[Water|H<sub>2</sub>O]] still
@@ -1349,14 +1309,715 @@ static void splitFileRefs(const ElementPtr& parent) {
 MarkdownParser::MarkdownParser() = default;
 MarkdownParser::~MarkdownParser() = default;
 
+// ---- Admonitions (admonition.h) ---------------------------------------------------------------
+// Every dialect but the blockquote callouts writes its markers on lines of
+// their own. scanAdmonitions finds them, outside fenced code, and blanks
+// them in the copy md4c reads (same length: every offset stays put), so the
+// body parses as ordinary Markdown; wrapAdmonitions then gathers the blocks
+// of each body into a blockquote with the admonition fields set.
+
+namespace {
+
+struct AdmonitionRange {
+    size_t open = 0;       // where the marker line starts
+    size_t bodyStart = 0;  // the body's bytes
+    size_t bodyEnd = 0;
+    std::string keyword;   // as written, lowercase
+    int kind = AdmonitionNone;
+    std::string title;     // raw Markdown; empty: the keyword's label
+    size_t titleOffset = 0;
+    int fold = 0;
+    bool noTitle = false;
+};
+
+bool isSpaceChar(char c) { return c == ' ' || c == '\t'; }
+
+void blankBytes(std::string& text, size_t from, size_t to) {
+    for (size_t i = from; i < to && i < text.size(); ++i) {
+        if (text[i] != '\n' && text[i] != '\r') text[i] = ' ';
+    }
+}
+
+// Columns of leading whitespace (a tab to the next multiple of four)
+size_t indentColumns(std::string_view line) {
+    size_t cols = 0;
+    for (char c : line) {
+        if (c == ' ') ++cols;
+        else if (c == '\t') cols = (cols / 4 + 1) * 4;
+        else break;
+    }
+    return cols;
+}
+
+size_t leadingSpaceBytes(std::string_view line) {
+    size_t i = 0;
+    while (i < line.size() && isSpaceChar(line[i])) ++i;
+    return i;
+}
+
+std::string_view trimView(std::string_view s) {
+    while (!s.empty() && (isSpaceChar(s.front()) || s.front() == '\r')) s.remove_prefix(1);
+    while (!s.empty() && (isSpaceChar(s.back()) || s.back() == '\r')) s.remove_suffix(1);
+    return s;
+}
+
+bool isKeywordChar(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+}
+
+// A keyword at the start of `s`: a letter, then letters, digits, - and _
+size_t keywordLength(std::string_view s) {
+    if (s.empty() || !std::isalpha(static_cast<unsigned char>(s[0]))) return 0;
+    size_t n = 1;
+    while (n < s.size() && isKeywordChar(s[n])) ++n;
+    return n;
+}
+
+// ``` or ~~~ (three or more), with the info string after it
+bool parseFenceLine(std::string_view body, char& fenceChar, size_t& fenceLength, std::string_view& info) {
+    if (body.size() < 3 || (body[0] != '`' && body[0] != '~')) return false;
+    size_t n = 0;
+    while (n < body.size() && body[n] == body[0]) ++n;
+    if (n < 3) return false;
+    info = trimView(body.substr(n));
+    if (body[0] == '`' && info.find('`') != std::string_view::npos) return false;  // an inline code span
+    fenceChar = body[0];
+    fenceLength = n;
+    return true;
+}
+
+// Drops a trailing {#id .class} attribute block (Docusaurus, MyST)
+std::string_view withoutAttributes(std::string_view s) {
+    s = trimView(s);
+    if (!s.empty() && s.back() == '}') {
+        size_t open = s.rfind('{');
+        if (open != std::string_view::npos) s = trimView(s.substr(0, open));
+    }
+    return s;
+}
+
+// The quoted string at the start of `s` ("..." or '...'), unquoted
+bool takeQuoted(std::string_view& s, std::string& out) {
+    s = trimView(s);
+    if (s.empty() || (s[0] != '"' && s[0] != '\'')) return false;
+    size_t close = s.find(s[0], 1);
+    if (close == std::string_view::npos) return false;
+    out = std::string(s.substr(1, close - 1));
+    s.remove_prefix(close + 1);
+    return true;
+}
+
+struct ScanState {
+    std::string& text;
+    std::vector<AdmonitionRange> ranges;
+    // Fenced code being skipped
+    bool inCode = false;
+    char codeChar = 0;
+    size_t codeLength = 0;
+    // Containers closed by a marker: ::: (colons), ```{note} (a fence),
+    // Hugo shortcodes (by name), <div class="admonition">
+    struct Closed {
+        enum Type { Colons, Fence, Hugo, Html } type;
+        size_t range;
+        size_t count = 0;   // colons, or the fence length
+        char fenceChar = 0;
+        std::string name;   // the shortcode
+    };
+    std::vector<Closed> closed;
+    // Containers closed by dedent: MkDocs and reStructuredText
+    struct Indented {
+        size_t range;
+        size_t indent;
+        size_t lastBodyEnd;  // just past the last non-blank body line
+    };
+    std::vector<Indented> indented;
+    // A <p class="admonition-title"> may follow this range's <div>
+    size_t htmlTitleFor = SIZE_MAX;
+
+    explicit ScanState(std::string& t) : text(t) {}
+
+    size_t add(AdmonitionRange r) {
+        ranges.push_back(std::move(r));
+        return ranges.size() - 1;
+    }
+};
+
+// The marker line's title (Markdown) and its offset, after `rest`
+void setTitle(AdmonitionRange& r, const std::string& text, std::string_view title) {
+    title = trimView(title);
+    r.title = std::string(title);
+    r.titleOffset = title.empty() ? r.open : static_cast<size_t>(title.data() - text.data());
+}
+
+// :::note, :::note[Title], :::note Title, ::: tip Title, :::{note} Title
+bool colonOpener(ScanState& st, size_t lineStart, size_t next, std::string_view body, size_t colons) {
+    std::string_view rest = body.substr(colons);
+    rest.remove_prefix(leadingSpaceBytes(rest));
+    std::string keyword;
+    if (!rest.empty() && rest[0] == '{') {  // MyST
+        size_t close = rest.find('}');
+        if (close == std::string_view::npos) return false;
+        keyword = std::string(trimView(rest.substr(1, close - 1)));
+        rest.remove_prefix(close + 1);
+    } else {
+        size_t n = keywordLength(rest);
+        if (n == 0) return false;
+        keyword = std::string(rest.substr(0, n));
+        rest.remove_prefix(n);
+    }
+    const int kind = admonitionKindOf(keyword);
+    if (kind == AdmonitionNone) return false;
+    AdmonitionRange r;
+    r.open = lineStart;
+    r.bodyStart = next;
+    r.keyword = admonitionLower(keyword);
+    r.kind = kind;
+    if (kind == AdmonitionDetails) r.fold = 2;
+    std::string_view title;
+    if (!rest.empty() && rest[0] == '[') {  // Docusaurus [Title]
+        int depth = 0;
+        size_t i = 0;
+        for (; i < rest.size(); ++i) {
+            if (rest[i] == '[') ++depth;
+            else if (rest[i] == ']' && --depth == 0) break;
+        }
+        if (i == rest.size()) return false;
+        title = rest.substr(1, i - 1);
+    } else {
+        title = withoutAttributes(rest);
+    }
+    setTitle(r, st.text, title);
+    st.closed.push_back({ScanState::Closed::Colons, st.add(std::move(r)), colons, 0, {}});
+    blankBytes(st.text, lineStart, next);
+    return true;
+}
+
+// !!! note "Title", ??? note, ???+ note, !!! note inline end ""
+bool mkdocsOpener(ScanState& st, size_t lineStart, size_t next, std::string_view body, size_t indent) {
+    int fold = 0;
+    size_t n = 0;
+    if (body.substr(0, 3) == "!!!") n = 3;
+    else if (body.substr(0, 4) == "???+") n = 4, fold = 1;
+    else if (body.substr(0, 3) == "???") n = 3, fold = 2;
+    else return false;
+    std::string_view rest = body.substr(n);
+    if (rest.empty() || !isSpaceChar(rest[0])) return false;
+    rest.remove_prefix(leadingSpaceBytes(rest));
+    size_t k = keywordLength(rest);
+    if (k == 0) return false;
+    AdmonitionRange r;
+    r.open = lineStart;
+    r.bodyStart = next;
+    r.keyword = admonitionLower(rest.substr(0, k));
+    r.kind = admonitionKindOf(r.keyword);
+    if (r.kind == AdmonitionNone) r.kind = AdmonitionNote;  // Material styles unknown types as notes
+    r.fold = fold;
+    rest.remove_prefix(k);
+    // Extra classes (inline, end), then an optional quoted title
+    while (true) {
+        rest.remove_prefix(leadingSpaceBytes(rest));
+        size_t more = keywordLength(rest);
+        if (more == 0) break;
+        rest.remove_prefix(more);
+    }
+    std::string quoted;
+    std::string_view titleView = rest;
+    if (takeQuoted(titleView, quoted)) {
+        r.noTitle = quoted.empty();
+        const size_t at = static_cast<size_t>(rest.data() - st.text.data()) + rest.find_first_of("\"'") + 1;
+        r.title = quoted;
+        r.titleOffset = at;
+    } else if (!trimView(rest).empty()) {
+        return false;  // not MkDocs syntax after all
+    }
+    st.indented.push_back({st.add(std::move(r)), indent, next});
+    blankBytes(st.text, lineStart, next);
+    return true;
+}
+
+// .. note::, .. warning:: Text on the marker line, .. admonition:: Title
+bool rstOpener(ScanState& st, size_t lineStart, size_t next, std::string_view body, size_t indent) {
+    if (body.substr(0, 3) != ".. ") return false;
+    std::string_view rest = body.substr(3);
+    rest.remove_prefix(leadingSpaceBytes(rest));
+    size_t k = keywordLength(rest);
+    if (k == 0 || rest.substr(k, 2) != "::") return false;
+    static const char* const kDirectives[] = {"attention", "caution", "danger", "error", "hint", "important",
+                                              "note", "tip", "warning", "admonition", "seealso", "todo"};
+    const std::string keyword = admonitionLower(rest.substr(0, k));
+    bool known = false;
+    for (const char* d : kDirectives) known = known || keyword == d;
+    if (!known) return false;
+    AdmonitionRange r;
+    r.open = lineStart;
+    r.keyword = keyword;
+    r.kind = admonitionKindOf(keyword);
+    std::string_view after = rest.substr(k + 2);
+    const size_t afterOffset = static_cast<size_t>(after.data() - st.text.data());
+    if (keyword == "admonition") {
+        setTitle(r, st.text, after);
+        r.bodyStart = next;
+        blankBytes(st.text, lineStart, next);
+    } else {
+        // Text after the marker opens the body: only the marker goes
+        r.bodyStart = trimView(after).empty() ? next : afterOffset + leadingSpaceBytes(after);
+        blankBytes(st.text, lineStart, trimView(after).empty() ? next : afterOffset);
+    }
+    st.indented.push_back({st.add(std::move(r)), indent, next});
+    return true;
+}
+
+// {{< alert "warning" >}}, {{% alert title="T" color="warning" %}},
+// {{< notice tip "Title" >}}, {{< note >}}, and their closing tags
+bool hugoTag(ScanState& st, size_t lineStart, size_t next, std::string_view body) {
+    if (body.size() < 6 || body.substr(0, 2) != "{{" || (body[2] != '<' && body[2] != '%')) return false;
+    const char closeChar = body[2] == '<' ? '>' : '%';
+    const std::string closeTag = std::string(1, closeChar) + "}}";
+    size_t end = body.find(closeTag, 3);
+    if (end == std::string_view::npos) return false;
+    std::string_view inner = trimView(body.substr(3, end - 3));
+    const bool closing = !inner.empty() && inner[0] == '/';
+    if (closing) inner = trimView(inner.substr(1));
+    size_t k = keywordLength(inner);
+    if (k == 0) return false;
+    const std::string name = admonitionLower(inner.substr(0, k));
+    static const char* const kNames[] = {"alert", "notice", "hint", "callout", "admonition"};
+    bool generic = false;
+    for (const char* n : kNames) generic = generic || name == n;
+    if (!generic && admonitionKindOf(name) == AdmonitionNone) return false;
+    const size_t tagEnd = static_cast<size_t>(body.data() - st.text.data()) + end + closeTag.size();
+    if (closing) {
+        for (size_t i = st.closed.size(); i-- > 0;) {
+            if (st.closed[i].type == ScanState::Closed::Hugo && st.closed[i].name == name) {
+                AdmonitionRange& r = st.ranges[st.closed[i].range];
+                r.bodyEnd = static_cast<size_t>(body.data() - st.text.data());
+                st.closed.erase(st.closed.begin() + static_cast<std::ptrdiff_t>(i));
+                blankBytes(st.text, r.bodyEnd, tagEnd);
+                return true;
+            }
+        }
+        return false;
+    }
+    AdmonitionRange r;
+    r.open = lineStart;
+    r.keyword = generic ? std::string() : name;
+    std::string_view args = inner.substr(k);
+    while (true) {
+        args = trimView(args);
+        if (args.empty()) break;
+        std::string value;
+        size_t eq = args.find('=');
+        size_t space = args.find_first_of(" \t");
+        if (eq != std::string_view::npos && (space == std::string_view::npos || eq < space)) {
+            const std::string key = admonitionLower(trimView(args.substr(0, eq)));
+            args.remove_prefix(eq + 1);
+            std::string_view before = args;
+            if (!takeQuoted(args, value)) {
+                size_t stop = args.find_first_of(" \t");
+                value = std::string(args.substr(0, stop));
+                args.remove_prefix(stop == std::string_view::npos ? args.size() : stop);
+            }
+            if (key == "title") {
+                r.title = value;
+                r.titleOffset = static_cast<size_t>(before.data() - st.text.data()) + 1;
+            } else if ((key == "type" || key == "color") && r.keyword.empty()) {
+                r.keyword = admonitionLower(value == "primary" ? "note" : value);
+            } else if (key == "open") {
+                r.fold = value == "false" ? 2 : 1;
+            }
+        } else {
+            std::string_view before = args;
+            if (!takeQuoted(args, value)) {
+                value = std::string(args.substr(0, space));
+                args.remove_prefix(space == std::string_view::npos ? args.size() : space);
+            }
+            if (r.keyword.empty() && admonitionKindOf(value) != AdmonitionNone) {
+                r.keyword = admonitionLower(value);
+            } else if (r.title.empty()) {
+                r.title = value;
+                r.titleOffset = static_cast<size_t>(before.data() - st.text.data()) + (before[0] == '"' ? 1 : 0);
+            }
+        }
+    }
+    if (r.keyword.empty()) r.keyword = "note";
+    r.kind = admonitionKindOf(r.keyword);
+    if (r.kind == AdmonitionNone) r.kind = AdmonitionNote;
+    r.bodyStart = tagEnd;
+    st.closed.push_back({ScanState::Closed::Hugo, st.add(std::move(r)), 0, 0, name});
+    blankBytes(st.text, lineStart, tagEnd);
+    // The closing tag may share the line: {{< note >}}Text{{< /note >}}
+    std::string_view tail(st.text.data() + tagEnd, next - tagEnd);
+    size_t close = tail.find("{{");
+    if (close != std::string_view::npos) {
+        hugoTag(st, lineStart, next, tail.substr(close));
+    }
+    return true;
+}
+
+// <div class="admonition note">, <p class="admonition-title">Title</p>, </div>
+bool htmlTag(ScanState& st, size_t lineStart, size_t next, std::string_view body) {
+    std::string_view line = trimView(body);
+    if (line == "</div>") {
+        for (size_t i = st.closed.size(); i-- > 0;) {
+            if (st.closed[i].type == ScanState::Closed::Html) {
+                st.ranges[st.closed[i].range].bodyEnd = lineStart;
+                st.closed.erase(st.closed.begin() + static_cast<std::ptrdiff_t>(i));
+                blankBytes(st.text, lineStart, next);
+                return true;
+            }
+        }
+        return false;
+    }
+    const std::string lower = admonitionLower(line);
+    if (st.htmlTitleFor != SIZE_MAX && lower.rfind("<p class=", 0) == 0 &&
+        lower.find("admonition-title") != std::string::npos) {
+        size_t open = line.find('>');
+        size_t close = lower.rfind("</p>");
+        if (open != std::string_view::npos && close != std::string::npos && close > open) {
+            AdmonitionRange& r = st.ranges[st.htmlTitleFor];
+            setTitle(r, st.text, line.substr(open + 1, close - open - 1));
+            r.bodyStart = next;
+            st.htmlTitleFor = SIZE_MAX;
+            blankBytes(st.text, lineStart, next);
+            return true;
+        }
+    }
+    if (lower.rfind("<div class=", 0) != 0 || line.back() != '>') return false;
+    size_t at = lower.find("admonition");
+    if (at == std::string::npos || at > 12) return false;
+    std::string_view classes = line.substr(at + 10);
+    classes.remove_prefix(leadingSpaceBytes(classes));
+    size_t k = keywordLength(classes);
+    AdmonitionRange r;
+    r.open = lineStart;
+    r.bodyStart = next;
+    r.keyword = k ? admonitionLower(classes.substr(0, k)) : std::string("note");
+    r.kind = admonitionKindOf(r.keyword);
+    if (r.kind == AdmonitionNone) r.kind = AdmonitionNote;
+    st.closed.push_back({ScanState::Closed::Html, st.add(std::move(r)), 0, 0, {}});
+    st.htmlTitleFor = st.ranges.size() - 1;
+    blankBytes(st.text, lineStart, next);
+    return true;
+}
+
+std::vector<AdmonitionRange> scanAdmonitions(std::string& text) {
+    ScanState st(text);
+    size_t lineStart = 0;
+    while (lineStart < text.size()) {
+        size_t nl = text.find('\n', lineStart);
+        const size_t lineEnd = nl == std::string::npos ? text.size() : nl;
+        const size_t next = nl == std::string::npos ? text.size() : nl + 1;
+        std::string_view line(text.data() + lineStart, lineEnd - lineStart);
+        const size_t lead = leadingSpaceBytes(line);
+        std::string_view body = line.substr(lead);
+        const bool blank = trimView(body).empty();
+        const size_t indent = indentColumns(line);
+
+        if (st.inCode) {
+            char c;
+            size_t n;
+            std::string_view info;
+            if (parseFenceLine(body, c, n, info) && c == st.codeChar && n >= st.codeLength && info.empty()) {
+                st.inCode = false;
+            }
+            for (auto& in : st.indented) in.lastBodyEnd = next;
+            lineStart = next;
+            continue;
+        }
+
+        // A dedent ends the indented bodies it leaves
+        while (!blank && !st.indented.empty() && indent <= st.indented.back().indent) {
+            st.ranges[st.indented.back().range].bodyEnd = st.indented.back().lastBodyEnd;
+            st.indented.pop_back();
+        }
+        if (!blank) {
+            for (auto& in : st.indented) in.lastBodyEnd = next;
+        }
+        if (blank || body[0] == '>') {  // markers inside a blockquote stay text
+            lineStart = next;
+            continue;
+        }
+
+        char fenceChar;
+        size_t fenceLength;
+        std::string_view info;
+        if (parseFenceLine(body, fenceChar, fenceLength, info)) {
+            // ```{note} opens a MyST directive; a bare fence may close one
+            if (info.size() > 2 && info[0] == '{') {
+                size_t close = info.find('}');
+                const std::string keyword =
+                    close == std::string_view::npos ? std::string() : std::string(trimView(info.substr(1, close - 1)));
+                const int kind = keyword.empty() ? AdmonitionNone : admonitionKindOf(keyword);
+                if (kind != AdmonitionNone) {
+                    AdmonitionRange r;
+                    r.open = lineStart;
+                    r.bodyStart = next;
+                    r.keyword = admonitionLower(keyword);
+                    r.kind = kind;
+                    if (kind == AdmonitionDetails) r.fold = 2;
+                    setTitle(r, text, info.substr(close + 1));
+                    st.closed.push_back({ScanState::Closed::Fence, st.add(std::move(r)), fenceLength, fenceChar, {}});
+                    blankBytes(text, lineStart, next);
+                    lineStart = next;
+                    continue;
+                }
+            }
+            if (info.empty() && !st.closed.empty() && st.closed.back().type == ScanState::Closed::Fence &&
+                st.closed.back().fenceChar == fenceChar && fenceLength >= st.closed.back().count) {
+                st.ranges[st.closed.back().range].bodyEnd = lineStart;
+                st.closed.pop_back();
+                blankBytes(text, lineStart, next);
+                lineStart = next;
+                continue;
+            }
+            st.inCode = true;
+            st.codeChar = fenceChar;
+            st.codeLength = fenceLength;
+            lineStart = next;
+            continue;
+        }
+
+        // MyST options right after a directive line (:class: tip) go too
+        if (!st.ranges.empty() && st.ranges.back().bodyStart == lineStart && body.size() > 2 && body[0] == ':' &&
+            body[1] != ':') {
+            size_t close = body.find(':', 1);
+            if (close != std::string_view::npos && close > 1) {
+                AdmonitionRange& r = st.ranges.back();
+                const std::string option = admonitionLower(body.substr(1, close - 1));
+                if (option == "class") {
+                    std::string_view classes = body.substr(close + 1);
+                    while (!(classes = trimView(classes)).empty()) {
+                        size_t k = keywordLength(classes);
+                        if (k == 0) break;
+                        const std::string cls = admonitionLower(classes.substr(0, k));
+                        if (cls == "dropdown") r.fold = 2;
+                        else if (admonitionKindOf(cls) != AdmonitionNone && r.keyword == "admonition") {
+                            r.kind = admonitionKindOf(cls);
+                        }
+                        classes.remove_prefix(k);
+                    }
+                }
+                r.bodyStart = next;
+                blankBytes(text, lineStart, next);
+                lineStart = next;
+                continue;
+            }
+        }
+
+        // ::: closes or opens a container
+        size_t colons = 0;
+        while (colons < body.size() && body[colons] == ':') ++colons;
+        if (colons >= 3) {
+            if (trimView(body.substr(colons)).empty()) {
+                for (size_t i = st.closed.size(); i-- > 0;) {
+                    if (st.closed[i].type == ScanState::Closed::Colons && st.closed[i].count == colons) {
+                        st.ranges[st.closed[i].range].bodyEnd = lineStart;
+                        st.closed.erase(st.closed.begin() + static_cast<std::ptrdiff_t>(i));
+                        blankBytes(text, lineStart, next);
+                        break;
+                    }
+                }
+                lineStart = next;
+                continue;
+            }
+            if (colonOpener(st, lineStart, next, body, colons)) {
+                lineStart = next;
+                continue;
+            }
+        }
+        if (mkdocsOpener(st, lineStart, next, body, indent) || rstOpener(st, lineStart, next, body, indent) ||
+            hugoTag(st, lineStart, next, body) || htmlTag(st, lineStart, next, body)) {
+            lineStart = next;
+            continue;
+        }
+        st.htmlTitleFor = SIZE_MAX;
+        lineStart = next;
+    }
+    // Unclosed containers run to the end
+    for (const auto& c : st.closed) st.ranges[c.range].bodyEnd = text.size();
+    for (const auto& in : st.indented) st.ranges[in.range].bodyEnd = in.lastBodyEnd;
+    for (auto& r : st.ranges) r.bodyEnd = std::max(r.bodyEnd, r.bodyStart);
+    return st.ranges;
+}
+
+// The first and last source offsets in a subtree (SIZE_MAX / 0 if none)
+void offsetSpan(const Element* e, size_t& lo, size_t& hi) {
+    if (!e) return;
+    if (e->sourceOffset != SIZE_MAX) {
+        lo = std::min(lo, e->sourceOffset);
+        hi = std::max(hi, e->sourceOffset);
+    }
+    for (const auto& c : e->children) offsetSpan(c.get(), lo, hi);
+}
+
+size_t firstOffsetIn(const Element* e) {
+    size_t lo = SIZE_MAX, hi = 0;
+    offsetSpan(e, lo, hi);
+    return lo;
+}
+
+void setParents(const ElementPtr& e) {
+    for (auto& c : e->children) {
+        c->parent = e.get();
+        setParents(c);
+    }
+}
+
+void shiftOffsets(const ElementPtr& e, size_t by) {
+    if (e->sourceOffset != SIZE_MAX) e->sourceOffset += by;
+    for (auto& c : e->children) shiftOffsets(c, by);
+}
+
+// Moves the blocks of `r`'s body under `box`, wherever in the tree they sit
+bool wrapRange(const ElementPtr& parent, const AdmonitionRange& r, const ElementPtr& box) {
+    auto& kids = parent->children;
+    size_t first = SIZE_MAX, last = 0;
+    for (size_t i = 0; i < kids.size(); ++i) {
+        const size_t at = firstOffsetIn(kids[i].get());
+        if (at != SIZE_MAX && at >= r.bodyStart && at < r.bodyEnd) {
+            if (first == SIZE_MAX) first = i;
+            last = i;
+        }
+    }
+    if (first != SIZE_MAX) {
+        for (size_t i = first; i <= last; ++i) {
+            kids[i]->parent = box.get();
+            box->children.push_back(kids[i]);
+        }
+        kids.erase(kids.begin() + static_cast<std::ptrdiff_t>(first), kids.begin() + static_cast<std::ptrdiff_t>(last + 1));
+        box->parent = parent.get();
+        kids.insert(kids.begin() + static_cast<std::ptrdiff_t>(first), box);
+        return true;
+    }
+    // The body sits deeper (a list item's), or is empty: go where the
+    // marker is
+    for (const auto& kid : kids) {
+        size_t lo = SIZE_MAX, hi = 0;
+        offsetSpan(kid.get(), lo, hi);
+        if (lo != SIZE_MAX && lo < r.bodyEnd && hi >= r.bodyStart &&
+            (kid->type == ElementType::List || kid->type == ElementType::ListItem ||
+             kid->type == ElementType::BlockQuote) &&
+            wrapRange(kid, r, box)) {
+            return true;
+        }
+    }
+    size_t at = 0;
+    while (at < kids.size() && firstOffsetIn(kids[at].get()) < r.open) ++at;
+    box->parent = parent.get();
+    kids.insert(kids.begin() + static_cast<std::ptrdiff_t>(at), box);
+    return true;
+}
+
+}  // namespace
+
+static ParseResult parseCore(const std::string& markdown, FootnoteData* notes);
+
+// A title's Markdown as inline content, offsets in the document
+static ElementPtr parseAdmonitionTitle(const std::string& title, size_t offset) {
+    if (trimView(title).empty()) return nullptr;
+    ParseResult parsed = parseCore(title, nullptr);
+    if (!parsed.success || !parsed.root || parsed.root->children.empty()) return nullptr;
+    ElementPtr para = parsed.root->children.front();
+    if (para->type != ElementType::Paragraph) return nullptr;
+    shiftOffsets(para, offset);
+    para->parent = nullptr;
+    return para;
+}
+
+static void wrapAdmonitions(const ElementPtr& root, std::vector<AdmonitionRange> ranges) {
+    // Innermost first: an outer body then holds the inner box as a block
+    std::stable_sort(ranges.begin(), ranges.end(), [](const AdmonitionRange& a, const AdmonitionRange& b) {
+        return a.bodyEnd - a.bodyStart < b.bodyEnd - b.bodyStart;
+    });
+    for (const auto& r : ranges) {
+        auto box = std::make_shared<Element>(ElementType::BlockQuote);
+        box->sourceOffset = r.open;
+        box->alertKind = r.kind;
+        box->alertKeyword = r.keyword;
+        box->alertFold = r.fold;
+        box->alertNoTitle = r.noTitle;
+        box->alertTitle = parseAdmonitionTitle(r.title, r.titleOffset);
+        wrapRange(root, r, box);
+    }
+    setParents(root);
+}
+
+// Blockquote callouts: GitHub and GitLab alerts (> [!NOTE]) and Obsidian's
+// callouts (> [!tip]- Title): a blockquote whose first line opens with
+// [!type], an optional fold mark (+ open, - folded) and an optional title.
+// Unknown types are notes titled after the type, as in Obsidian.
+static void detectCallouts(const ElementPtr& parent) {
+    for (auto& child : parent->children) {
+        detectCallouts(child);
+    }
+    if (parent->type != ElementType::BlockQuote || parent->alertKind != 0 || parent->children.empty()) return;
+    const ElementPtr& para = parent->children.front();
+    if (para->type != ElementType::Paragraph || para->children.empty()) return;
+    const ElementPtr& first = para->children.front();
+    if (first->type != ElementType::Text || first->text.size() < 4 || first->text.compare(0, 2, "[!") != 0) return;
+
+    const std::string& text = first->text;
+    const size_t markerOffset = para->sourceOffset;
+    size_t close = text.find(']', 2);
+    if (close == std::string::npos || close == 2) return;
+    const std::string keyword = text.substr(2, close - 2);
+    if (keywordLength(keyword) != keyword.size()) return;
+    size_t at = close + 1;
+    int fold = 0;
+    if (at < text.size() && (text[at] == '+' || text[at] == '-')) {
+        fold = text[at] == '+' ? 1 : 2;
+        ++at;
+    }
+    if (at < text.size() && !isSpaceChar(text[at])) return;  // [!note]x is not a marker
+    while (at < text.size() && isSpaceChar(text[at])) ++at;
+
+    // The title: the rest of the first line, inline Markdown and all
+    auto title = std::make_shared<Element>(ElementType::Paragraph);
+    if (at < text.size()) {
+        auto rest = std::make_shared<Element>(ElementType::Text);
+        rest->text = text.substr(at);
+        if (first->sourceOffset != SIZE_MAX) rest->sourceOffset = first->sourceOffset + at;
+        title->children.push_back(rest);
+    }
+    size_t i = 1;
+    for (; i < para->children.size(); ++i) {
+        const auto type = para->children[i]->type;
+        if (type == ElementType::SoftBreak || type == ElementType::HardBreak) break;
+        title->children.push_back(para->children[i]);
+    }
+    const size_t dropped = std::min(i + 1, para->children.size());  // the first line and its break
+    para->children.erase(para->children.begin(), para->children.begin() + static_cast<std::ptrdiff_t>(dropped));
+    if (para->children.empty()) parent->children.erase(parent->children.begin());
+
+    if (parent->sourceOffset == SIZE_MAX) parent->sourceOffset = markerOffset;
+    parent->alertKeyword = admonitionLower(keyword);
+    parent->alertKind = admonitionKindOf(keyword);
+    if (parent->alertKind == AdmonitionNone) parent->alertKind = AdmonitionNote;
+    parent->alertFold = fold;
+    if (!title->children.empty()) {
+        // Whitespace between the title and the line's end goes
+        auto& last = title->children.back();
+        if (last->type == ElementType::Text) {
+            while (!last->text.empty() && isSpaceChar(last->text.back())) last->text.pop_back();
+        }
+        setParents(title);
+        parent->alertTitle = title;
+    }
+}
+
 static ParseResult parseCore(const std::string& markdown, FootnoteData* notes) {
     ParseResult result;
 
     auto startTime = std::chrono::high_resolution_clock::now();
 
+    // md4c reads a copy with the admonition markers blanked (same length,
+    // so every offset still points into `markdown`)
+    std::string blanked = markdown;
+    std::vector<AdmonitionRange> admonitions = scanAdmonitions(blanked);
+
     ParserContext ctx;
-    ctx.inputStart = markdown.c_str();
-    ctx.inputLength = markdown.size();
+    ctx.inputStart = blanked.c_str();
+    ctx.inputLength = blanked.size();
     ctx.notes = notes;
 
     MD_PARSER parser = {
@@ -1385,7 +2046,7 @@ static ParseResult parseCore(const std::string& markdown, FootnoteData* notes) {
         nullptr  // syntax
     };
 
-    int ret = md_parse(markdown.c_str(), static_cast<MD_SIZE>(markdown.size()), &parser, &ctx);
+    int ret = md_parse(blanked.c_str(), static_cast<MD_SIZE>(blanked.size()), &parser, &ctx);
 
     auto endTime = std::chrono::high_resolution_clock::now();
     result.parseTimeUs = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
@@ -1401,7 +2062,8 @@ static ParseResult parseCore(const std::string& markdown, FootnoteData* notes) {
     splitWikiLinks(ctx.root);
     splitFileRefs(ctx.root);
     splitEmojiShortcodes(ctx.root);
-    detectGitHubAlerts(ctx.root);
+    wrapAdmonitions(ctx.root, std::move(admonitions));
+    detectCallouts(ctx.root);
     result.root = ctx.root;
     result.success = true;
     return result;

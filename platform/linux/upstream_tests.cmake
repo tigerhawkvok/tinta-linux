@@ -144,3 +144,8 @@ target_compile_definitions(plantuml_app_tests PRIVATE
     TINTA_TRANSPARENT_FIXTURE_DIR="${TINTA_FIXTURES}/plantuml-transparent")
 add_dependencies(plantuml_app_tests fake_plantuml)
 tinta_driver_test(plantuml_in_app plantuml_app_tests plantuml-app-test run_portable_test.cmake)
+
+# Admonitions in every dialect: layout, folding, print and the exports
+tinta_upstream_test(admonition_tests tests/admonition_tests.cpp)
+target_compile_definitions(admonition_tests PRIVATE TINTA_ADMONITION_FIXTURE="${TINTA_FIXTURES}/admonitions.md")
+add_test(NAME admonitions COMMAND admonition_tests)

@@ -115,12 +115,42 @@ void blockCases(App& app) {
         check(closeEnough(quoteBars[0].bottom, rule.p1.y+rule.stroke/2), "bar covers the heading underline");
     }
 
-    for (const char* source : {"> [!NOTE]\n> Callout body.\n", "> [!TIP]\n"}) {
+    // Admonitions are boxes (admonition.h): a tint and an accent bar that
+    // enclose the title and the body, padded below the last line, with the
+    // usual gap before the next block
+    const float scale = app.contentScale * app.zoomFactor;
+    const float pad = 12.0f * scale;
+    for (const char* source : {"> [!NOTE]\n> Callout body.\n", "> [!TIP]\n", ":::warning[Title]\nBody.\n:::\n",
+                               "!!! danger\n    Indented body.\n"}) {
         layout(app, source);
-        check(!app.layoutRects.empty(), "callout bar renders");
-        if (!app.layoutRects.empty())
-            check(closeEnough(app.layoutRects.back().rect.bottom, lastTextBottom(app)),
-                  "callout bar fits the body or standalone title");
+        check(app.layoutRects.size() >= 2, "an admonition box renders");
+        if (app.layoutRects.size() < 2) continue;
+        const D2D1_RECT_F tint = app.layoutRects[0].rect;
+        const D2D1_RECT_F bar = app.layoutRects[1].rect;
+        const float bottom = lastTextBottom(app);
+        check(closeEnough(tint.bottom, bar.bottom) && std::abs(bar.bottom - (bottom + pad * 0.75f)) < 0.5f,
+              "the box ends a padding below its last line");
+        check(closeEnough(bar.right - bar.left, 4.0f * scale) && closeEnough(tint.left, bar.left),
+              "the accent bar runs down the box's left edge");
+        bool inside = true;
+        for (const auto& run : app.layoutTextRuns) {
+            inside = inside && run.bounds.left >= bar.right && run.bounds.top >= tint.top &&
+                     run.bounds.bottom <= tint.bottom && run.bounds.right <= tint.right + 0.5f;
+        }
+        check(inside, "the title and the body sit inside the box, right of the bar");
+        layout(app, std::string(source) + "\n\nFollowing paragraph.\n");
+        float followingY = -1;
+        for (const auto& run : app.layoutTextRuns) followingY = std::max(followingY, run.pos.y);
+        check(std::abs(followingY - (app.layoutRects[1].rect.bottom + 14 * scale)) < 0.5f,
+              "the next block keeps the 14px gap below the box");
+    }
+    layout(app, "::::info Outer\n\n:::tip Inner\nDeep.\n:::\n\n::::\n");
+    check(app.layoutRects.size() >= 4, "a nested admonition renders two boxes");
+    if (app.layoutRects.size() >= 4) {
+        const D2D1_RECT_F outer = app.layoutRects[0].rect, inner = app.layoutRects[2].rect;
+        check(inner.left > outer.left && inner.right <= outer.right && inner.top > outer.top &&
+                  inner.bottom < outer.bottom,
+              "the inner box sits inside the outer one");
     }
     layout(app, ">\n\nFollowing paragraph.\n");
     quoteBars = bars(app);

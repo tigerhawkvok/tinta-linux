@@ -16,6 +16,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <set>
 #include <unordered_map>
 #include <chrono>
 #include <utility>
@@ -1183,6 +1184,16 @@ struct App {
         bool directed = true;
         bool dashed = false;
     };
+    // Foldable admonition title bars (document coordinates), and the boxes
+    // the reader folded or unfolded, keyed by file and offset so the state
+    // survives a relayout, a reload and a tab switch
+    struct FoldRect {
+        D2D1_RECT_F rect{};
+        std::string key;
+    };
+    std::vector<FoldRect> admonitionFoldRects;
+    std::set<std::string> admonitionFoldToggled;
+
     // Clickable task checkboxes (document coordinates)
     struct TaskRect {
         D2D1_RECT_F rect{};
@@ -1528,6 +1539,7 @@ struct App {
         layoutConnectors.clear();
         layoutBitmaps.clear();
         taskRects.clear();
+        admonitionFoldRects.clear();
         linkRects.clear();
         codeBlocks.clear();
         tableRects.clear();
