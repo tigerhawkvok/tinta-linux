@@ -1,0 +1,18 @@
+[package]
+name = "pul-eval-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Evaluation only: plantuml-little as Tinta Mono would bundle it (no CLI,
+# no remote includes), plus the crate's own SVG comparator
+[dependencies]
+plantuml-little = { path = "../supramark/crates/plantuml-little", default-features = false, features = ["metrics-ttf-parser"] }
+regex = "1"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
