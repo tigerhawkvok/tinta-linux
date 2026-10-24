@@ -731,10 +731,15 @@ public:
         *bitmap = created;
         return S_OK;
     }
-    // Windows icon and GDI bitmap handles do not exist here
-    HRESULT CreateBitmapFromHICON(HICON, IWICBitmap** bitmap) override {
+    // Icons are the app icon's pixels (LoadImageW); GDI bitmaps do not exist here
+    HRESULT CreateBitmapFromHICON(HICON icon, IWICBitmap** bitmap) override {
         *bitmap = nullptr;
-        return E_NOTIMPL;
+        if (!icon || icon->pixels.pixels.empty()) return E_INVALIDARG;
+        auto* created = new WicBitmap(static_cast<UINT>(icon->pixels.width), static_cast<UINT>(icon->pixels.height),
+                                      GUID_WICPixelFormat32bppPBGRA);
+        created->write(icon->pixels);
+        *bitmap = created;
+        return S_OK;
     }
     HRESULT CreateBitmapFromHBITMAP(HBITMAP, HPALETTE, WICBitmapAlphaChannelOption, IWICBitmap** bitmap) override {
         *bitmap = nullptr;

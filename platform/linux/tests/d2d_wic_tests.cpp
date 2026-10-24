@@ -184,6 +184,58 @@ double meanBlue(const unsigned char* data, int stride, int x0, int y0, int w, in
     return sum / (w * h);
 }
 
+// The caption's menu button draws the app icon the way src/tabs.cpp loads
+// it: LoadImageW(IDI_ICON1) -> CreateBitmapFromHICON -> PBGRA -> D2D bitmap.
+// Without it the button is an empty cell that only highlights on hover.
+void testAppIcon(ID2D1Factory1* factory, IWICImagingFactory* wic) {
+    check(LoadImageW(GetModuleHandleW(nullptr), L"NO_SUCH_ICON", IMAGE_ICON, 32, 32, 0) == nullptr,
+          "an unknown icon resource does not load");
+    HICON icon = (HICON)LoadImageW(GetModuleHandleW(nullptr), L"IDI_ICON1", IMAGE_ICON, 32, 32, 0);
+    check(icon != nullptr, "the app icon loads (IDI_ICON1)");
+    if (!icon) return;
+    IWICBitmap* wicBitmap = nullptr;
+    check(SUCCEEDED(wic->CreateBitmapFromHICON(icon, &wicBitmap)) && wicBitmap, "CreateBitmapFromHICON");
+    DestroyIcon(icon);
+    if (!wicBitmap) return;
+    UINT w = 0, h = 0;
+    wicBitmap->GetSize(&w, &h);
+    check(w == 32 && h == 32, "the 32 px icon is 32x32: " + std::to_string(w) + "x" + std::to_string(h));
+    IWICFormatConverter* converter = nullptr;
+    wic->CreateFormatConverter(&converter);
+    check(SUCCEEDED(converter->Initialize(wicBitmap, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr,
+                                          0.0, WICBitmapPaletteTypeCustom)),
+          "the icon converts to PBGRA");
+
+    IWICBitmap* canvas = nullptr;
+    wic->CreateBitmap(32, 32, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &canvas);
+    ID2D1RenderTarget* target = nullptr;
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties();
+    factory->CreateWicBitmapRenderTarget(canvas, &props, &target);
+    ID2D1Bitmap* bitmap = nullptr;
+    check(SUCCEEDED(target->CreateBitmapFromWicBitmap(converter, nullptr, &bitmap)) && bitmap,
+          "a D2D bitmap from the icon");
+    if (bitmap) {
+        target->BeginDraw();
+        D2D1_COLOR_F white = D2D1::ColorF(1, 1, 1);
+        target->Clear(&white);
+        D2D1_RECT_F dest = D2D1::RectF(0, 0, 32, 32);
+        target->DrawBitmap(bitmap, &dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+        target->EndDraw();
+        int marked = 0;
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 32; x++) {
+                auto p = pixelAt(canvas, x, y);
+                if (p[0] < 200 || p[1] < 200 || p[2] < 200) marked++;
+            }
+        check(marked > 100, "the icon draws visibly: " + std::to_string(marked) + " of 1024 pixels marked");
+        bitmap->Release();
+    }
+    target->Release();
+    canvas->Release();
+    converter->Release();
+    wicBitmap->Release();
+}
+
 void testDrawing(ID2D1Factory1* factory, IWICImagingFactory* wic) {
     IWICBitmap* canvas = nullptr;
     wic->CreateBitmap(256, 256, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &canvas);
@@ -348,6 +400,7 @@ int main() {
 
     testDecoding(wic);
     testDrawing(factory, wic);
+    testAppIcon(factory, wic);
     testGeometryAndPdf(factory);
 
     if (failures) {

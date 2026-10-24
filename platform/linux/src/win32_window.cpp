@@ -645,9 +645,82 @@ HCURSOR SetCursor(HCURSOR cursor) {
     return old;
 }
 
+namespace {
+
+// The app icon's PNG at `size` px: the hicolor copy installed beside the
+// binary (AppImage, Flatpak, an install prefix), or the source tree's when
+// run from a build. Premultiplied BGRA, as WIC and D2D bitmaps keep it.
+bool loadAppIcon(int size, tinta::PixelBuffer& out) {
+    std::vector<std::string> candidates;
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n > 0) {
+        exe[n] = 0;
+        std::string dir(exe);
+        dir.resize(dir.find_last_of('/'));
+        candidates.push_back(dir + "/../share/icons/hicolor/" + std::to_string(size) + "x" +
+                             std::to_string(size) + "/apps/tinta.png");
+    }
+#ifdef TINTA_SOURCE_ICON_DIR
+    candidates.push_back(std::string(TINTA_SOURCE_ICON_DIR) + "/tinta-" + std::to_string(size) + ".png");
+#endif
+    for (const std::string& path : candidates) {
+        cairo_surface_t* png = cairo_image_surface_create_from_png(path.c_str());
+        if (cairo_surface_status(png) != CAIRO_STATUS_SUCCESS) {
+            cairo_surface_destroy(png);
+            continue;
+        }
+        // Draw into ARGB32 so an opaque (RGB24) PNG gets its alpha too
+        int w = cairo_image_surface_get_width(png);
+        int h = cairo_image_surface_get_height(png);
+        cairo_surface_t* argb = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        cairo_t* cr = cairo_create(argb);
+        cairo_set_source_surface(cr, png, 0, 0);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        cairo_surface_flush(argb);
+        out.width = w;
+        out.height = h;
+        out.stride = cairo_image_surface_get_stride(argb);
+        const unsigned char* data = cairo_image_surface_get_data(argb);
+        out.pixels.assign(data, data + static_cast<size_t>(out.stride) * h);
+        cairo_surface_destroy(argb);
+        cairo_surface_destroy(png);
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 HICON LoadIconW(HINSTANCE, LPCWSTR) { return nullptr; }
-HANDLE LoadImageW(HINSTANCE, LPCWSTR, UINT, int, int, UINT) { return nullptr; }
-BOOL DestroyIcon(HICON) { return TRUE; }
+
+// Only the app icon exists here (IDI_ICON1, the caption's menu button),
+// at the smallest installed size that covers the request
+HANDLE LoadImageW(HINSTANCE, LPCWSTR name, UINT type, int cx, int cy, UINT) {
+    if (type != IMAGE_ICON || reinterpret_cast<ULONG_PTR>(name) <= 0xFFFF || std::wcscmp(name, L"IDI_ICON1") != 0) {
+        return nullptr;
+    }
+    int want = std::max({cx, cy, 1});
+    int size = 256;
+    for (int s : {16, 32, 48, 256}) {
+        if (s >= want) {
+            size = s;
+            break;
+        }
+    }
+    auto* icon = new HICON__;
+    if (!loadAppIcon(size, icon->pixels)) {
+        delete icon;
+        return nullptr;
+    }
+    return icon;
+}
+
+BOOL DestroyIcon(HICON icon) {
+    delete icon;
+    return TRUE;
+}
 BOOL TrackMouseEvent(TRACKMOUSEEVENT*) { return TRUE; }
 
 // ---- Messages and timers ---------------------------------------------------------------------

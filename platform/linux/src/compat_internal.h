@@ -88,4 +88,10 @@ bool memoryStreamBytes(IStream* stream, std::vector<unsigned char>& out);
 
 }  // namespace tinta
 
+// What an HICON points to here: an icon's pixels (LoadImageW), which
+// CreateBitmapFromHICON hands to WIC
+struct HICON__ {
+    tinta::PixelBuffer pixels;
+};
+
 #endif  // TINTA_LINUX_COMPAT_INTERNAL_H
