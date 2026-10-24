@@ -6,10 +6,12 @@ reimplementation of PlantUML, instead of running a PlantUML that is already
 installed (Java, or a launcher script)?
 
 **Recommendation: not now.** It is fast and small, but on everyday diagrams
-it draws six of thirteen wrong, where the external PlantUML is right.
-Keep the external tool (#248, 72b1296), and look again when the crate
-matures. It could be a fast path for diagram types it gets right, but only
-behind a per-type allowlist, and only once its upkeep is clear.
+the crates.io release draws six of thirteen wrong. The monorepo's `main`
+(re-tested below) fixes one and still draws five wrong, where the external
+PlantUML is right. Keep the external tool (#248, 72b1296), and look again as
+the crate matures: it is actively developed. It could be a fast path for
+diagram types it gets right, but only behind a per-type allowlist and a
+file-access guard.
 
 ## The crate
 
@@ -19,8 +21,10 @@ behind a per-type allowlist, and only once its upkeep is clear.
   types, backed by 337 reference tests.
 - Licence: GPL-3.0, LGPL-3.0, Apache-2.0, EPL-2.0 or MIT, at our choice.
   MIT or Apache-2.0 suits the fork.
-- Its repository (github.com/Actrium/plantuml-little) returns 404. The
-  Graphviz dependency lives in github.com/Actrium/supramark.
+- Its crates.io repository link (github.com/Actrium/plantuml-little)
+  returns 404. The crate now lives in the Actrium/supramark monorepo under
+  `crates/plantuml-little`, next to its Graphviz and font-metrics crates, and
+  that repository is active (pushed 2026-10-23).
 - **Output:** SVG only. Tinta already turns diagram SVG into PNG (merman's
   resvg path, librsvg), so that would fit.
 - **Layout:** Graphviz-based types (class, component, state, use case) link
@@ -73,3 +77,32 @@ A prototype (`pul-proto`): plantuml-little with only `metrics-ttf-parser`
 Six of the thirteen are wrong, which is not the parity the crate claims.
 The diagrams are ordinary: `extends`, a use case and a component package
 are the first things the PlantUML documentation shows.
+
+## Re-tested on the monorepo's main (2026-10-23)
+
+Philip pointed at github.com/Actrium/supramark/tree/main/crates/plantuml-little.
+`main` was at d9e28b3 (2026-10-23). It still says version 1.2026.2-4, but it
+carries fixes since the crates.io release: hangs and unbounded recursion
+(#277, today), non-ASCII text, and CJK metrics.
+
+The same prototype, built against that source (path dependency, the same
+features), took 46 s and came to 8.8 MB, at the same speed. Against the
+crates.io release:
+- **The activity diagram is fixed:** the merge diamond and its lines match
+  Java now.
+- **The other twelve SVGs are byte-identical** to the crates.io release's, so
+  the other five failures stand.
+
+Why they fail:
+- **`class Dog extends Animal`:** the crate's own fixtures have no class
+  diagram using `extends`, so it is untested; the parser takes the whole
+  line as the class name.
+- **Use case:** `Reader --> (Open file)` uses the parenthesis shorthand, the
+  form PlantUML's use-case documentation introduces first. The crate's
+  fixtures declare `usecase "..." as UC1` explicitly, and without that it
+  detects a sequence diagram.
+- **Component package, Gantt dependency, invalid syntax:** unchanged.
+
+**Safety is unchanged:** there is still no sandbox or file-access option.
+`convert`, `convert_with_base_dir` and `convert_with_input_path` all read
+`!include` and `<img:...>` from disk.
