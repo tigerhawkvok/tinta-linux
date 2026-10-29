@@ -657,7 +657,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 break;
 
             case ElementType::Code: {
-                format = inlineCodeFormat(app, run.style.bold, run.style.italic);
+                format = inlineCodeFormat(app, run.style.bold, run.style.italic, textFormat);
                 if (!isLink) color = themeInlineCodeColor(app.theme);
                 for (const auto& child : elem->children) {
                     if (child->type == ElementType::Text) {
@@ -719,7 +719,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 MathBoxPtr box = mathBoxes[runIndex];
                 if (!box) {
                     // Unsupported TeX: show the raw source in code style
-                    format = inlineCodeFormat(app, run.style.bold, run.style.italic);
+                    format = inlineCodeFormat(app, run.style.bold, run.style.italic, textFormat);
                     if (!isLink) color = themeInlineCodeColor(app.theme);
                     drawYOffset += baselineOf(textFormat) - baselineOf(format);
                     text = L"$" + latex + L"$";

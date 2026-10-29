@@ -448,6 +448,9 @@ struct App {
     IDWriteTextFormat* codeBoldFormat = nullptr;
     IDWriteTextFormat* codeItalicFormat = nullptr;
     IDWriteTextFormat* codeBoldItalicFormat = nullptr;
+    // Inline code sized to text other than the body's (headings, scripts;
+    // #1), made on first use: keyed by 1/100 px size, bold and italic bits
+    std::unordered_map<long long, IDWriteTextFormat*> scaledCodeFormats;
     IDWriteTextFormat* headingFormats[6] = {};
     // *Emphasis* inside a heading keeps the heading's size and face
     IDWriteTextFormat* headingItalicFormats[6] = {};
@@ -1623,6 +1626,8 @@ struct App {
         if (codeBoldFormat) { codeBoldFormat->Release(); codeBoldFormat = nullptr; }
         if (codeItalicFormat) { codeItalicFormat->Release(); codeItalicFormat = nullptr; }
         if (codeBoldItalicFormat) { codeBoldItalicFormat->Release(); codeBoldItalicFormat = nullptr; }
+        for (auto& entry : scaledCodeFormats) entry.second->Release();
+        scaledCodeFormats.clear();
         for (auto& fmt : headingFormats) {
             if (fmt) { fmt->Release(); fmt = nullptr; }
         }

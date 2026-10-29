@@ -1,10 +1,13 @@
-// Inline code sits on the surrounding text's baseline (#262), in every
-// context of the mixed fixture, for several code fonts, themes, scales and
-// widths. The chip (the line box) still contains the code glyphs.
+// Inline code sits on the surrounding text's baseline (#262) at 7/8 of its
+// size (fork #1, headings included), in every context of the mixed fixtures,
+// for several code fonts, themes, scales and widths. The chip (the line box)
+// still contains the code glyphs.
 #include "d2d_init.h"
+#include "export.h"
 #include "render.h"
 
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -12,7 +15,7 @@
 #include <vector>
 
 namespace {
-int failures = 0, comparisons = 0;
+int failures = 0, comparisons = 0, sizeComparisons = 0;
 void check(bool value, const std::string& message) {
     if (!value) {
         if (failures < 20) std::cerr << "FAIL: " << message << '\n';
@@ -109,14 +112,70 @@ void checkBaselines(App& app, const std::string& where) {
         check(std::fabs(c.baseline - text->baseline) < 0.75f,
               where + ": `" + utf8(app.docText.substr(c.run->docStart, c.run->docLength)) +
                   "` baseline " + std::to_string(c.baseline) + " vs text " + std::to_string(text->baseline));
+        // ...and its size is 7/8 of that text's, as body code (14 px) is to
+        // body text (16 px): a heading's code grows with the heading (#1)
+        const float expected = app.codeFormat->GetFontSize() * text->size / app.textFormat->GetFontSize();
+        ++sizeComparisons;
+        check(std::fabs(c.size - expected) < 0.3f,
+              where + ": `" + utf8(app.docText.substr(c.run->docStart, c.run->docLength)) + "` is " +
+                  std::to_string(c.size) + " px beside " + std::to_string(text->size) + " px text, expected " +
+                  std::to_string(expected));
     }
+}
+
+// The reported case (#1): a heading that is only code has no text beside
+// it, so its size comes from the heading level
+void checkCodeOnlyHeading(App& app, const std::string& where) {
+    const float expected =
+        app.codeFormat->GetFontSize() * app.headingFormats[1]->GetFontSize() / app.textFormat->GetFontSize();
+    int found = 0;
+    for (const auto& run : app.layoutTextRuns) {
+        if (!run.layout || app.docText.substr(run.docStart, run.docLength) != L"git") continue;
+        ++found;
+        check(std::fabs(run.layout->GetFontSize() - expected) < 0.3f,
+              where + ": `## `git`` code is " + std::to_string(run.layout->GetFontSize()) + " px, expected " +
+                  std::to_string(expected));
+    }
+    check(found == 1, where + ": the code-only heading renders once");
+}
+
+// The run properties of the run that writes `text` in the Word export
+std::string runPropsOf(const std::string& xml, const std::string& text) {
+    size_t at = xml.find("<w:t xml:space=\"preserve\">" + text + "</w:t>");
+    if (at == std::string::npos) return "";
+    size_t props = xml.rfind("<w:rPr>", at);
+    size_t run = xml.rfind("<w:r>", at);
+    return props == std::string::npos || props < run ? "" : xml.substr(props, at - props);
+}
+
+// Word sizes inline code the same way: 7/8 of the paragraph's text, in
+// half-points (H2 39 -> 34, body 24 -> 21)
+void checkWordExport(App& app, const std::string& source) {
+    auto doc = app.parser.parse(source);
+    app.root = doc.root;
+    layoutDocument(app);
+    const std::filesystem::path output = std::filesystem::current_path() / "heading-code-test-output";
+    std::filesystem::create_directories(output);
+    const std::filesystem::path path = output / "heading-inline-code.docx";
+    check(exportDocxFile(app, path.wstring()), "Word export succeeds");
+    std::ifstream file(path, std::ios::binary);
+    const std::string zip{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    const std::string heading = runPropsOf(zip, "git"), body = runPropsOf(zip, "body code");
+    check(heading.find("<w:sz w:val=\"34\"/>") != std::string::npos,
+          "Word: `## `git`` code is 17 pt (" + heading + ")");
+    check(body.find("<w:sz w:val=\"21\"/>") != std::string::npos, "Word: body code stays 10.5 pt (" + body + ")");
 }
 }  // namespace
 
-int main() {
-    std::ifstream file(TINTA_INLINE_CODE_FIXTURE, std::ios::binary);
+std::string readFile(const char* path) {
+    std::ifstream file(path, std::ios::binary);
     std::string source{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-    check(!source.empty(), "fixture exists");
+    check(!source.empty(), std::string("fixture exists: ") + path);
+    return source;
+}
+
+int main() {
+    const std::string fixtures[] = {readFile(TINTA_INLINE_CODE_FIXTURE), readFile(TINTA_HEADING_CODE_FIXTURE)};
     {
         auto state = std::make_unique<App>();
         App& app = *state;
@@ -142,22 +201,30 @@ int main() {
                     updateTextFormats(app);
                     for (int width : {1050, 650}) {
                         app.width = width;
-                        auto doc = app.parser.parse(source);
-                        check(doc.success, "fixture parses");
-                        app.root = doc.root;
-                        layoutDocument(app);
-                        check(app.docText.find(L"trailing code") != std::wstring::npos, "final paragraph renders");
-                        check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1,
-                              "table and fenced block survive");
-                        checkBaselines(app, utf8(codeFont) + " theme " + std::to_string(theme) + " x" +
-                                                std::to_string(scale) + " " + std::to_string(width) + "px");
+                        for (size_t f = 0; f < 2; ++f) {
+                            auto doc = app.parser.parse(fixtures[f]);
+                            check(doc.success, "fixture parses");
+                            app.root = doc.root;
+                            layoutDocument(app);
+                            check(app.docText.find(L"trailing code") != std::wstring::npos,
+                                  "final paragraph renders");
+                            check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1,
+                                  "table and fenced block survive");
+                            const std::string where = std::string(f ? "headings " : "#262 ") + utf8(codeFont) +
+                                                      " theme " + std::to_string(theme) + " x" +
+                                                      std::to_string(scale) + " " + std::to_string(width) + "px";
+                            checkBaselines(app, where);
+                            if (f == 1) checkCodeOnlyHeading(app, where);
+                        }
                     }
                 }
             }
         }
+        checkWordExport(app, fixtures[1]);
     }
     CoUninitialize();
     check(comparisons > 100, "code runs were compared with their lines: " + std::to_string(comparisons));
-    std::cout << "Inline code baseline: " << comparisons << " comparisons, " << failures << " failures\n";
+    check(sizeComparisons == comparisons, "every compared code run had its size checked");
+    std::cout << "Inline code baseline and size: " << comparisons << " comparisons, " << failures << " failures\n";
     return failures ? 1 : 0;
 }

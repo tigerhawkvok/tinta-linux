@@ -3,6 +3,7 @@
 #include "link_target.h"
 
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 
 namespace {
@@ -98,12 +99,30 @@ static IDWriteTextFormat* scriptFormat(App& app, IDWriteTextFormat* around) {
     return app.supSubFormat;
 }
 
-IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic) {
+IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic, IDWriteTextFormat* around) {
     IDWriteTextFormat* fmt = nullptr;
     if (bold && italic) fmt = app.codeBoldItalicFormat;
     else if (bold) fmt = app.codeBoldFormat;
     else if (italic) fmt = app.codeItalicFormat;
-    return fmt ? fmt : app.codeFormat;
+    if (!fmt) fmt = app.codeFormat;
+    // Code keeps its proportion to the text around it, as body code (14 px)
+    // to body text (16 px): a heading's `code` grows with the heading (#1)
+    if (!fmt || !around || !app.textFormat || !app.dwriteFactory) return fmt;
+    const float size = fmt->GetFontSize() * around->GetFontSize() / app.textFormat->GetFontSize();
+    if (std::fabs(size - fmt->GetFontSize()) < 0.25f) return fmt;
+    const long long key = (std::llround(size * 100.0f) << 2) | (bold ? 2 : 0) | (italic ? 1 : 0);
+    auto found = app.scaledCodeFormats.find(key);
+    if (found != app.scaledCodeFormats.end()) return found->second;
+    IDWriteTextFormat* scaled = nullptr;
+    const wchar_t* family = app.theme.codeFontFamily;
+    if (FAILED(app.dwriteFactory->CreateTextFormat(family, fontCollectionFor(app, family), fmt->GetFontWeight(),
+                                                   fmt->GetFontStyle(), DWRITE_FONT_STRETCH_NORMAL, size, L"en-us",
+                                                   &scaled)) || !scaled) {
+        return fmt;
+    }
+    scaled->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    app.scaledCodeFormats[key] = scaled;
+    return scaled;
 }
 
 void flattenInline(App& app, const std::vector<ElementPtr>& elements,

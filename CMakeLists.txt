@@ -525,12 +525,14 @@ if(BUILD_TESTING)
     target_compile_definitions(inline_style_tests PRIVATE UNICODE _UNICODE)
     add_test(NAME inline_styles COMMAND inline_style_tests)
 
-    # Inline code on the text baseline, chips hugging the code (#262)
+    # Inline code on the text baseline, chips hugging the code (#262), at
+    # 7/8 of the text around it, headings included (fork #1)
     add_executable(inline_code_baseline_tests tests/inline_code_baseline_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(inline_code_baseline_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(inline_code_baseline_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(inline_code_baseline_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_INLINE_CODE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-baseline-262.md")
+        TINTA_INLINE_CODE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-baseline-262.md"
+        TINTA_HEADING_CODE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/heading-inline-code.md")
     add_test(NAME inline_code_baseline COMMAND inline_code_baseline_tests)
 
     # The default code face (Monaspace Argon) and its Consolas fallback

@@ -357,6 +357,8 @@ void updateTextFormats(App& app) {
     if (app.codeBoldFormat) { app.codeBoldFormat->Release(); app.codeBoldFormat = nullptr; }
     if (app.codeItalicFormat) { app.codeItalicFormat->Release(); app.codeItalicFormat = nullptr; }
     if (app.codeBoldItalicFormat) { app.codeBoldItalicFormat->Release(); app.codeBoldItalicFormat = nullptr; }
+    for (auto& entry : app.scaledCodeFormats) entry.second->Release();
+    app.scaledCodeFormats.clear();
     if (app.supSubFormat) { app.supSubFormat->Release(); app.supSubFormat = nullptr; }
     for (auto& fmt : app.headingFormats) {
         if (fmt) { fmt->Release(); fmt = nullptr; }

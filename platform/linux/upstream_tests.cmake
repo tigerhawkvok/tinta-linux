@@ -114,7 +114,8 @@ add_test(NAME config_paths COMMAND config_path_tests)
 
 tinta_upstream_test(inline_code_baseline_tests tests/inline_code_baseline_tests.cpp)
 target_compile_definitions(inline_code_baseline_tests PRIVATE
-    TINTA_INLINE_CODE_FIXTURE="${TINTA_FIXTURES}/inline-code-baseline-262.md")
+    TINTA_INLINE_CODE_FIXTURE="${TINTA_FIXTURES}/inline-code-baseline-262.md"
+    TINTA_HEADING_CODE_FIXTURE="${TINTA_FIXTURES}/heading-inline-code.md")
 add_test(NAME inline_code_baseline COMMAND inline_code_baseline_tests)
 
 # The default code face (Monaspace Argon) and its fallback

@@ -629,6 +629,14 @@ bool mathToPng(App& app, const std::string& tex, bool display,
 constexpr long long kEmuPerPixel = 9525;
 constexpr long long kMaxImageEmu = 6100000;  // fits A4 with 2cm margins
 
+// Word half-points are the viewer's px * 1.5 at 96 dpi: body 16, code 14,
+// headings 32/26/22/18/16/14
+constexpr int kHeadingHalfPoints[6] = {48, 39, 33, 27, 24, 21};
+constexpr int kCodeHalfPoints = 21;
+
+// Inline code at 7/8 of the text around it, as in the viewer (#1)
+int codeHalfPointsFor(int textHalfPoints) { return (textHalfPoints * 7 + 4) / 8; }
+
 struct RunProps {
     bool bold = false;
     bool italic = false;
@@ -640,6 +648,7 @@ struct RunProps {
     bool subScript = false;
     std::string color;  // hex override (links, wiki links)
     bool underline = false;
+    int codeHalfPoints = kCodeHalfPoints;
 };
 
 struct DocxCtx {
@@ -715,7 +724,10 @@ std::string runPropsXml(const DocxCtx& ctx, const RunProps& props) {
     if (props.code && !props.isLink && !ctx.inlineCodeHex.empty())
         xml += "<w:color w:val=\"" + ctx.inlineCodeHex + "\"/>";
     else if (!props.color.empty()) xml += "<w:color w:val=\"" + props.color + "\"/>";
-    if (props.code) xml += "<w:sz w:val=\"21\"/><w:szCs w:val=\"21\"/>";
+    if (props.code) {
+        const std::string size = std::to_string(props.codeHalfPoints);
+        xml += "<w:sz w:val=\"" + size + "\"/><w:szCs w:val=\"" + size + "\"/>";
+    }
     if (props.highlight && ctx.highlightBgHex.empty()) xml += "<w:highlight w:val=\"yellow\"/>";
     if (props.underline) xml += "<w:u w:val=\"single\"/>";
     if (props.highlight && !ctx.highlightBgHex.empty())
@@ -778,6 +790,7 @@ struct ParaProps {
     int indentTwips = 0;
     bool center = false;
     std::string extraRunProps;  // colored quote text etc.
+    int codeHalfPoints = kCodeHalfPoints;  // inline code, sized to the paragraph's text
 };
 
 std::string paraPropsXml(const ParaProps& props) {
@@ -1040,6 +1053,7 @@ void emitParagraph(DocxCtx& ctx, const ElementPtr& elem,
                    const ParaProps& props) {
     ctx.body += "<w:p>" + paraPropsXml(props);
     RunProps runProps;
+    runProps.codeHalfPoints = props.codeHalfPoints;
     if (!props.extraRunProps.empty()) {
         // Colored quote text rides on every run via the color override
         runProps.color = props.extraRunProps;
@@ -1277,6 +1291,7 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
             int level = std::max(1, std::min(6, elem->level));
             ParaProps heading = props;
             heading.styleId = "Heading" + std::to_string(level);
+            heading.codeHalfPoints = codeHalfPointsFor(kHeadingHalfPoints[level - 1]);
             emitParagraph(ctx, elem, heading);
             break;
         }
@@ -1511,9 +1526,7 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
 // --------------------------------------------------------------------------
 
 std::string stylesXml(const DocxCtx& ctx) {
-    // Viewer pixel sizes: body 16, code 14, headings 32/26/22/18/16/14.
-    // Word half-points are px * 1.5 at 96dpi.
-    const int headingSizes[6] = {48, 39, 33, 27, 24, 21};
+    const int* headingSizes = kHeadingHalfPoints;
     const std::string bodyRun = rFontsXml(ctx.bodyFont, ctx.bodyEastAsia) +
         "<w:color w:val=\"" + ctx.textHex + "\"/>"
         "<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>";

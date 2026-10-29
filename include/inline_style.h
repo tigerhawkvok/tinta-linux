@@ -42,8 +42,9 @@ struct StyledRun {
 // Body font face for a weight/style combination, falling back to base
 IDWriteTextFormat* emphasisFormat(App& app, IDWriteTextFormat* base, bool bold, bool italic);
 
-// Monospace face for an inline `code` span inside emphasis
-IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic);
+// Monospace face for an inline `code` span inside emphasis, sized to the
+// text `around` it (a heading, a script) when given
+IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic, IDWriteTextFormat* around = nullptr);
 
 // Appends one StyledRun per drawable leaf (Text, Code, Image, Ruby, breaks),
 // each carrying the merged style of every span it sits inside
