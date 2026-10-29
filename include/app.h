@@ -984,6 +984,12 @@ struct App {
     };
     std::vector<TableInfo> tableRects;
     int hoveredTable = -1;
+    // Each table row's extent in document Y, the header joined to the first
+    // body row: page breaks keep them whole
+    struct RowBand {
+        float top = 0, bottom = 0;
+    };
+    std::vector<RowBand> tableRowBands;
 
     // In-place table editing in the rendered preview (#148, edit mode).
     // Cells are identified by the table's source offset plus row/col so
@@ -1546,6 +1552,7 @@ struct App {
         linkRects.clear();
         codeBlocks.clear();
         tableRects.clear();
+        tableRowBands.clear();
         tableCellRects.clear();
         textRects.clear();
         lineBuckets.clear();

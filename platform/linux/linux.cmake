@@ -169,6 +169,16 @@ if(BUILD_TESTING)
     # The GTK window driven with real X input on a private Xvfb server
     # (tests/linux_render/gui_check.py): needs xvfb-run and a Python with Pillow
     set(TINTA_GUI_PYTHON "" CACHE FILEPATH "Python with Pillow for the GTK window check (empty: skip it)")
+    # Exported pages keep their ink inside the margins: a table split
+    # between rows must not run its rules into them (headless, no X server)
+    find_program(TINTA_PDFTOPPM pdftoppm)
+    if(TINTA_GUI_PYTHON AND TINTA_PDFTOPPM)
+        add_test(NAME linux_pdf_margins
+            COMMAND ${TINTA_GUI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_render/pdf_margin_check.py
+                $<TARGET_FILE:tinta> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/table-page-breaks.md
+                ${CMAKE_BINARY_DIR}/linux-render/pdf-margins)
+        set_tests_properties(linux_pdf_margins PROPERTIES TIMEOUT 120)
+    endif()
     find_program(TINTA_XVFB_RUN xvfb-run)
     if(TINTA_GUI_PYTHON AND TINTA_XVFB_RUN)
         add_test(NAME linux_gtk_window

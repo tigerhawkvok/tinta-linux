@@ -1,4 +1,5 @@
 #include "d2d_init.h"
+#include "print.h"
 #include "render.h"
 #include "selection.h"
 #include "utils.h"
@@ -209,6 +210,63 @@ void checkCellWords(App& app) {
     }
 }
 
+// Page breaks keep table rows whole and a header with the first body row,
+// for page heights that put the cut at every position. Rows are read from
+// the drawn grid (horizontal lines at the table's left edge), not from the
+// layout's row bands, so the check is independent of the fix.
+static void pageBreaksKeepRows(App& app) {
+    const auto fixture =
+        std::filesystem::path(TINTA_FRAGMENT_FIXTURE).parent_path().parent_path() / "table-page-breaks.md";
+    std::ifstream file(fixture);
+    check(file.good(), "page-break fixture opens");
+    std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    auto doc = app.parser.parse(source);
+    check(doc.success, "page-break fixture parses");
+    app.root = doc.root;
+    for (int width : {1050, 560}) {
+        app.width = width;
+        layoutDocument(app);
+        check(app.tableRects.size() == 4, "the page-break fixture lays out four tables");
+        struct Atom {
+            float top, bottom;
+        };
+        std::vector<Atom> atoms;  // each body row, and each header with the row after it
+        for (const auto& table : app.tableRects) {
+            std::vector<float> ys;
+            for (const auto& line : app.layoutLines) {
+                if (std::fabs(line.p1.y - line.p2.y) < 0.01f && std::fabs(line.p1.x - table.bounds.left) < 0.5f &&
+                    line.p1.y >= table.bounds.top - 0.5f && line.p1.y <= table.bounds.bottom + 0.5f)
+                    ys.push_back(line.p1.y);
+            }
+            std::sort(ys.begin(), ys.end());
+            for (size_t i = 1; i < ys.size(); ++i) atoms.push_back({ys[i - 1], ys[i]});
+            if (ys.size() >= 3) atoms.push_back({ys[0], ys[2]});
+        }
+        check(atoms.size() > 20, "the fixture's tables have their rows");
+        int breaks = 0, cuts = 0;
+        std::string first;
+        for (float pageH = 120.0f; pageH < 1400.0f; pageH += 3.7f) {
+            for (float cut : computePageBreaks(app, pageH)) {
+                ++breaks;
+                for (const Atom& atom : atoms) {
+                    // A row taller than 70% of a page is sliced on purpose
+                    if (atom.bottom - atom.top > pageH * 0.7f) continue;
+                    if (cut > atom.top + 0.5f && cut < atom.bottom - 0.5f) {
+                        if (!cuts++)
+                            first = "width " + std::to_string(width) + ", page " + std::to_string(pageH) + ": cut at " +
+                                    std::to_string(cut) + " inside " + std::to_string(atom.top) + ".." +
+                                    std::to_string(atom.bottom);
+                    }
+                }
+            }
+        }
+        check(breaks > 500, "page breaks were computed across the sweep");
+        check(cuts == 0, ("no page break cuts a table row or parts a header from its first row (" +
+                          std::to_string(cuts) + " cuts; first: " + first + ")")
+                             .c_str());
+    }
+}
+
 int runTableLayoutTests() {
     {
         auto state = std::make_unique<App>();
@@ -253,6 +311,7 @@ int runTableLayoutTests() {
         app.contentScale = 1.0f;
         updateTextFormats(app);
         checkCellWords(app);
+        pageBreaksKeepRows(app);
     }
     CoUninitialize();
     std::cout << "Wide table layout: " << failures << " failures\n";

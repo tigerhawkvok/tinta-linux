@@ -9,6 +9,10 @@
 // dedicated light print palette in the active theme's fonts.
 bool printDocument(App& app);
 
+// Page break positions (document Y) for pages pageContentH tall, cut
+// between text lines, images, shapes and table rows
+std::vector<float> computePageBreaks(const App& app, float pageContentH);
+
 // Print preview overlay: Ctrl+P opens it, the user flips through the
 // paginated pages, then confirms into the printer dialog or cancels.
 // Pages are previewed at the default printer's paper size (A4 fallback);

@@ -186,9 +186,12 @@ void leavePrintLayout(App& app, const SavedView& saved) {
     if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
+}  // namespace
+
 // Page break positions in document Y. Breaks avoid slicing text lines,
-// images, and diagram shapes by pulling the cut above any straddling atom;
-// an atom taller than most of a page is sliced rather than looping.
+// images, diagram shapes and table rows by pulling the cut above any
+// straddling atom; an atom taller than most of a page is sliced rather than
+// looping.
 std::vector<float> computePageBreaks(const App& app, float pageContentH) {
     std::vector<float> breaks;
     float docEnd = app.contentHeight;
@@ -205,6 +208,9 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
             for (const auto& line : app.lineBuckets) consider(line.top, line.bottom);
             for (const auto& bmp : app.layoutBitmaps) consider(bmp.destRect.top, bmp.destRect.bottom);
             for (const auto& shape : app.layoutShapes) consider(shape.rect.top, shape.rect.bottom);
+            // A row's padding lies outside its text lines: without this the
+            // cut could leave the row's empty top slice on the page above
+            for (const auto& row : app.tableRowBands) consider(row.top, row.bottom);
             // Shrink bands page-break as a unit: a scaled diagram split
             // across pages would render discontinuously
             for (const auto& band : app.printShrinkBands) consider(band.top, band.bottom);
@@ -226,6 +232,8 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
     return breaks;  // implicit final page runs to docEnd
 }
 
+namespace {
+
 // Replays the cached layout for the document Y range [yStart, yEnd) into
 // the given device context, translated so yStart lands at offsetY. A
 // print-path sibling of render()'s document pass — selection, search, and
@@ -239,6 +247,14 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
     };
     float dx = offsetX;
     float dy = offsetY - yStart;
+
+    // Clip to this page's slice: a block that runs on past the break (a
+    // table's column rules, a quote's bar) must not draw into the margin.
+    // The edge lets a rule lying on the break draw whole on both pages, so
+    // a table split between rows is closed above and opened below.
+    const float edge = 1.5f;
+    dc->PushAxisAlignedClip(D2D1::RectF(-1.0e5f, offsetY - edge, 1.0e5f, offsetY + (yEnd - yStart) + edge),
+                            D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Oversized blocks draw scaled about their band's top-left; the band
     // transform composes with whatever transform the caller set (the
@@ -274,7 +290,7 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
     for (const auto& line : app.layoutLines) {
         float top = std::min(line.p1.y, line.p2.y);
         float bottom = std::max(line.p1.y, line.p2.y);
-        if (!inRange(top, bottom)) continue;
+        if (bottom < yStart || top > yEnd) continue;  // a rule on the break: both pages
         bool banded = applyBand(top, bottom);
         brush->SetColor(line.color);
         dc->DrawLine(D2D1::Point2F(line.p1.x + dx, line.p1.y + dy),
@@ -428,6 +444,7 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
                            run.layout, brush);
         resetBand(banded);
     }
+    dc->PopAxisAlignedClip();
 }
 
 struct PageGeometry {

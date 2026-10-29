@@ -4057,6 +4057,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         float cellX = indent;
         bool isHeader = (r == 0);
         const auto& row = rows[r];
+        // Printing keeps a row on one page, and the header with the first
+        // body row, rather than leaving an empty slice of a row at a page foot
+        float rowBottom = y + rowHeights[r];
+        if (isHeader && rows.size() > 1) rowBottom += rowHeights[1];
+        app.tableRowBands.push_back({y, rowBottom});
 
         // Header row background
         if (isHeader) {
