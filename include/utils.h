@@ -24,6 +24,7 @@ std::wstring_view textViewForRect(const App& app, const App::TextRect& tr);
 bool isWordBoundary(wchar_t c);
 const App::TextRect* findTextRectAt(const App& app, int x, int y);
 
+std::wstring windowTitle(const App& app);
 void updateWindowTitle(App& app);
 // Ctrl+N: spawns a second Tinta window on an untitled quick note
 void launchQuickNoteWindow();

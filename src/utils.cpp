@@ -91,21 +91,24 @@ const App::TextRect* findTextRectAt(const App& app, int x, int y) {
 }
 
 
-void updateWindowTitle(App& app) {
-    std::wstring title = L"Tinta Mono";
+// Document first, as Windows titles read, so a taskbar thumbnail names the
+// file (#2): "README.md - Tinta Mono", "* README.md - Tinta Mono" with
+// unsaved edits
+std::wstring windowTitle(const App& app) {
+    std::wstring name;
     if (!app.currentFile.empty()) {
         std::wstring wpath = toWide(app.currentFile);
         size_t lastSep = wpath.find_last_of(L"\\/");
-        if (lastSep != std::wstring::npos)
-            title = L"Tinta Mono - " + wpath.substr(lastSep + 1);
-        else
-            title = L"Tinta Mono - " + wpath;
+        name = lastSep != std::wstring::npos ? wpath.substr(lastSep + 1) : wpath;
     } else if (app.editMode) {
-        // Quick note (Ctrl+N): no backing file until the first save
-        title = L"Tinta Mono - ";
-        title += tr(app, "title.untitled");
+        name = tr(app, "title.untitled");  // quick note (Ctrl+N): no file until the first save
     }
-    SetWindowTextW(app.hwnd, title.c_str());
+    if (name.empty()) return L"Tinta Mono";
+    return (app.editorDirty ? L"* " : L"") + name + L" - Tinta Mono";
+}
+
+void updateWindowTitle(App& app) {
+    SetWindowTextW(app.hwnd, windowTitle(app).c_str());
 }
 
 void launchQuickNoteWindow() {

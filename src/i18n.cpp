@@ -205,10 +205,6 @@ const Entry kEntries[] = {
     { "error.render_target_failed", L"Failed to create render target",             L"\u521B\u5EFA\u6E32\u67D3\u76EE\u6807\u5931\u8D25", L"\u30EC\u30F3\u30C0\u30FC\u30BF\u30FC\u30B2\u30C3\u30C8\u306E\u4F5C\u6210\u306B\u5931\u6557\u3057\u307E\u3057\u305F", L"\uB80C\uB354\uB9C1 \uD0C0\uAC9F \uC0DD\uC131 \uC2E4\uD328" },
 
     // ----- Window title -----
-    // Format with positional args: %1$s = filename (or full path), %2$s is unused
-    // for the non-dirty case. For the dirty case see title.dirty below.
-    { "title.plain",   L"Tinta Mono - %1$s",            L"Tinta Mono - %1$s",            L"Tinta Mono - %1$s", L"Tinta Mono - %1$s" },
-    { "title.dirty",   L"Tinta Mono - * %1$s",           L"Tinta Mono - * %1$s",          L"Tinta Mono - * %1$s", L"Tinta Mono - * %1$s" },
     { "title.no_file", L"Tinta Mono",               L"Tinta Mono",              L"Tinta Mono", L"Tinta Mono" },
     // Quick note (Ctrl+N) before its first save
     { "title.untitled", L"Untitled",                L"\u65E0\u6807\u9898",      L"\u7121\u984C\u540D", L"\uC81C\uBAA9 \uC5C6\uC74C" },

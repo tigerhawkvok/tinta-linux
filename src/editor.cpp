@@ -1396,13 +1396,7 @@ static void editorRefreshDocCounts(App& app, const ElementPtr& parsed) {
 static void scheduleReparse(App& app) {
     if (!app.editorDirty) {
         app.editorDirty = true;
-        // Update window title with dirty marker
-        std::wstring wpath = toWide(app.currentFile);
-        size_t lastSep = wpath.find_last_of(L"\\/");
-        std::wstring fname = (lastSep != std::wstring::npos) ? wpath.substr(lastSep + 1) : wpath;
-        if (fname.empty()) fname = tr(app, "title.untitled");  // quick note
-        std::wstring title = L"Tinta Mono - * " + fname;
-        SetWindowTextW(app.hwnd, title.c_str());
+        updateWindowTitle(app);  // the unsaved-edits marker
     }
     // No preview pane and no word count — nothing to keep in sync until
     // one of them is shown again
@@ -1667,7 +1661,7 @@ void enterQuickNoteMode(App& app) {
     app.currentFile.clear();
     app.startPageEmbeddedOpen = false;  // the note replaces any Learn doc
     enterEditModeWithContent(app, std::string());
-    updateWindowTitle(app);  // "Tinta - Untitled" until the first save
+    updateWindowTitle(app);  // "Untitled - Tinta Mono" until the first save
 }
 
 // Draft recovery: a crash leftover reopens as a dirty edit tab, pointed
