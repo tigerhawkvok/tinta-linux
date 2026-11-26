@@ -297,6 +297,149 @@ void htmlImages(App& app) {
           "Word export draws the badge at its HTML size");
 }
 
+// The baseline of a text run, in document coordinates
+float runBaselineY(const App::LayoutTextRun& run) {
+    DWRITE_LINE_METRICS metrics[4];
+    UINT32 count = 0;
+    run.layout->GetLineMetrics(metrics, 4, &count);
+    return run.pos.y + (count ? metrics[0].baseline : 0.0f);
+}
+
+// Images in the line (tests/fixtures/inline-images.md): a badge row stays a
+// row on one baseline, a heading's badge sits beside its words, a line
+// grows for a taller picture with its text on the picture's baseline, a
+// picture alone in a paragraph leaves no blank line under it, list markers
+// follow a grown first line, and text rects stay in the right line buckets.
+void inlineImages(App& app) {
+    const auto fixture = std::filesystem::path(TINTA_IMAGE_FIXTURE).parent_path() / "inline-images.md";
+    std::ifstream file(fixture, std::ios::binary);
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    check(!source.empty(), "the inline images fixture opens");
+    app.currentFile = std::filesystem::absolute(fixture).u8string();
+    app.root = app.parser.parse(source).root;
+    app.readingWidthPct = 100;
+    auto near = [](float a, float b, float tolerance = 1.0f) { return std::fabs(a - b) < tolerance; };
+    for (int theme : {0, 5}) {
+        applyTheme(app, theme);
+        for (int width : {1050, 560}) {
+            app.width = width;
+            app.height = 900;
+            for (float scale : {1.0f, 1.5f}) {
+                app.contentScale = scale;
+                updateTextFormats(app);
+                app.layoutDirty = true;
+                ensureLayoutComplete(app);
+                const std::string where = " (theme " + std::to_string(theme) + ", " + std::to_string(width) +
+                                          " px, x" + std::to_string(scale).substr(0, 3) + ")";
+                auto c = [&](bool ok, const std::string& what) { check(ok, (what + where).c_str()); };
+                // Pictures by their HTML height (all from the 400x120 badge)
+                auto byHeight = [&](float h) {
+                    std::vector<D2D1_RECT_F> found;
+                    for (const auto& bmp : app.layoutBitmaps)
+                        if (near(bmp.destRect.bottom - bmp.destRect.top, h * scale, 0.6f)) found.push_back(bmp.destRect);
+                    std::sort(found.begin(), found.end(),
+                              [](const D2D1_RECT_F& a, const D2D1_RECT_F& b) { return a.left < b.left; });
+                    return found;
+                };
+                auto runStarting = [&](const wchar_t* text) -> const App::LayoutTextRun* {
+                    for (const auto& run : app.layoutTextRuns) {
+                        if (run.layout && run.docLength &&
+                            app.docText.compare(run.docStart, wcslen(text), text) == 0)
+                            return &run;
+                    }
+                    return nullptr;
+                };
+                c(app.layoutBitmaps.size() == 13,
+                  "thirteen pictures draw (" + std::to_string(app.layoutBitmaps.size()) + ")");
+
+                const auto row = byHeight(20);
+                c(row.size() == 3 && near(row[0].bottom, row[1].bottom) && near(row[1].bottom, row[2].bottom) &&
+                      row[0].right <= row[1].left + 0.5f && row[1].right <= row[2].left + 0.5f,
+                  "a badge row is one row on one baseline");
+                int rowLinks = 0;
+                for (const auto& link : app.linkRects) {
+                    for (const auto& badge : row)
+                        rowLinks += near(link.bounds.left, badge.left) && near(link.bounds.top, badge.top) &&
+                                    (link.url == "https://example.com/build" || link.url == "https://example.com/docs");
+                }
+                c(rowLinks == 2, "the row's linked badges are their links");
+
+                for (auto [h, words] : {std::pair<float, const wchar_t*>{18, L"Installation"}, {17, L"Usage"}}) {
+                    const auto badge = byHeight(h);
+                    const auto* heading = runStarting(words);
+                    c(badge.size() == 1 && heading && badge[0].left >= heading->bounds.left + 20 &&
+                          near(badge[0].bottom, runBaselineY(*heading)),
+                      std::string("a heading's badge sits beside its words, on their baseline: ") +
+                          (h == 18 ? "Markdown" : "HTML") + " heading");
+                }
+
+                const auto tall = byHeight(80);
+                const auto* before = runStarting(L"Text before a tall picture");
+                // Beside the words when it fits (the line grows to it, the words
+                // on its baseline); else wrapped to the next line, like a word
+                const bool besideWords = tall.size() == 1 && before && tall[0].left >= before->bounds.right - 1;
+                c(tall.size() == 1 && before &&
+                      (besideWords ? near(tall[0].bottom, runBaselineY(*before))
+                                   : near(tall[0].left, before->bounds.left) && tall[0].top >= before->bounds.bottom - 0.5f),
+                  besideWords ? "a tall picture grows its line; the words keep its baseline"
+                              : "a tall picture too wide for the rest of the line wraps like a word");
+                const auto* usage = runStarting(L"Usage");
+                c(tall.size() == 1 && usage && tall[0].top >= usage->bounds.bottom,
+                  "the grown line starts below the block above");
+                const auto* after = runStarting(L"and the words after it");
+                c(after && tall.size() == 1 && (after->bounds.left >= tall[0].right - 1 || after->bounds.top >= tall[0].bottom),
+                  "the words after the picture follow it");
+
+                const auto alone = byHeight(36);
+                const auto* next = runStarting(L"The paragraph after a picture");
+                c(alone.size() == 1 && next && next->bounds.top - alone[0].bottom < 30 * scale &&
+                      next->bounds.top > alone[0].bottom,
+                  "a picture alone in a paragraph leaves a paragraph's gap, not a blank line, under it");
+
+                for (auto [h, words] : {std::pair<float, const wchar_t*>{22, L"A list item with"},
+                                        {24, L"An ordered item with"}}) {
+                    const auto* item = runStarting(words);
+                    const App::LayoutTextRun* marker = nullptr;
+                    for (const auto& run : app.layoutTextRuns) {
+                        if (item && run.layout && !run.docLength && run.bounds.right <= item->bounds.left &&
+                            run.bounds.bottom > item->bounds.top && run.bounds.top < item->bounds.bottom)
+                            marker = &run;
+                    }
+                    c(byHeight(h).size() == 1 && item && marker && near(runBaselineY(*marker), runBaselineY(*item)),
+                      std::string("a list marker follows its grown first line: ") + (h == 22 ? "bullet" : "number"));
+                }
+                const auto* task = runStarting(L"A task with");
+                c(task && app.taskRects.size() == 1 &&
+                      near(app.taskRects[0].rect.top, task->bounds.top, 1.5f),
+                  "a task's checkbox follows its grown first line");
+
+                const auto cell = byHeight(19);
+                c(cell.size() == 2 && near(cell[0].bottom, cell[1].bottom) && app.tableRects.size() == 1 &&
+                      cell[1].bottom <= app.tableRects[0].bounds.bottom,
+                  "two badges in a table cell share its line inside the table");
+                c(byHeight(23).size() == 1 && runStarting(L"A quote with"), "a quote keeps its badge");
+                c(app.docText.find(L"A missing picture [image: gone] keeps its words in the line.") != std::wstring::npos,
+                  "a missing picture's alt text stays in its sentence");
+
+                // Every text rect sits in exactly one line bucket at its top
+                bool buckets = true;
+                for (size_t i = 0; i < app.textRects.size(); ++i) {
+                    int homes = 0;
+                    for (const auto& bucket : app.lineBuckets) {
+                        for (size_t idx : bucket.textRectIndices)
+                            if (idx == i) {
+                                ++homes;
+                                buckets = buckets && near(bucket.top, app.textRects[i].rect.top, 5.01f);
+                            }
+                    }
+                    buckets = buckets && homes == 1;
+                }
+                c(buckets, "every text rect keeps one line bucket at its own top");
+            }
+        }
+    }
+}
+
 // Hover, press and release through the real handlers, as a separate click
 // rather than the second half of a double-click
 void click(App& app, float x, float y) {
@@ -376,6 +519,7 @@ int runImageTests(const char* remoteBase) {
     mixedLayout(app);
     lightboxDismissal(app);
     htmlImages(app);
+    inlineImages(app);
     if (remoteBase) remoteImages(app, remoteBase);
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;

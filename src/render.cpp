@@ -91,10 +91,9 @@ static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextForm
     return info;
 }
 
-static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size_t docLength,
-                        size_t runIndex = (size_t)-1) {
-    size_t idx = app.textRects.size();
-    app.textRects.push_back({rect, docStart, docLength, runIndex});
+// Files text rect idx into the line bucket at its top
+static void bucketTextRect(App& app, size_t idx) {
+    const D2D1_RECT_F rect = app.textRects[idx].rect;
 
     // Table cells are laid out column by column. A wrapped cell can append a
     // later line before the next column appends its first line, so buckets
@@ -132,6 +131,12 @@ static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size
             return existing.top < top;
         });
     app.lineBuckets.insert(insertAt, std::move(bucket));
+}
+
+static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size_t docLength,
+                        size_t runIndex = (size_t)-1) {
+    app.textRects.push_back({rect, docStart, docLength, runIndex});
+    bucketTextRect(app, app.textRects.size() - 1);
 }
 
 static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
@@ -283,8 +288,85 @@ static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
     return measureText(app, L" ", format);
 }
 
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src);
+static void imageBoxSize(App& app, const Element& image, const App::ImageEntry& entry, float maxWidth,
+                         float& w, float& h);
+
+// Moves what a paragraph has laid out on its current line (everything
+// since `from` reaching below lineTop) down by dy: an image taller than the
+// text grew the line, and the text keeps to the new baseline. Text rects
+// move to the bucket of their new top.
+static void shiftLineDown(App& app, const LayoutSnapshot& from, float lineTop, float dy) {
+    auto below = [&](float bottom) { return bottom > lineTop + 0.5f; };
+    for (size_t i = from.textRuns; i < app.layoutTextRuns.size(); i++) {
+        auto& r = app.layoutTextRuns[i];
+        if (!below(r.bounds.bottom)) continue;
+        r.pos.y += dy;
+        r.bounds.top += dy;
+        r.bounds.bottom += dy;
+    }
+    for (size_t i = from.rects; i < app.layoutRects.size(); i++) {
+        auto& r = app.layoutRects[i].rect;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    for (size_t i = from.lines; i < app.layoutLines.size(); i++) {
+        auto& l = app.layoutLines[i];
+        if (below(std::max(l.p1.y, l.p2.y))) l.p1.y += dy, l.p2.y += dy;
+    }
+    for (size_t i = from.shapes; i < app.layoutShapes.size(); i++) {
+        auto& r = app.layoutShapes[i].rect;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    for (size_t i = from.connectors; i < app.layoutConnectors.size(); i++) {
+        auto& c = app.layoutConnectors[i];
+        if (!below(c.bounds.bottom)) continue;
+        c.bounds.top += dy;
+        c.bounds.bottom += dy;
+        for (auto& point : c.points) point.y += dy;
+    }
+    for (size_t i = from.bitmaps; i < app.layoutBitmaps.size(); i++) {
+        auto& r = app.layoutBitmaps[i].destRect;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    for (size_t i = from.links; i < app.linkRects.size(); i++) {
+        auto& r = app.linkRects[i].bounds;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    std::vector<size_t> moved;
+    for (size_t i = from.textRects; i < app.textRects.size(); i++) {
+        auto& r = app.textRects[i].rect;
+        if (!below(r.bottom)) continue;
+        r.top += dy;
+        r.bottom += dy;
+        moved.push_back(i);
+    }
+    if (moved.empty()) return;
+    // Out of their old buckets (dropping any left empty), into new ones
+    for (auto& bucket : app.lineBuckets) {
+        auto& indices = bucket.textRectIndices;
+        indices.erase(std::remove_if(indices.begin(), indices.end(),
+                                     [&](size_t idx) {
+                                         return std::binary_search(moved.begin(), moved.end(), idx);
+                                     }),
+                      indices.end());
+        if (indices.empty()) continue;
+        bucket.bottom = std::numeric_limits<float>::lowest();
+        bucket.minX = std::numeric_limits<float>::max();
+        bucket.maxX = std::numeric_limits<float>::lowest();
+        for (size_t idx : indices) {
+            const auto& r = app.textRects[idx].rect;
+            bucket.bottom = std::max(bucket.bottom, r.bottom);
+            bucket.minX = std::min(bucket.minX, r.left);
+            bucket.maxX = std::max(bucket.maxX, r.right);
+        }
+    }
+    app.lineBuckets.erase(std::remove_if(app.lineBuckets.begin(), app.lineBuckets.end(),
+                                         [](const App::LineBucket& b) { return b.textRectIndices.empty(); }),
+                          app.lineBuckets.end());
+    for (size_t idx : moved) bucketTextRect(app, idx);
+}
+
 static void layoutElement(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
-static D2D1_RECT_F layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 
 // --- UAX#14 line-break analysis ---
 //
@@ -490,6 +572,11 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     float x = startX;
     float lineHeight = customLineHeight > 0 ? customLineHeight : baseFormat->GetFontSize() * 1.7f;
     const float normalLineHeight = lineHeight;
+    // A line an image grew: its y after growing, and by how much
+    const LayoutSnapshot paragraphStart = takeSnapshot(app);
+    const float paragraphTop = y;
+    float grownLineY = -1.0f;
+    float lineGrowth = 0.0f;
     float mathTextOffset = 0;
     float maxX = startX + maxWidth;
     float spaceWidth = getSpaceWidth(app, baseFormat);
@@ -777,15 +864,67 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 continue;
 
             case ElementType::Image: {
-                // Break out of inline flow, render image as block
-                if (x > startX) {
-                    y += lineHeight;  // end current line
-                    x = startX;
+                // An image sits in the line as in a browser: its bottom on
+                // the baseline, wrapping like a word, the line growing when
+                // the image is taller than the text above the baseline. A
+                // badge row stays a row, a badge stays beside its heading.
+                // Inside a link it opens the link (no underline, as on GitHub).
+                auto& entry = getOrLoadImage(app, elem->url);
+                const float baseline = mathTextOffset + baselineOf(textFormat);
+                if (entry.failed || !entry.bitmap) {
+                    // Missing: its alt text, faded italics, as one word
+                    std::wstring alt;
+                    std::function<void(const ElementPtr&)> gather = [&](const ElementPtr& e) {
+                        if (e->type == ElementType::Text) alt += toWide(e->text);
+                        for (const auto& c : e->children) gather(c);
+                    };
+                    for (const auto& c : elem->children) gather(c);
+                    const std::wstring label = alt.empty() ? L"[image]" : L"[image: " + alt + L"]";
+                    LayoutInfo info = createLayout(app, label, app.italicFormat, lineHeight, app.bodyTypography);
+                    const float w = info.width;
+                    if (x + w > maxX && x > startX) {
+                        x = startX;
+                        y += lineHeight;
+                    }
+                    D2D1_COLOR_F faded = app.theme.text;
+                    faded.a = 0.6f;
+                    const D2D1_POINT_2F pos =
+                        D2D1::Point2F(x, y + baseline - runBaseline(info.layout, app.italicFormat));
+                    const D2D1_RECT_F bounds = D2D1::RectF(x, y, x + w, y + lineHeight);
+                    addTextRun(app, std::move(info), pos, bounds, faded, app.docText.size(), label.length(), false);
+                    app.docText += label;
+                    if (isLink && !linkUrl.empty()) app.linkRects.push_back({bounds, linkUrl});
+                    x += w;
+                    continue;
                 }
-                const D2D1_RECT_F drawn = layoutImage(app, elem, y, startX, maxWidth);
-                // An image inside a link opens it, as a badge does; no
-                // underline, as on GitHub
-                if (isLink && !linkUrl.empty() && drawn.right > drawn.left) app.linkRects.push_back({drawn, linkUrl});
+                float w = 0, h = 0;
+                imageBoxSize(app, *elem, entry, maxWidth, w, h);
+                if (x + w > maxX && x > startX) {
+                    x = startX;
+                    y += lineHeight;
+                }
+                if (grownLineY != y) lineGrowth = 0.0f;  // a line no image has grown yet
+                if (h - baseline > lineGrowth) {
+                    const float dy = h - baseline - lineGrowth;
+                    if (y - lineGrowth == paragraphTop) {
+                        // The first line: a list marker beside it follows
+                        auto known = std::find_if(app.grownFirstLines.begin(), app.grownFirstLines.end(),
+                                                  [&](const auto& g) { return g.first == paragraphTop; });
+                        if (known == app.grownFirstLines.end()) app.grownFirstLines.push_back({paragraphTop, 0.0f});
+                        known = std::find_if(app.grownFirstLines.begin(), app.grownFirstLines.end(),
+                                             [&](const auto& g) { return g.first == paragraphTop; });
+                        known->second = h - baseline;
+                    }
+                    shiftLineDown(app, paragraphStart, y, dy);
+                    if (underlineEndX >= 0.0f && underlineLineY == y) underlineLineY += dy;
+                    y += dy;
+                    lineGrowth = h - baseline;
+                }
+                grownLineY = y;
+                const D2D1_RECT_F rect = D2D1::RectF(x, y + baseline - h, x + w, y + baseline);
+                app.layoutBitmaps.push_back({entry.bitmap, rect});
+                if (isLink && !linkUrl.empty()) app.linkRects.push_back({rect, linkUrl});
+                x += w;
                 continue;
             }
 
@@ -2821,6 +2960,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         if (child->type != ElementType::ListItem) continue;
         if (trailingMargin >= 0.0f) y += std::max(0.0f, itemGap - trailingMargin);
 
+        const LayoutSnapshot markerStart = takeSnapshot(app);
         if (child->isTask) {
             // Task item: a clickable checkbox replaces the bullet
             float box = 15.0f * scale;
@@ -2901,6 +3041,29 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         } else {
             layoutInlineContent(app, child->children, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
+        }
+
+        // An image that grew the item's first line moved its text down; the
+        // bullet, number or checkbox follows it to the same baseline
+        for (const auto& [top, growth] : app.grownFirstLines) {
+            if (top != itemStartY || growth <= 0.0f) continue;
+            for (size_t i = markerStart.textRuns; i < itemStart.textRuns; i++) {
+                app.layoutTextRuns[i].pos.y += growth;
+                app.layoutTextRuns[i].bounds.top += growth;
+                app.layoutTextRuns[i].bounds.bottom += growth;
+            }
+            for (size_t i = markerStart.rects; i < itemStart.rects; i++) {
+                app.layoutRects[i].rect.top += growth;
+                app.layoutRects[i].rect.bottom += growth;
+            }
+            for (size_t i = markerStart.lines; i < itemStart.lines; i++) {
+                app.layoutLines[i].p1.y += growth;
+                app.layoutLines[i].p2.y += growth;
+            }
+            for (size_t i = markerStart.tasks; i < itemStart.tasks; i++) {
+                app.taskRects[i].rect.top += growth;
+                app.taskRects[i].rect.bottom += growth;
+            }
         }
 
         app.docText += L"\n\n";
@@ -3767,70 +3930,28 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     return app.imageCache[src];
 }
 
-// Lays an image out as a block at y and returns the rect it drew: the
-// picture, or its alt text when the picture is missing
-static D2D1_RECT_F layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
-    auto& entry = getOrLoadImage(app, elem->url);
-
-    if (entry.failed || !entry.bitmap) {
-        // Render alt text as placeholder
-        std::wstring altText = L"[image";
-        std::wstring alt;
-        std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
-            if (!e) return;
-            if (e->type == ElementType::Text) alt += toWide(e->text);
-            else for (const auto& c : e->children) extract(c);
-        };
-        for (const auto& c : elem->children) extract(c);
-        if (!alt.empty()) {
-            altText += L": " + alt;
-        }
-        altText += L"]";
-
-        float lineHeight = app.italicFormat->GetFontSize() * 1.7f;
-        size_t docStart = app.docText.size();
-        LayoutInfo info = createLayout(app, altText, app.italicFormat, lineHeight, app.bodyTypography);
-
-        D2D1_COLOR_F color = app.theme.text;
-        color.a = 0.6f;
-        D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
-        D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + info.width, y + lineHeight);
-        addTextRun(app, std::move(info), pos, bounds, color, docStart, altText.length(), false);
-        app.docText += altText;
-        y += lineHeight;
-        return bounds;
+// The size a loaded image draws at: an <img>'s width and height in CSS px,
+// which scale with the text, or else the picture's own pixels; then fitted
+// to the column and to 600 px (scaled) of height
+static void imageBoxSize(App& app, const Element& image, const App::ImageEntry& entry, float maxWidth,
+                         float& w, float& h) {
+    const float scale = app.contentScale * app.zoomFactor;
+    w = (float)entry.width;
+    h = (float)entry.height;
+    if (image.imageWidth > 0 || image.imageHeight > 0) {
+        imageDisplaySize(image, (float)entry.width, (float)entry.height, w, h);
+        w *= scale;
+        h *= scale;
     }
-
-    float scale = app.contentScale * app.zoomFactor;
-    float imgW = (float)entry.width;
-    float imgH = (float)entry.height;
-
-    // An <img>'s width and height are CSS px, which scale with the text;
-    // otherwise the picture's own pixels
-    float displayW = imgW, displayH = imgH;
-    if (elem->imageWidth > 0 || elem->imageHeight > 0) {
-        imageDisplaySize(*elem, imgW, imgH, displayW, displayH);
-        displayW *= scale;
-        displayH *= scale;
+    if (w > maxWidth) {
+        h *= maxWidth / w;
+        w = maxWidth;
     }
-    // Fit within maxWidth
-    if (displayW > maxWidth) {
-        displayH *= maxWidth / displayW;
-        displayW = maxWidth;
+    const float maxH = 600.0f * scale;
+    if (h > maxH) {
+        w *= maxH / h;
+        h = maxH;
     }
-
-    // Cap max height
-    float maxH = 600.0f * scale;
-    if (displayH > maxH) {
-        displayW *= maxH / displayH;
-        displayH = maxH;
-    }
-
-    const D2D1_RECT_F rect = D2D1::RectF(indent, y, indent + displayW, y + displayH);
-    app.layoutBitmaps.push_back({entry.bitmap, rect});
-
-    y += displayH + 12 * scale;
-    return rect;
 }
 
 static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {

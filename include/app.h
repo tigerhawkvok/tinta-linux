@@ -984,6 +984,10 @@ struct App {
     };
     std::vector<TableInfo> tableRects;
     int hoveredTable = -1;
+    // Paragraphs whose first line an inline image grew: (the y the
+    // paragraph started at, the growth), so a list marker beside one moves
+    // down to the new baseline with its text
+    std::vector<std::pair<float, float>> grownFirstLines;
     // Each table row's extent in document Y, the header joined to the first
     // body row: page breaks keep them whole
     struct RowBand {
@@ -1553,6 +1557,7 @@ struct App {
         codeBlocks.clear();
         tableRects.clear();
         tableRowBands.clear();
+        grownFirstLines.clear();
         tableCellRects.clear();
         textRects.clear();
         lineBuckets.clear();
