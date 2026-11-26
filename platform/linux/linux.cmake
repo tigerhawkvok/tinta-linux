@@ -351,6 +351,8 @@ if(BUILD_TESTING)
     )
     target_include_directories(document_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(document_tests PRIVATE md4c tinta_compat)
+    target_compile_definitions(document_tests PRIVATE
+        TINTA_HTML_IMAGES_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-images.md")
     add_test(NAME document_types COMMAND document_tests)
 
     add_executable(wordcount_tests

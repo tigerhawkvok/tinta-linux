@@ -954,7 +954,9 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
                     imageDimensions(data, width, height)) {
                     int rel = addImageRel(ctx, extension, data);
                     long long cx, cy;
-                    fitEmu((float)width, (float)height, cx, cy);
+                    float w, h;  // an <img>'s width and height, as the viewer draws it
+                    imageDisplaySize(*elem, (float)width, (float)height, w, h);
+                    fitEmu(w, h, cx, cy);
                     out += "<w:r>" + drawingXml(ctx, rel, cx, cy) + "</w:r>";
                     break;
                 }
@@ -978,7 +980,9 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
                     imageDimensions(data, width, height)) {
                     int rel = addImageRel(ctx, extension, data);
                     long long cx, cy;
-                    fitEmu((float)width, (float)height, cx, cy);
+                    float w, h;  // an <img>'s width and height, as the viewer draws it
+                    imageDisplaySize(*elem, (float)width, (float)height, w, h);
+                    fitEmu(w, h, cx, cy);
                     out += "<w:r>" + drawingXml(ctx, rel, cx, cy) + "</w:r>";
                     break;
                 }

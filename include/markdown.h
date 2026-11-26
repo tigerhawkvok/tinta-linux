@@ -72,6 +72,8 @@ struct Element {
     std::vector<fm::Property> properties; // top-level YAML fields
     std::string url;          // for links/images
     std::string title;        // for links/images
+    // An HTML <img>'s width and height attributes, in CSS px (0: not given)
+    float imageWidth = 0, imageHeight = 0;
     int level = 0;            // for headings (1-6)
     bool ordered = false;     // for lists
     int start = 1;            // for ordered lists
@@ -104,6 +106,24 @@ struct Element {
 
     Element(ElementType t) : type(t) {}
 };
+
+// The size an image is drawn at, in CSS px: an <img>'s width and height,
+// the missing one from the picture's proportions, or else its natural size.
+// The viewer and the Word export both use it, so the two agree.
+inline void imageDisplaySize(const Element& image, float naturalW, float naturalH, float& w, float& h) {
+    w = naturalW;
+    h = naturalH;
+    if (image.imageWidth > 0 && image.imageHeight > 0) {
+        w = image.imageWidth;
+        h = image.imageHeight;
+    } else if (image.imageWidth > 0 && naturalW > 0) {
+        w = image.imageWidth;
+        h = naturalH * image.imageWidth / naturalW;
+    } else if (image.imageHeight > 0 && naturalH > 0) {
+        h = image.imageHeight;
+        w = naturalW * image.imageHeight / naturalH;
+    }
+}
 
 // Parse result
 struct ParseResult {

@@ -1,4 +1,5 @@
 #include "d2d_init.h"
+#include "export.h"
 #include "image_loader.h"
 #include "input.h"
 #include "overlays.h"
@@ -196,6 +197,106 @@ void mixedLayout(App& app) {
     drawImages(app);
 }
 
+// Images written in HTML (tests/fixtures/html-images.md): an <img> draws at
+// its width and height in CSS px, which scale with the text, and a badge
+// inside a link is that link under the pointer (links win over the
+// lightbox on click). Hover only: a click would open a browser.
+void htmlImages(App& app) {
+    const auto fixture = std::filesystem::path(TINTA_IMAGE_FIXTURE).parent_path() / "html-images.md";
+    std::ifstream file(fixture, std::ios::binary);
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    check(!source.empty(), "the HTML images fixture opens");
+    app.currentFile = std::filesystem::absolute(fixture).u8string();
+    app.root = app.parser.parse(source).root;
+    app.readingWidthPct = 100;
+    const std::string badgeUrl =
+        "https://example.com/redirect?r=app://add/%7B%22id%22%3A%22org.example.app%22%2C%22name%22%3A%22Example%22%7D";
+    auto near = [](float a, float b) { return std::fabs(a - b) < 0.6f; };
+    for (int theme : {0, 5}) {
+        applyTheme(app, theme);
+        for (int width : {1050, 560}) {
+            app.width = width;
+            app.height = 900;
+            for (float scale : {1.0f, 1.5f}) {
+                app.contentScale = scale;
+                updateTextFormats(app);
+                app.layoutDirty = true;
+                ensureLayoutComplete(app);
+                // Six images draw; the seventh is missing and shows its alt text
+                check(app.layoutBitmaps.size() == 6, "every HTML and Markdown image that exists draws");
+                check(app.docText.find(L"[image: the project's badge]") != std::wstring::npos,
+                      "a missing <img> shows its alt text");
+                check(app.docText.find(L"<img") == std::wstring::npos &&
+                          app.docText.find(L"<a href") == std::wstring::npos,
+                      "no raw <img> or <a href> reaches the page");
+                // In document order, from the 400x120 badge.png: width and
+                // height; height alone; natural (Markdown); width alone in
+                // the HTML block, the list item and the table cell
+                const float expected[6][2] = {{200 * scale, 60 * scale}, {80 * scale, 24 * scale}, {400, 120},
+                                              {120 * scale, 36 * scale}, {100 * scale, 30 * scale},
+                                              {80 * scale, 24 * scale}};
+                std::vector<const App::LayoutBitmap*> ordered;
+                for (const auto& bmp : app.layoutBitmaps) ordered.push_back(&bmp);
+                std::sort(ordered.begin(), ordered.end(), [](const App::LayoutBitmap* a, const App::LayoutBitmap* b) {
+                    return a->destRect.top < b->destRect.top;
+                });
+                bool sizes = ordered.size() == 6;
+                std::string drawn;
+                for (size_t i = 0; i < ordered.size(); ++i) {
+                    const float w = ordered[i]->destRect.right - ordered[i]->destRect.left;
+                    const float h = ordered[i]->destRect.bottom - ordered[i]->destRect.top;
+                    drawn += std::to_string((int)w) + "x" + std::to_string((int)h) + " ";
+                    if (i < 6) sizes = sizes && near(w, expected[i][0]) && near(h, expected[i][1]);
+                }
+                check(sizes, ("every image takes its HTML size, or its own without one (drew " + drawn + ")").c_str());
+                const App::LinkRect* badge = nullptr;
+                const App::LinkRect* markdownBadge = nullptr;
+                for (const auto& link : app.linkRects) {
+                    if (link.url == badgeUrl) badge = &link;
+                    if (link.url == "https://example.com/markdown-badge") markdownBadge = &link;
+                }
+                check(badge && near(badge->bounds.right - badge->bounds.left, 200 * scale) &&
+                          near(badge->bounds.bottom - badge->bounds.top, 60 * scale),
+                      "the HTML badge is a link the size of the badge");
+                check(markdownBadge && markdownBadge->bounds.bottom - markdownBadge->bounds.top > 100,
+                      "a Markdown badge inside a link is a link too");
+                if (!badge) continue;
+                // The pointer over the badge finds its link, not just a picture
+                const D2D1_RECT_F r = badge->bounds;
+                app.scrollX = app.targetScrollX = 0.0f;
+                app.scrollY = app.targetScrollY = std::max(0.0f, r.top - 100.0f);
+                const float x = documentViewportX(app) + (r.left + r.right) * 0.5f;
+                const float y = (r.top + r.bottom) * 0.5f - app.scrollY;
+                handleMouseMove(app, app.hwnd, MAKELPARAM(static_cast<int>(x), static_cast<int>(y)));
+                check(app.hoveredLink == badgeUrl, "hovering the badge points at its link");
+            }
+        }
+    }
+    app.scrollY = app.targetScrollY = 0.0f;
+
+    // The exports keep the badge's link and size: HTML writes <a><img> with
+    // its width and height, Word draws it 200x60 px (9525 EMU a pixel)
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    app.layoutDirty = true;
+    ensureLayoutComplete(app);
+    const std::filesystem::path out = std::filesystem::current_path() / "html-images-export";
+    std::filesystem::create_directories(out);
+    check(exportHtmlFile(app, (out / "html-images.html").wstring()), "HTML export succeeds");
+    std::ifstream htmlFile(out / "html-images.html", std::ios::binary);
+    const std::string html((std::istreambuf_iterator<char>(htmlFile)), {});
+    const size_t link = html.find("<a href=\"" + badgeUrl + "\"><img src=\"data:image/png;base64,");
+    check(link != std::string::npos &&
+              html.find("alt=\"Get it on Example\" width=\"200\" height=\"60\"/></a>", link) != std::string::npos,
+          "HTML export writes the badge as a linked image with its size");
+    check(html.find("&lt;img") == std::string::npos, "HTML export writes no escaped raw <img>");
+    check(exportDocxFile(app, (out / "html-images.docx").wstring()), "Word export succeeds");
+    std::ifstream docxFile(out / "html-images.docx", std::ios::binary);
+    const std::string docx((std::istreambuf_iterator<char>(docxFile)), {});
+    check(docx.find("<wp:extent cx=\"1905000\" cy=\"571500\"/>") != std::string::npos,
+          "Word export draws the badge at its HTML size");
+}
+
 // Hover, press and release through the real handlers, as a separate click
 // rather than the second half of a double-click
 void click(App& app, float x, float y) {
@@ -274,6 +375,7 @@ int runImageTests(const char* remoteBase) {
     ownership(app);
     mixedLayout(app);
     lightboxDismissal(app);
+    htmlImages(app);
     if (remoteBase) remoteImages(app, remoteBase);
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;

@@ -141,9 +141,10 @@ void parserTests(App& app) {
            "HtmlBlock[Paragraph[Anchor['Title'] ' next']]");
     expect(app, "<p>word <ruby>base<rt>top</rt></ruby> next</p>\n",
            "HtmlBlock[Paragraph['word ' Ruby['base' RubyText['top']] ' next']]");
-    // A linked logo or badge in an HTML heading adds no space to its title
+    // A linked logo or badge in an HTML heading adds no space to its title;
+    // the image itself draws (it was dropped before HTML images)
     expect(app, "<h1><a href=\"x\"><img src=\"logo.png\"></a> MyProject</h1>\n",
-           "HtmlBlock[Heading[Link 'MyProject']]");
+           "HtmlBlock[Heading[Link[Image] 'MyProject']]");
     {
         auto doc = app.parser.parse("<h2>Installation <a href=\"ci\"><img src=\"b.svg\"></a></h2>\n"
                                     "<h1><a href=\"x\"><img src=\"l.png\"></a> MyProject</h1>\n");
@@ -159,7 +160,7 @@ void parserTests(App& app) {
     }
     // A block ends without the space kept before an inline tag
     expect(app, "<h2><b>Title </b></h2>\n<h2>Installation <a href=\"ci\"><img src=\"b.svg\"></a></h2>\n",
-           "HtmlBlock[Heading[Strong['Title']] Heading['Installation' Link]]");
+           "HtmlBlock[Heading[Strong['Title']] Heading['Installation' Link[Image]]]");
     expect(app, "<h2>Install <a id=\"install\"></a>\n", "HtmlBlock[Heading['Install' Anchor]]");
     // An escaped footnote bracket inside raw HTML stays literal
     {

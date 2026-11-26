@@ -2,6 +2,7 @@
 #include "document.h"
 
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -51,6 +52,110 @@ int countBoxes(const qmd::ElementPtr& e) {
     int n = 0;
     for (const auto& c : e->children) n += (c->type == qmd::ElementType::BlockQuote && c->alertKind != 0) + countBoxes(c);
     return n;
+}
+
+// Every element of a type, depth first
+void collect(const qmd::ElementPtr& e, qmd::ElementType type, std::vector<const qmd::Element*>& out) {
+    if (!e) return;
+    if (e->type == type) out.push_back(e.get());
+    for (const auto& c : e->children) collect(c, type, out);
+}
+
+const qmd::Element* first(const qmd::ElementPtr& e, qmd::ElementType type) {
+    std::vector<const qmd::Element*> found;
+    collect(e, type, found);
+    return found.empty() ? nullptr : found[0];
+}
+
+std::string plainOf(const qmd::Element* e) {
+    std::string out = e->text;
+    for (const auto& c : e->children) out += plainOf(c.get());
+    return out;
+}
+
+// Images and links written in HTML among Markdown: the badge READMEs place
+// as <a href><img></a> on its own line drew as its raw tags
+void htmlImageTests(qmd::MarkdownParser& parser) {
+    using qmd::ElementType;
+    auto parse = [&](const std::string& source) { return parser.parse(source).root; };
+    {
+        auto root = parse(
+            "Before.\n\n"
+            "<a href=\"https://example.com/r?a=1&amp;b=%7B%22x%22%7D\"><img src=\"badge.png\" "
+            "alt=\"Get &quot;it&quot; here\" width=\"161\" height=\"48\"></a>\n\nAfter.\n");
+        const auto* link = first(root, ElementType::Link);
+        const auto* image = first(root, ElementType::Image);
+        check(link && link->url == "https://example.com/r?a=1&b=%7B%22x%22%7D",
+              "an HTML link keeps its href, entities decoded and %-escapes kept");
+        check(image && image->parent == link, "the badge image sits inside its link");
+        check(image && image->url == "badge.png" && image->imageWidth == 161 && image->imageHeight == 48,
+              "the badge keeps its src, width and height");
+        check(image && plainOf(image) == "Get \"it\" here", "the badge's alt text, entities decoded");
+        check(plainText(root).find('<') == std::string::npos, "no raw tag is left as text");
+    }
+    {
+        auto root = parse("<img src=a.png width=120 height=50%> <img src='b.png' width=\"80px\">\n");
+        std::vector<const qmd::Element*> images;
+        collect(root, ElementType::Image, images);
+        check(images.size() == 2, "two images on one line");
+        check(images.size() == 2 && images[0]->imageWidth == 120 && images[0]->imageHeight == 0,
+              "a bare width is read; a percentage is no size");
+        check(images.size() == 2 && images[1]->url == "b.png" && images[1]->imageWidth == 80,
+              "single quotes and a px unit are read");
+    }
+    {
+        auto root = parse("Text <img alt=\"no source\"> more.\n");
+        check(!first(root, ElementType::Image) && plainText(root).find("<img") == std::string::npos,
+              "an <img> without a src draws nothing");
+    }
+    {
+        auto root = parse("An <a href=\"https://example.com/u\" title=\"T\">HTML link</a> here.\n");
+        const auto* link = first(root, ElementType::Link);
+        check(link && link->url == "https://example.com/u" && link->title == "T" && plainOf(link) == "HTML link",
+              "an inline HTML link holds its text");
+        check(plainText(root) == "An HTML link here.", "the sentence reads on around the link");
+    }
+    {
+        auto root = parse("<a id=\"t\">target</a> text, and a stray </a> stays.\n");
+        const auto* anchor = first(root, ElementType::Anchor);
+        check(anchor && anchor->title == "t" && !first(root, ElementType::Link),
+              "<a id> without an href still marks a target only");
+        check(plainText(root).find("stray </a> stays") != std::string::npos, "a stray </a> stays text");
+    }
+    {
+        auto root = parse("<a href=\"https://example.com/open\">never closed\n\nNext paragraph.\n");
+        std::vector<const qmd::Element*> paragraphs;
+        collect(root, ElementType::Paragraph, paragraphs);
+        const auto* link = first(root, ElementType::Link);
+        check(link && plainOf(link) == "never closed" && paragraphs.size() == 2 &&
+                  !first(root->children.back(), ElementType::Link),
+              "an unclosed HTML link ends with its paragraph");
+    }
+    {
+        auto root = parse("<p align=\"center\">\n  <img src=\"logo.png\" alt=\"Logo\" width=\"120\">\n</p>\n");
+        const auto* image = first(root, ElementType::Image);
+        check(image && image->url == "logo.png" && image->imageWidth == 120 && plainOf(image) == "Logo",
+              "an image in an HTML block is an image");
+    }
+    {
+        auto root = parse("![alt](m.png)\n");
+        const auto* image = first(root, ElementType::Image);
+        check(image && image->imageWidth == 0 && image->imageHeight == 0, "a Markdown image has no HTML size");
+    }
+    {
+        std::ifstream file(TINTA_HTML_IMAGES_FIXTURE, std::ios::binary);
+        const std::string source{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+        auto root = parse(source);
+        std::vector<const qmd::Element*> images;
+        collect(root, ElementType::Image, images);
+        check(images.size() == 7, "the HTML images fixture holds seven images");
+        int linked = 0;
+        for (const auto* image : images) linked += image->parent && image->parent->type == ElementType::Link;
+        check(linked == 2, "two of them are badges inside links");
+        const std::string text = plainText(root);
+        check(text.find("<img") == std::string::npos && text.find("<a href") == std::string::npos,
+              "the fixture leaves no raw <img> or <a href> as text");
+    }
 }
 
 void admonitionTests(qmd::MarkdownParser& parser) {
@@ -349,6 +454,7 @@ int main() {
           titled.root->children[0]->alertKind == 1 && titled.root->children[0]->alertTitle,
           "marker with trailing text on the same line is a titled callout");
     admonitionTests(parser);
+    htmlImageTests(parser);
 
     // Inline <br> becomes a hard break (#45)
     auto br = parseDocument(parser, "line one<br>line two<BR/>line three<br />end\n", "notes.md");

@@ -1179,8 +1179,13 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
         for (const auto& child : e->children) gather(child);
     };
     for (const auto& child : elem->children) gather(child);
-    ctx.out += "<img src=\"" + htmlEscape(src) + "\" alt=\"" +
-               htmlEscape(alt) + "\"/>";
+    ctx.out += "<img src=\"" + htmlEscape(src) + "\" alt=\"" + htmlEscape(alt) + "\"";
+    // An <img>'s own size goes with it; the browser keeps the proportions
+    // when only one is given
+    auto px = [](float v) { return std::to_string((int)std::lround(v)); };
+    if (elem->imageWidth > 0) ctx.out += " width=\"" + px(elem->imageWidth) + "\"";
+    if (elem->imageHeight > 0) ctx.out += " height=\"" + px(elem->imageHeight) + "\"";
+    ctx.out += "/>";
 }
 
 void emitMath(ExportCtx& ctx, const ElementPtr& elem, bool display) {

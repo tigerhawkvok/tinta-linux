@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <stack>
 #include <regex>
@@ -498,34 +499,101 @@ static bool htmlSpanTag(const MD_CHAR* text, MD_SIZE size, ElementType& type, bo
     return false;
 }
 
-// <a id="x"> or <a name="x"> without an href only marks a link target, the
-// way documents written for GitHub link into themselves (#255). Close is a
-// bare </a>; Open and SelfClosed set the target's id.
-enum class AnchorTag { None, Open, SelfClosed, Close };
+// The few entities an attribute value carries in practice (&amp; in a
+// query string above all), and numeric ones
+static std::string decodeAttributeEntities(const std::string& value) {
+    if (value.find('&') == std::string::npos) return value;
+    static const std::pair<const char*, const char*> named[] = {
+        {"&amp;", "&"}, {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&nbsp;", " "}};
+    std::string out;
+    for (size_t i = 0; i < value.size();) {
+        if (value[i] != '&') {
+            out += value[i++];
+            continue;
+        }
+        bool done = false;
+        for (const auto& [entity, text] : named) {
+            size_t n = strlen(entity);
+            if (value.compare(i, n, entity) == 0) {
+                out += text;
+                i += n;
+                done = true;
+                break;
+            }
+        }
+        size_t semi = value.find(';', i);
+        if (!done && i + 2 < value.size() && value[i + 1] == '#' && semi != std::string::npos && semi - i <= 10) {
+            bool hex = value[i + 2] == 'x' || value[i + 2] == 'X';
+            const std::string digits = value.substr(i + (hex ? 3 : 2), semi - i - (hex ? 3 : 2));
+            char* stop = nullptr;
+            unsigned long cp = digits.empty() ? 0 : strtoul(digits.c_str(), &stop, hex ? 16 : 10);
+            if (cp > 0 && cp <= 0x10FFFF && stop && *stop == '\0') {
+                if (cp < 0x80) {
+                    out += (char)cp;
+                } else if (cp < 0x800) {
+                    out += (char)(0xC0 | (cp >> 6));
+                    out += (char)(0x80 | (cp & 0x3F));
+                } else if (cp < 0x10000) {
+                    out += (char)(0xE0 | (cp >> 12));
+                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out += (char)(0x80 | (cp & 0x3F));
+                } else {
+                    out += (char)(0xF0 | (cp >> 18));
+                    out += (char)(0x80 | ((cp >> 12) & 0x3F));
+                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out += (char)(0x80 | (cp & 0x3F));
+                }
+                i = semi + 1;
+                done = true;
+            }
+        }
+        if (!done) out += value[i++];
+    }
+    return out;
+}
 
-static AnchorTag anchorTag(const MD_CHAR* text, MD_SIZE size, std::string& id) {
-    if (size < 4 || text[0] != '<' || text[size - 1] != '>') return AnchorTag::None;
+// A raw HTML tag as md4c hands it over inside a paragraph: its lowercased
+// name and its attributes, quoted or bare, with entities decoded. The name
+// is empty when the piece is not a single tag (a comment, say).
+struct InlineTag {
+    std::string name;
+    bool closing = false;
+    bool selfClosing = false;
+    std::vector<std::pair<std::string, std::string>> attrs;  // lowercased names
+
+    const std::string* attr(const char* key) const {
+        for (const auto& [name, value] : attrs) {
+            if (name == key) return &value;
+        }
+        return nullptr;
+    }
+};
+
+static InlineTag readInlineTag(const MD_CHAR* text, MD_SIZE size) {
+    InlineTag result;
+    if (size < 3 || text[0] != '<' || text[size - 1] != '>') return result;
     const std::string tag(text + 1, size - 2);
+    size_t i = 0;
     if (tag[0] == '/') {
-        size_t end = tag.find_last_not_of(" \t\r\n");
-        return end == 1 && tolower((unsigned char)tag[1]) == 'a' ? AnchorTag::Close
-                                                                 : AnchorTag::None;
+        result.closing = true;
+        i = 1;
     }
-    if (tolower((unsigned char)tag[0]) != 'a' ||
-        (tag.size() > 1 && !isspace((unsigned char)tag[1]) && tag[1] != '/')) {
-        return AnchorTag::None;
+    size_t nameStart = i;
+    while (i < tag.size() && (isalnum((unsigned char)tag[i]) || tag[i] == '-')) i++;
+    if (i == nameStart || !isalpha((unsigned char)tag[nameStart])) return result;
+    if (i < tag.size() && !isspace((unsigned char)tag[i]) && tag[i] != '/') return result;
+    std::string name = tag.substr(nameStart, i - nameStart);
+    for (char& c : name) c = (char)tolower((unsigned char)c);
+    if (result.closing) {
+        if (tag.find_first_not_of(" \t\r\n", i) != std::string::npos) return result;
+        result.name = name;
+        return result;
     }
-    std::string idValue, nameValue;
-    bool href = false;
-    size_t i = 1;
     while (i < tag.size()) {
         while (i < tag.size() && (isspace((unsigned char)tag[i]) || tag[i] == '/')) i++;
-        size_t nameStart = i;
-        while (i < tag.size() && !isspace((unsigned char)tag[i]) && tag[i] != '=' &&
-               tag[i] != '/') {
-            i++;
-        }
-        std::string attr = tag.substr(nameStart, i - nameStart);
+        size_t attrStart = i;
+        while (i < tag.size() && !isspace((unsigned char)tag[i]) && tag[i] != '=' && tag[i] != '/') i++;
+        std::string attr = tag.substr(attrStart, i - attrStart);
         for (char& c : attr) c = (char)tolower((unsigned char)c);
         while (i < tag.size() && isspace((unsigned char)tag[i])) i++;
         std::string value;
@@ -543,13 +611,53 @@ static AnchorTag anchorTag(const MD_CHAR* text, MD_SIZE size, std::string& id) {
                 value = tag.substr(valueStart, i - valueStart);
             }
         }
-        if (attr == "href") href = true;
-        else if (attr == "id") idValue = value;
-        else if (attr == "name") nameValue = value;
+        if (!attr.empty()) result.attrs.emplace_back(attr, decodeAttributeEntities(value));
     }
-    id = !idValue.empty() ? idValue : nameValue;
-    if (href || id.empty()) return AnchorTag::None;
-    return tag.back() == '/' ? AnchorTag::SelfClosed : AnchorTag::Open;
+    result.name = name;
+    result.selfClosing = tag.back() == '/';
+    return result;
+}
+
+// <a id="x"> or <a name="x"> without an href only marks a link target, the
+// way documents written for GitHub link into themselves (#255). Close is a
+// bare </a>; Open and SelfClosed set the target's id.
+enum class AnchorTag { None, Open, SelfClosed, Close };
+
+static AnchorTag anchorTag(const InlineTag& tag, std::string& id) {
+    if (tag.name != "a") return AnchorTag::None;
+    if (tag.closing) return AnchorTag::Close;
+    const std::string* idValue = tag.attr("id");
+    const std::string* nameValue = tag.attr("name");
+    id = idValue && !idValue->empty() ? *idValue : nameValue ? *nameValue : "";
+    if (tag.attr("href") || id.empty()) return AnchorTag::None;
+    return tag.selfClosing ? AnchorTag::SelfClosed : AnchorTag::Open;
+}
+
+// An HTML size attribute in CSS px: "161", "161px"; a percentage or
+// anything else is no size
+static float htmlPixels(const std::string* value) {
+    if (!value || value->empty()) return 0;
+    char* stop = nullptr;
+    float px = strtof(value->c_str(), &stop);
+    std::string unit = stop ? std::string(stop) : "";
+    while (!unit.empty() && isspace((unsigned char)unit.back())) unit.pop_back();
+    return px > 0 && (unit.empty() || unit == "px") ? px : 0;
+}
+
+// An <img> as the Image element a Markdown image makes, with its HTML size
+static ElementPtr htmlImage(const InlineTag& tag) {
+    auto image = std::make_shared<Element>(ElementType::Image);
+    image->url = *tag.attr("src");
+    if (const std::string* title = tag.attr("title")) image->title = *title;
+    image->imageWidth = htmlPixels(tag.attr("width"));
+    image->imageHeight = htmlPixels(tag.attr("height"));
+    if (const std::string* alt = tag.attr("alt"); alt && !alt->empty()) {
+        auto text = std::make_shared<Element>(ElementType::Text);
+        text->text = *alt;
+        text->parent = image.get();
+        image->children.push_back(text);
+    }
+    return image;
 }
 
 // Whether a raw HTML piece from md4c is a whole tag: it ends with '>'
@@ -583,8 +691,39 @@ static void inlineHtml(ParserContext* ctx, const MD_CHAR* text, MD_SIZE size) {
         return;
     }
     if (ctx->current() && ctx->current()->type != ElementType::HtmlBlock) {
+        const InlineTag tag = readInlineTag(text, size);
+        // <img> draws as a Markdown image does, at its width and height; one
+        // without a src draws nothing, as in a browser
+        if (tag.name == "img" && !tag.closing) {
+            if (const std::string* src = tag.attr("src"); src && !src->empty()) {
+                ctx->flushText();
+                ElementPtr image = htmlImage(tag);
+                image->parent = ctx->current();
+                ctx->current()->children.push_back(image);
+            }
+            return;
+        }
+        // <a href> opens a link around what follows, as [text](url) does:
+        // a badge written <a href><img></a> opens its link
+        if (tag.name == "a" && !tag.closing && tag.attr("href")) {
+            ctx->flushText();
+            auto link = std::make_shared<Element>(ElementType::Link);
+            link->url = *tag.attr("href");
+            if (const std::string* title = tag.attr("title")) link->title = *title;
+            ctx->pushElement(link);
+            ctx->htmlSpans.push_back(link.get());
+            return;
+        }
+        if (tag.name == "a" && tag.closing) {
+            auto open = std::find_if(ctx->htmlSpans.rbegin(), ctx->htmlSpans.rend(),
+                [](const Element* span) { return span->type == ElementType::Link; });
+            if (open != ctx->htmlSpans.rend()) {
+                ctx->closeHtmlSpan(*open);
+                return;
+            }
+        }
         std::string id;
-        AnchorTag anchor = anchorTag(text, size, id);
+        AnchorTag anchor = anchorTag(tag, id);
         if (anchor == AnchorTag::Open || anchor == AnchorTag::SelfClosed) {
             ctx->flushText();
             auto elem = std::make_shared<Element>(ElementType::Anchor);
@@ -2441,6 +2580,16 @@ void parseHtmlIntoElements(const std::string& html, Element* parent) {
                 if (anchorId.empty() || !tag.isSelfClosing) elementStack.push(elem.get());
             } else {
                 closeElement(ElementType::Link, true, ElementType::Anchor);
+            }
+        }
+        else if (tag.name == "img") {
+            // A logo or badge in an HTML block draws as in a paragraph
+            const InlineTag img = readInlineTag(tagStr.data(), (MD_SIZE)tagStr.size());
+            if (const std::string* src = img.attr("src"); src && !src->empty()) {
+                flushText(true);
+                ElementPtr image = htmlImage(img);
+                image->parent = elementStack.top();
+                elementStack.top()->children.push_back(image);
             }
         }
         else if (tag.name == "strong" || tag.name == "b") {

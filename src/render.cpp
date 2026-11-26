@@ -284,7 +284,7 @@ static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
 }
 
 static void layoutElement(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
-static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
+static D2D1_RECT_F layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 
 // --- UAX#14 line-break analysis ---
 //
@@ -782,7 +782,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     y += lineHeight;  // end current line
                     x = startX;
                 }
-                layoutImage(app, elem, y, startX, maxWidth);
+                const D2D1_RECT_F drawn = layoutImage(app, elem, y, startX, maxWidth);
+                // An image inside a link opens it, as a badge does; no
+                // underline, as on GitHub
+                if (isLink && !linkUrl.empty() && drawn.right > drawn.left) app.linkRects.push_back({drawn, linkUrl});
                 continue;
             }
 
@@ -3764,7 +3767,9 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     return app.imageCache[src];
 }
 
-static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+// Lays an image out as a block at y and returns the rect it drew: the
+// picture, or its alt text when the picture is missing
+static D2D1_RECT_F layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     auto& entry = getOrLoadImage(app, elem->url);
 
     if (entry.failed || !entry.bitmap) {
@@ -3793,29 +3798,39 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
         addTextRun(app, std::move(info), pos, bounds, color, docStart, altText.length(), false);
         app.docText += altText;
         y += lineHeight;
-        return;
+        return bounds;
     }
 
     float scale = app.contentScale * app.zoomFactor;
     float imgW = (float)entry.width;
     float imgH = (float)entry.height;
 
-    // Scale to fit within maxWidth, never upscale
-    float displayScale = std::min(1.0f, maxWidth / imgW);
-    float displayW = imgW * displayScale;
-    float displayH = imgH * displayScale;
+    // An <img>'s width and height are CSS px, which scale with the text;
+    // otherwise the picture's own pixels
+    float displayW = imgW, displayH = imgH;
+    if (elem->imageWidth > 0 || elem->imageHeight > 0) {
+        imageDisplaySize(*elem, imgW, imgH, displayW, displayH);
+        displayW *= scale;
+        displayH *= scale;
+    }
+    // Fit within maxWidth
+    if (displayW > maxWidth) {
+        displayH *= maxWidth / displayW;
+        displayW = maxWidth;
+    }
 
     // Cap max height
     float maxH = 600.0f * scale;
     if (displayH > maxH) {
+        displayW *= maxH / displayH;
         displayH = maxH;
-        displayW = displayH * (imgW / imgH);
     }
 
-    app.layoutBitmaps.push_back({entry.bitmap,
-        D2D1::RectF(indent, y, indent + displayW, y + displayH)});
+    const D2D1_RECT_F rect = D2D1::RectF(indent, y, indent + displayW, y + displayH);
+    app.layoutBitmaps.push_back({entry.bitmap, rect});
 
     y += displayH + 12 * scale;
+    return rect;
 }
 
 static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {

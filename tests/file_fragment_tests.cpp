@@ -232,8 +232,10 @@ void htmlAnchors(App& app) {
         return doc.success;
     };
     layoutOf("See <a href=\"https://example.com\">the site</a> here.\n");
-    check(app.docText.find(L"<a href=\"https://example.com\">the site</a>") != std::wstring::npos,
-          "an inline <a href> stays literal text as before");
+    bool siteLink = false;
+    for (const auto& link : app.linkRects) siteLink = siteLink || link.url == "https://example.com";
+    check(app.docText.find(L"See the site here.") != std::wstring::npos && siteLink,
+          "an inline <a href> is a link, as [text](url) is (no longer literal text)");
     layoutOf("<A NAME=top>Top</A> and <a id='self'/>self closing.\n");
     float y = 0;
     check(app.docText.find(L"Top and self closing.") != std::wstring::npos &&

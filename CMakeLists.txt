@@ -491,6 +491,8 @@ if(BUILD_TESTING)
         ${md4c_SOURCE_DIR}/src
     )
     target_link_libraries(document_tests PRIVATE md4c)
+    target_compile_definitions(document_tests PRIVATE
+        TINTA_HTML_IMAGES_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-images.md")
     add_test(NAME document_types COMMAND document_tests)
 
     # Word and character counting (#240): plain text and parsed Markdown
