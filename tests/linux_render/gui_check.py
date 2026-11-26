@@ -492,6 +492,11 @@ def main():
         # A private session bus too: Tinta is single-instance over D-Bus, and
         # must neither join nor host the user's own Tinta
         env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        # No portals on that bus: GTK 4.24 (Ubuntu 26.04) asks the document
+        # portal on a file drop, and the KDE portal it then starts cannot run
+        # headless (no session, no kwallet), so the drop waited until the
+        # test timed out. The check is the X drop itself.
+        env["GDK_DEBUG"] = ",".join(filter(None, [env.get("GDK_DEBUG", ""), "no-portals"]))
         cmd = ["dbus-run-session", "--", xvfb, "-a", "-s", "-screen 0 1600x1200x24", sys.executable, os.path.abspath(__file__),
                args.tinta, args.doc, "--out", args.out, "--size", args.size, "--scale", str(args.scale), "--marker", args.marker, "--inner"]
         return subprocess.run(cmd, env=env).returncode
