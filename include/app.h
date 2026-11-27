@@ -14,7 +14,9 @@
 #include <wrl/client.h>
 
 #include <string>
+#include <memory>
 #include <vector>
+#include <set>
 #include <unordered_map>
 #include <chrono>
 #include <utility>
@@ -24,6 +26,8 @@
 
 #include "markdown.h"
 #include "keymap.h"
+#include "plantuml.h"
+#include "plantuml_queue.h"
 #include "wordcount.h"
 
 using namespace qmd;
@@ -70,6 +74,19 @@ inline int64_t usElapsed(Clock::time_point start) {
 // Pandoc worker finished; wParam = success (pandoc.cpp)
 #define WM_APP_PANDOC_DONE (WM_APP + 6)
 
+// Settings > Updates > Check now: an update check whatever the day. Its
+// WM_APP_UPDATE_CHECK carries wParam = 1, and every outcome is shown
+#define WM_APP_UPDATE_CHECK_NOW (WM_APP + 7)
+
+// Linux: how a tab drag the desktop carried ended (TINTA_TAB_DRAG_* in
+// wParam); see tabDragDone
+#define WM_APP_TAB_DRAG_DONE (WM_APP + 8)
+
+// PlantUML render-queue worker finished a render for `key`; the queue's
+// completion callback posts this from the worker thread with (WPARAM)key
+// (upstream numbers it WM_APP + 7, which this fork already uses)
+#define WM_APP_PLANTUML_READY (WM_APP + 9)
+
 // Startup metrics
 struct StartupMetrics {
     int64_t windowInitUs = 0;
@@ -82,8 +99,24 @@ struct StartupMetrics {
     int64_t totalStartupUs = 0;
 };
 
+// Time spent on Mermaid diagrams since the window opened (stats overlay)
+struct DiagramMetrics {
+    size_t layouts = 0;         // merman SVG renders (diagram layout)
+    int64_t layoutUs = 0;
+    size_t rasters = 0;         // renders: merman PNG (Windows), librsvg (Linux)
+    int64_t rasterUs = 0;
+    int64_t firstRasterUs = 0;  // includes merman's one-time system font scan
+    int64_t decodeUs = 0;       // merman's PNG into a bitmap (Windows)
+    size_t fontFiles = 0;       // font files named to merman's raster (Windows)
+    int64_t fontListUs = 0;     // finding them
+};
+
 // Syntax highlighting token types
 enum class SyntaxTokenType { Plain, Keyword, String, Comment, Number, Function, TypeName, Operator, ControlFlow };
+
+// The default code face: OFL-licensed, so the Linux build ships it
+// (third_party/fonts), and the Windows exe carries it (bundled_fonts.cpp)
+inline constexpr const wchar_t* kDefaultCodeFont = L"Monaspace Argon";
 
 // Theme colors
 struct D2DTheme {
@@ -168,6 +201,9 @@ inline const wchar_t* themeHeadingFont(const D2DTheme& t) {
                : t.fontFamily;
 }
 void loadCustomThemes();
+// What a new themes.ini starts with: a commented example naming every
+// key, headingfont= and codefont= included (#256)
+const char* themesIniTemplate();
 // Adds or replaces (by name) a user theme and rewrites themes.ini.
 // Returns the theme's registry index, or -1 on failure.
 int saveCustomTheme(const D2DTheme& t, const std::wstring& name,
@@ -255,12 +291,17 @@ struct Settings {
     // Closing a window with unsaved edits skips the dialog and leaves them
     // as drafts, offered back on the next launch (#252)
     bool closeKeepsDrafts = false;
+    // Pasting an image into the editor: "ask" each time, or always save it
+    // to the document's assets folder, embed it "inline", or "off"
+    std::string pasteImage = "ask";
     // Page margins on every side when printing and exporting PDF, in mm
     // (#257): the preview offers 12.7, 19.05 (0.75 in) and 25.4
     float printMarginMm = 19.05f;
     fm::Settings frontmatter;
     // User-chosen pandoc executable ("" = auto-detect)
     std::string pandocPath;
+    // User-chosen PlantUML tool: plantuml.exe or plantuml.jar ("" = PATH)
+    std::string plantumlPath;
 };
 
 // Application state
@@ -397,6 +438,9 @@ struct App {
     IDWriteTextFormat* supSubFormat = nullptr;  // document font for ^sup^/~sub~
     IDWriteTextFormat* headingFormat = nullptr;
     IDWriteTextFormat* codeFormat = nullptr;
+    // kDefaultCodeFont, or Consolas where it is not installed; for interface
+    // mono text (editor gutter, rail hints). Set by updateTextFormats.
+    const wchar_t* uiCodeFont = L"Consolas";
     IDWriteTextFormat* boldFormat = nullptr;
     IDWriteTextFormat* italicFormat = nullptr;
     // Nested inline spans: **bold *italic***, **`code`**, *`code`*
@@ -404,7 +448,18 @@ struct App {
     IDWriteTextFormat* codeBoldFormat = nullptr;
     IDWriteTextFormat* codeItalicFormat = nullptr;
     IDWriteTextFormat* codeBoldItalicFormat = nullptr;
+    // Inline code sized to text other than the body's (headings, scripts;
+    // #1), made on first use: keyed by 1/100 px size, bold and italic bits
+    std::unordered_map<long long, IDWriteTextFormat*> scaledCodeFormats;
     IDWriteTextFormat* headingFormats[6] = {};
+    // *Emphasis* inside a heading keeps the heading's size and face
+    IDWriteTextFormat* headingItalicFormats[6] = {};
+    // Superscripts and subscripts in a heading, in proportion to it
+    IDWriteTextFormat* headingScriptFormats[6] = {};
+    // The faces the document formats above were built from. A theme switch
+    // compares with these, not with app.theme: saving the theme in use from
+    // the theme editor rewrites the strings app.theme points into (#265)
+    std::wstring formatsFontFamily, formatsCodeFontFamily, formatsHeadingFontFamily;
 
     // Overlay text formats (cached)
     IDWriteTextFormat* searchTextFormat = nullptr;
@@ -520,15 +575,13 @@ struct App {
         D2D1_RECT_F labelRect{};  // room the title had (zero: none drawn)
     };
     std::vector<TabHit> tabHits;       // refreshed by renderTabStrip
-    // Pin button in the title bar: keeps this window above every other
-    // (per-window, not persisted)
-    bool alwaysOnTop = false;
 
     // Update-available chip (bottom right): non-blocking, once per
     // session, absent entirely for Store installs
     bool updateCheckEnabled = true;
     bool updateAvailable = false;
     bool updateDismissed = false;   // this session
+    bool updateCheckRunning = false;  // a worker is out
     std::string updateVersion;      // "X.Y.Z" offered by the chip
     std::string updateLastCheck;    // mirrors Settings on save
     std::string updateDismissedVersion;
@@ -558,6 +611,8 @@ struct App {
     // release decides (drop into another window / new window / snap back)
     bool tabDragDetached = false;
     HWND tabGhostWnd = nullptr;
+    // Linux: the path of a tab the desktop's drag carries (tabDragDone)
+    std::string tabDragOutPath;
     // A native move/size loop is in progress; the starting rect tells a
     // pure move (a possible strip drop) apart from a resize on exit
     bool windowMoveTracking = false;
@@ -673,6 +728,9 @@ struct App {
     D2DTheme themeEditorTheme{};        // working colors (string ptrs unused)
     std::wstring themeEditorName;
     std::wstring themeEditorFont;       // main font family
+    std::wstring themeEditorHeadingFont;  // empty: headings use the main font
+    std::wstring themeEditorCodeFont;
+    int themeEditorFontRole = 0;        // the face the list sets: 0 text, 1 headings, 2 code
     std::wstring themeEditorHex[14];     // base colours, h1-h6, highlight bg/text
     int themeEditorField = -1;          // focused field: 0..13 hex, 14 = name
     int themeEditorBase = 0;            // registry index the colors started from
@@ -707,6 +765,16 @@ struct App {
     // Resolved single-key bindings, indexed like KEY_ACTIONS (#77).
     // Filled by applyKeymap; each binding retains its input message kind.
     KeyBinding keymap[KEY_ACTION_COUNT] = {};
+
+    // Emacs profile (emacs_keys.cpp): a pending C-x, the mark, and where the
+    // last kill left the caret (a kill straight after it appends)
+    bool emacsPrefix = false;
+    bool emacsDispatching = false;     // a chord re-sent as its Windows key
+    bool emacsSwallowSysChar = false;  // the WM_SYSCHAR of a handled Meta chord
+    bool emacsMark = false;
+    size_t emacsMarkPos = 0;
+    size_t emacsKillAt = (size_t)-1;
+    size_t emacsKillSize = 0;
 
     // Reading position restore (#77): applied once enough of the document is
     // laid out for the target to be reachable (chunked layout grows
@@ -889,17 +957,26 @@ struct App {
         D2D1_RECT_F bounds;       // Full background rect in document coordinates
         std::wstring codeText;    // The code content (diagram source for diagrams)
         bool isDiagram = false;   // adds the copy-as-image button
+        // Drawn as a picture (merman): search reads codeText, placed at
+        // docPos (where the diagram sits in docText, which it adds nothing to)
+        bool searchSource = false;
+        size_t docPos = 0;
         unsigned fitKey = 0;      // per-layout ordinal for the fit toggle
         bool fitCandidate = false;
         bool fitActive = false;
+        // Rendered PlantUML diagram: the cached PNG's render key and
+        // format (0=png), so copy-as-image can find the image again
+        bool isPlantuml = false;
+        uint64_t plantumlKey = 0;
+        int plantumlFormat = 0;
     };
     std::vector<CodeBlockInfo> codeBlocks;
     int hoveredCodeBlock = -1;
 
-    // Tables - tracked for the copy-as-TSV button
+    // Tables - tracked for the copy buttons (Markdown, CSV)
     struct TableInfo {
         D2D1_RECT_F bounds{};  // document coordinates
-        std::wstring tsv;      // cells joined by tabs, rows by newlines
+        std::wstring csv;      // the cells as CSV, every field quoted
         unsigned fitKey = 0;   // per-layout ordinal for the fit toggle
         bool fitCandidate = false;  // wider than the column at natural size
         bool fitActive = false;
@@ -907,6 +984,16 @@ struct App {
     };
     std::vector<TableInfo> tableRects;
     int hoveredTable = -1;
+    // Paragraphs whose first line an inline image grew: (the y the
+    // paragraph started at, the growth), so a list marker beside one moves
+    // down to the new baseline with its text
+    std::vector<std::pair<float, float>> grownFirstLines;
+    // Each table row's extent in document Y, the header joined to the first
+    // body row: page breaks keep them whole
+    struct RowBand {
+        float top = 0, bottom = 0;
+    };
+    std::vector<RowBand> tableRowBands;
 
     // In-place table editing in the rendered preview (#148, edit mode).
     // Cells are identified by the table's source offset plus row/col so
@@ -937,6 +1024,8 @@ struct App {
     std::vector<unsigned> fitBlocks;
     unsigned layoutTableSeq = 0;
     unsigned layoutDiagramSeq = 0;
+    unsigned layoutSourceBlock = 0;  // numbers docSourceSpans' blocks
+    unsigned layoutSourceTable = 0;  // the table being laid out (0: none)
 
     // Text bounds - tracked for cursor changes and selection (document coordinates)
     struct TextRect {
@@ -966,6 +1055,11 @@ struct App {
         size_t startPos;            // Character offset in text
         size_t length;              // Match length
         D2D1_RECT_F highlightRect;  // Computed highlight bounds
+        // A match in a diagram's Mermaid source (codeBlocks index): an empty
+        // range at the diagram's place in docText, outlined as the diagram
+        int codeBlock = -1;
+        size_t codeOffset = 0;      // where in the source
+        size_t codeLength = 0;
     };
     std::vector<SearchMatch> searchMatches;
     bool overText = false;
@@ -1028,6 +1122,20 @@ struct App {
 
     // Document text built during render (used for search/mapping)
     std::wstring docText;
+    // Where each stretch of docText came from, so a copy can return the
+    // Markdown behind a selection (markdown_copy.cpp). No element pointers:
+    // some blocks are laid out from temporaries.
+    struct DocSourceSpan {
+        size_t docStart = 0, docLength = 0;
+        size_t sourceHint = SIZE_MAX;  // where its block's text starts in the source
+        unsigned block = 0;            // which block, numbered per layout
+        unsigned table = 0;            // which table (0: none)
+        bool code = false;             // a code block's text
+        // Inline spans it sits in, innermost first (identity compared only
+        // within one block; never dereferenced)
+        std::vector<std::pair<ElementType, uintptr_t>> inlines;
+    };
+    std::vector<DocSourceSpan> docSourceSpans;
     std::wstring docTextLower;
 
     // Cached space widths for common formats
@@ -1089,6 +1197,16 @@ struct App {
         bool directed = true;
         bool dashed = false;
     };
+    // Foldable admonition title bars (document coordinates), and the boxes
+    // the reader folded or unfolded, keyed by file and offset so the state
+    // survives a relayout, a reload and a tab switch
+    struct FoldRect {
+        D2D1_RECT_F rect{};
+        std::string key;
+    };
+    std::vector<FoldRect> admonitionFoldRects;
+    std::set<std::string> admonitionFoldToggled;
+
     // Clickable task checkboxes (document coordinates)
     struct TaskRect {
         D2D1_RECT_F rect{};
@@ -1100,6 +1218,13 @@ struct App {
     // Viewport width at the last layout: a change (folder browser toggle,
     // preview split drag) triggers a relayout in the render loop
     float lastViewportWidth = -1.0f;
+    // The reader's place across that relayout (reflowForViewportWidth):
+    // the source offset at the reading line, or the heading Contents just
+    // jumped to, or the top of the document
+    bool readingPlacePending = false;
+    double readingPlaceOffset = 0.0;
+    int readingPlaceHeading = -1;
+    bool readingPlaceAtTop = false;
     std::vector<LayoutTextRun> layoutTextRuns;
     std::vector<LayoutRect> layoutRects;
     std::vector<LayoutLine> layoutLines;
@@ -1126,6 +1251,11 @@ struct App {
         float renderedY;
     };
     std::vector<ScrollAnchor> scrollAnchors;
+    // Linked scrolling in the split editor: the pane last scrolled leads
+    // and the other follows. The preview leads after its own wheel or
+    // scrollbar; any editor scroll (keys, caret, wheel) takes the lead back.
+    bool previewLeads = false;
+    float previewLedEditorScroll = 0.0f;  // the editor scroll the preview set
     std::vector<size_t> editorLineByteOffsets;  // UTF-8 byte offset per editor line
 
     size_t searchMatchCursor = 0;
@@ -1245,11 +1375,33 @@ struct App {
     bool pandocChecked = false;
     bool pandocRunning = false;
 
+    // PlantUML bridge (plantuml_app.cpp): the resolved tool (a plantuml.exe
+    // or java.exe + plantuml.jar), the user's settings override, and the
+    // resolve-once guard
+    plantuml::Tool plantumlTool;
+    std::wstring plantumlUserPath;
+    bool plantumlChecked = false;
+    // Async render queue (created lazily by plantumlEnsureQueue) and the
+    // per-process work root under %TEMP%; unique_ptr keeps App.h the only
+    // owner and joins the worker before exit via WM_DESTROY
+    std::unique_ptr<plantuml::PlantumlRenderQueue> plantumlQueue;
+    std::wstring plantumlWorkRoot;
+    // Print/PDF re-layouts run synchronously without a message pump: the
+    // async queue can never complete there, so the layout may render
+    // inline under this flag and the shared millisecond budget
+    bool plantumlPrintLayout = false;
+    int plantumlPrintBudgetMsLeft = 0;
+
     // Unified editor (design t11): one raw buffer, live render beside it;
     // the left tool rail slides in with edit mode carrying the controls
     bool editorAssists = true;
     bool showWordCount = true;       // #240
     bool closeKeepsDrafts = false;   // #252
+    // Pasting an image: the mode (Settings::pasteImage) and the choice card
+    std::string pasteImageMode = "ask";
+    bool pasteImagePending = false;
+    bool pasteImageRemember = false;
+    std::vector<std::pair<D2D1_RECT_F, int>> pasteImageHits;  // rebuilt each paint
     fm::Settings frontmatter;
     float editRailAnim = 0.0f;       // rail slide-in 0..1
     int editRailHover = 0;           // hit id under the mouse, 0 = none
@@ -1376,6 +1528,7 @@ struct App {
 
     // Metrics
     StartupMetrics metrics;
+    DiagramMetrics diagramMetrics;
     size_t drawCalls = 0;
 
     ~App() { shutdown(); }
@@ -1399,13 +1552,17 @@ struct App {
         layoutConnectors.clear();
         layoutBitmaps.clear();
         taskRects.clear();
+        admonitionFoldRects.clear();
         linkRects.clear();
         codeBlocks.clear();
         tableRects.clear();
+        tableRowBands.clear();
+        grownFirstLines.clear();
         tableCellRects.clear();
         textRects.clear();
         lineBuckets.clear();
         docText.clear();
+        docSourceSpans.clear();
         docTextLower.clear();
         headings.clear();
         headingSlugCounts.clear();
@@ -1481,7 +1638,15 @@ struct App {
         if (codeBoldFormat) { codeBoldFormat->Release(); codeBoldFormat = nullptr; }
         if (codeItalicFormat) { codeItalicFormat->Release(); codeItalicFormat = nullptr; }
         if (codeBoldItalicFormat) { codeBoldItalicFormat->Release(); codeBoldItalicFormat = nullptr; }
+        for (auto& entry : scaledCodeFormats) entry.second->Release();
+        scaledCodeFormats.clear();
         for (auto& fmt : headingFormats) {
+            if (fmt) { fmt->Release(); fmt = nullptr; }
+        }
+        for (auto& fmt : headingItalicFormats) {
+            if (fmt) { fmt->Release(); fmt = nullptr; }
+        }
+        for (auto& fmt : headingScriptFormats) {
             if (fmt) { fmt->Release(); fmt = nullptr; }
         }
         if (bodyTypography) { bodyTypography->Release(); bodyTypography = nullptr; }
@@ -1493,6 +1658,19 @@ struct App {
 
 inline float dpi(const App& app, float value) {
     return value * app.contentScale;
+}
+
+// The collection a text format for `family` is created from: Tinta's
+// bundled faces where the family is not installed (Windows), else nullptr,
+// the system collection (bundled_fonts.cpp)
+IDWriteFontCollection* fontCollectionFor(const App& app, const wchar_t* family);
+IDWriteFontCollection* fontCollectionFor(IDWriteFactory* factory, const wchar_t* family);
+
+// Height of the stats overlay box (0 when hidden): two lines, three once
+// diagrams have been drawn
+inline float statsOverlayHeight(const App& app) {
+    if (!app.showStats) return 0.0f;
+    return dpi(app, app.diagramMetrics.layouts > 0 ? 66.0f : 50.0f);
 }
 
 // Width of the editor pane in edit mode (full window when preview is hidden)
@@ -1666,6 +1844,20 @@ inline float documentViewportWidth(const App& app) {
         if (contentsSlotOpen(app)) width -= tocPanelWidth(app);
     }
     return width > 0.0f ? width : 0.0f;
+}
+
+// The hovered table's buttons in document coordinates: copy as Markdown
+// and as CSV at the top right (clamped into a wide table's visible part),
+// and the fit toggle left of them
+inline void tableButtonRects(const App& app, const App::TableInfo& tb, D2D1_RECT_F& markdown, D2D1_RECT_F& csv,
+                             D2D1_RECT_F& fit) {
+    float scale = app.contentScale * app.zoomFactor;
+    float h = 26.0f * scale, pad = 8.0f * scale, gap = 6.0f * scale;
+    float right = std::min(tb.bounds.right, app.scrollX + documentViewportWidth(app)) - pad;
+    float top = tb.bounds.top + pad;
+    csv = D2D1::RectF(right - 48.0f * scale, top, right, top + h);
+    markdown = D2D1::RectF(csv.left - gap - 88.0f * scale, top, csv.left - gap, top + h);
+    fit = D2D1::RectF(markdown.left - gap - 44.0f * scale, top, markdown.left - gap, top + h);
 }
 
 // Cursor blink runs on a timer instead of per-frame InvalidateRect so the

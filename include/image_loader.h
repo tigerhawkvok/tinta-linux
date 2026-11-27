@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <wincodec.h>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // Bound the display copy, independently of compressed file size. Originals
@@ -26,5 +27,12 @@ struct DecodedImage {
 // No partially decoded pixels escape on failure, including allocation failure.
 HRESULT decodeImageFile(IWICImagingFactory* factory, const wchar_t* path,
                        UINT maxDimension, DecodedImage& output) noexcept;
+// The same, from encoded bytes in memory
+HRESULT decodeImageMemory(IWICImagingFactory* factory, const std::string& bytes,
+                         UINT maxDimension, DecodedImage& output) noexcept;
+
+// An image's bytes from a data: URI ("data:image/png;base64,...", as an
+// image pasted inline writes); false for any other source
+bool imageDataUriBytes(const std::string& src, std::string& bytes);
 
 #endif

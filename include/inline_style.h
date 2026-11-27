@@ -22,6 +22,12 @@ struct InlineStyle {
     bool hasBg = false;
     D2D1_COLOR_F bgColor{};
     bool hasStrike = false;
+    bool hasUnderline = false;  // <ins> or <u> (#263)
+    // Where the underline began: its rule sits under that face's baseline,
+    // so <ins>x<sup>2</sup></ins> keeps one rule while <sup><ins>2</ins></sup>
+    // gets its own under the 2
+    IDWriteTextFormat* underlineFormat = nullptr;
+    float underlineYOffset = 0.0f;
     float drawYOffset = 0.0f;
     bool bold = false;
     bool italic = false;
@@ -36,8 +42,9 @@ struct StyledRun {
 // Body font face for a weight/style combination, falling back to base
 IDWriteTextFormat* emphasisFormat(App& app, IDWriteTextFormat* base, bool bold, bool italic);
 
-// Monospace face for an inline `code` span inside emphasis
-IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic);
+// Monospace face for an inline `code` span inside emphasis, sized to the
+// text `around` it (a heading, a script) when given
+IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic, IDWriteTextFormat* around = nullptr);
 
 // Appends one StyledRun per drawable leaf (Text, Code, Image, Ruby, breaks),
 // each carrying the merged style of every span it sits inside

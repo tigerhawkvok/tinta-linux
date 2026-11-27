@@ -31,6 +31,27 @@ void editorClearExtraCarets(App& app);
 std::wstring editorCaretSelectionsText(const App& app);
 void editorPasteAtCarets(App& app, HWND hwnd, const std::wstring& paste);
 
+// Pasting an image (Ctrl+V with an image and no text on the clipboard):
+// the user's choice, or the remembered one (App::pasteImageMode)
+enum PasteImageChoice { kPasteCancel = 0, kPasteAssets = 1, kPasteInline = 2, kPasteSaveAs = 3 };
+void editorPasteImageRequest(App& app, HWND hwnd);
+void editorPasteImage(App& app, HWND hwnd, int choice);
+// Where "assets folder" saves the next image:
+// <doc dir>/<stem>.assets/<stem>-img-NN.png; empty for an unsaved note
+std::wstring editorPasteImageAssetPath(const App& app);
+
+// Emacs profile commands on the source editor (emacs_keys.cpp dispatches)
+enum class EmacsKill { Line, WordForward, WordBackward };
+void editorEmacsKill(App& app, HWND hwnd, EmacsKill kind);
+void editorEmacsSetMark(App& app);
+// The mark still anchors the caret or its selection (else it is dropped)
+bool editorEmacsMarkActive(App& app);
+void editorEmacsExchangePointAndMark(App& app, HWND hwnd);
+void editorEmacsTranspose(App& app, HWND hwnd);
+void editorEmacsOpenLine(App& app, HWND hwnd);
+// C-g: drop the mark, the selection and any extra carets
+void editorEmacsQuit(App& app, HWND hwnd);
+
 // Editor input handlers
 void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam);
 void handleEditorCharInput(App& app, HWND hwnd, WPARAM wParam);
@@ -75,6 +96,9 @@ void editorReparse(App& app, bool force = false);
 // reparse, used by the preview table cell editor (#148)
 void editorReplaceRangeExternal(App& app, size_t start, size_t end,
                                 const std::wstring& repl);
+// Pads Markdown tables into aligned columns: the table at the caret, or
+// every table when the caret is in none (table_format.cpp)
+void editorAlignTables(App& app, HWND hwnd);
 void editorMarkDirtyAndReparse(App& app);
 
 // Editor search
@@ -89,7 +113,16 @@ void editorReplaceAll(App& app, HWND hwnd);
 // Navigate without changing the source buffer, including when preview is hidden.
 void editorScrollToSourceOffset(App& app, size_t byteOffset);
 void rebuildLineStarts(App& app);
-size_t editorTopVisibleLine(App& app);
+// Linked scrolling: the source byte offset at the editor's top edge,
+// within its line (wrapped rows included), and the editor scrolled so the
+// preview's top edge maps there (through app.scrollAnchors)
+double editorTopByteOffset(App& app);
+void editorFollowPreview(App& app);
+// The preview was scrolled by its own wheel or scrollbar: it leads, and
+// the source follows now and every frame until the source scrolls itself
+void editorPreviewTakesLead(App& app);
+// Once a frame: the pane last scrolled leads, the other follows
+void editorSyncPreviewScroll(App& app);
 std::string toUtf8(const std::wstring& wstr);
 
 #endif // TINTA_EDITOR_H

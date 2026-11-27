@@ -1,4 +1,5 @@
 #include "app.h"
+#include "fs_path.h"
 
 // 10 Distinctive Themes - 5 Light, 5 Dark
 const D2DTheme THEMES[] = {
@@ -8,7 +9,7 @@ const D2DTheme THEMES[] = {
 
     // 1. Paper - Warm sepia, literary manuscript feel
     {
-        L"Paper", L"Segoe UI", nullptr, L"Consolas", false,
+        L"Paper", L"Segoe UI", nullptr, kDefaultCodeFont, false,
         hexColor(0xF5F1E8),    // background - warm cream
         hexColor(0x3D3329),    // text - deep brown
         hexColor(0x2A1F16),    // heading - dark brown
@@ -29,7 +30,7 @@ const D2DTheme THEMES[] = {
 
     // 2. Sakura - Japanese cherry blossom, soft pink elegance
     {
-        L"Sakura", L"Segoe UI", nullptr, L"Consolas", false,
+        L"Sakura", L"Segoe UI", nullptr, kDefaultCodeFont, false,
         hexColor(0xFDF8F8),    // background - soft blush white
         hexColor(0x404040),    // text - soft charcoal
         hexColor(0xC44569),    // heading - deep rose
@@ -71,7 +72,7 @@ const D2DTheme THEMES[] = {
 
     // 4. Meadow - Fresh organic greens, nature-inspired
     {
-        L"Meadow", L"Segoe UI", nullptr, L"Consolas", false,
+        L"Meadow", L"Segoe UI", nullptr, kDefaultCodeFont, false,
         hexColor(0xF7FAF7),    // background - soft white-green
         hexColor(0x1A2F1A),    // text - forest
         hexColor(0x1C4532),    // heading - deep green
@@ -92,7 +93,7 @@ const D2DTheme THEMES[] = {
 
     // 5. Dusk - Golden hour warmth, sunset tones
     {
-        L"Dusk", L"Segoe UI", nullptr, L"Consolas", false,
+        L"Dusk", L"Segoe UI", nullptr, kDefaultCodeFont, false,
         hexColor(0xFFFBF5),    // background - warm white
         hexColor(0x553C10),    // text - deep amber
         hexColor(0x9C4221),    // heading - burnt orange
@@ -138,7 +139,7 @@ const D2DTheme THEMES[] = {
 
     // 7. Dracula - Classic dark, purples and pinks
     {
-        L"Dracula", L"Segoe UI", nullptr, L"Consolas", true,
+        L"Dracula", L"Segoe UI", nullptr, kDefaultCodeFont, true,
         hexColor(0x282A36),    // background - deep purple-gray
         hexColor(0xF8F8F2),    // text - light gray
         hexColor(0xFF79C6),    // heading - pink
@@ -159,7 +160,7 @@ const D2DTheme THEMES[] = {
 
     // 8. Forest - Deep mystical greens
     {
-        L"Forest", L"Segoe UI", nullptr, L"Consolas", true,
+        L"Forest", L"Segoe UI", nullptr, kDefaultCodeFont, true,
         hexColor(0x0D1512),    // background - deep green-black
         hexColor(0xB8C5B2),    // text - sage
         hexColor(0x9AE6B4),    // heading - bright green
@@ -180,7 +181,7 @@ const D2DTheme THEMES[] = {
 
     // 9. Ember - Warm charcoal with fire accents
     {
-        L"Ember", L"Segoe UI", nullptr, L"Consolas", true,
+        L"Ember", L"Segoe UI", nullptr, kDefaultCodeFont, true,
         hexColor(0x1A1614),    // background - warm black
         hexColor(0xD4C5B9),    // text - warm gray
         hexColor(0xF6AD55),    // heading - amber
@@ -218,6 +219,32 @@ const D2DTheme THEMES[] = {
         hexColor(0x2EE6CF),    // syntaxFunction - cyan
         hexColor(0xF5E663),    // syntaxType - softened yellow
         hexColor(0xC77DFF)     // syntaxControlFlow - violet (no longer keyword)
+    },
+
+    // 11. Wombat - Philip's charcoal Wombat palette on Abyss's syntax colors.
+    // Headings use Noto Sans Display, the display cut of the body face (his
+    // Windows setup had Segoe UI); MonoLisa falls back to Monaspace Argon
+    {
+        L"Wombat", L"Noto Sans", L"Noto Sans Display", L"MonoLisa", true,
+        hexColor(0x242424),    // background - charcoal
+        hexColor(0xF6F3E8),    // text - warm off-white
+        hexColor(0x4BC98A),    // heading - green
+        hexColor(0x8AC6F2),    // link - sky blue
+        hexColor(0xB8F53C),    // code - lime
+        hexColor(0x0F0F0F),    // codeBackground - near black
+        hexColor(0x333333),    // blockquoteBorder
+        hexColor(0xCC99CC),    // accent - mauve
+        hexColor(0xFF4DD8),    // syntaxKeyword - magenta
+        hexColor(0xB8F53C),    // syntaxString - lime
+        hexColor(0x5C6660),    // syntaxComment - green-tinted gray
+        hexColor(0xFF8A3D),    // syntaxNumber - orange
+        hexColor(0x2EE6CF),    // syntaxFunction - cyan
+        hexColor(0xF5E663),    // syntaxType - yellow
+        hexColor(0xC77DFF),    // syntaxControlFlow - violet
+        hexColor(0xCAE682),    // inlineCode - Wombat's string green
+        {},                    // headingColors - all use heading
+        hexColor(0xFFC125),    // highlightBackground - goldenrod
+        hexColor(0x424242)     // highlightText - dark gray
     }
 };
 
@@ -347,21 +374,21 @@ void applyThemeKey(CustomTheme& ct, const std::string& key, const std::string& v
 void writeThemesIni() {
     std::wstring path = themesIniPath();
     if (path.empty()) return;
-    std::ofstream file(path);
+    std::ofstream file{fsPath(path)};
     if (!file) return;
     file << "; User themes. Colors are RRGGBB hex. Restart not required for\n";
     file << "; themes saved from the editor; hand edits load at next launch.\n";
     file << "; Optional inlinecode overrides code for inline spans only.\n";
+    file << "; An empty headingfont= sets headings in font=.\n";
     for (const auto& ct : g_customThemes) {
         const D2DTheme& t = ct->theme;
         file << "\n[theme]\n";
         file << "name=" << wideToUtf8Theme(ct->name) << "\n";
         file << "dark=" << (t.isDark ? 1 : 0) << "\n";
         file << "font=" << wideToUtf8Theme(ct->fontFamily) << "\n";
-        if (!ct->headingFontFamily.empty()) {
-            file << "headingfont=" << wideToUtf8Theme(ct->headingFontFamily)
-                 << "\n";
-        }
+        // Always written, empty while headings use font=, so the key is
+        // there to fill in by hand (#256)
+        file << "headingfont=" << wideToUtf8Theme(ct->headingFontFamily) << "\n";
         file << "codefont=" << wideToUtf8Theme(ct->codeFontFamily) << "\n";
         file << "background=" << colorToHex(t.background) << "\n";
         file << "text=" << colorToHex(t.text) << "\n";
@@ -388,6 +415,29 @@ void writeThemesIni() {
 
 } // namespace
 
+const char* themesIniTemplate() {
+    return "; Custom themes: [theme] sections, RRGGBB colors. For example:\n"
+           ";\n"
+           "; [theme]\n"
+           "; name=My theme\n"
+           "; dark=0\n"
+           "; font=Segoe UI\n"
+           "; headingfont=Georgia      (empty: headings use font=)\n"
+           "; codefont=Cascadia Mono\n"
+           "; background=F7FAFC\n"
+           "; text=2D3748\n"
+           "; heading=1A365D           (h1= to h6= set single levels)\n"
+           "; link=2B6CB0\n"
+           "; code=285E61              (inlinecode= for inline spans only)\n"
+           "; codebackground=EBF8FF\n"
+           "; blockquoteborder=A0C4E8\n"
+           "; accent=2B6CB0\n"
+           "; highlightbackground=FEF3C7\n"
+           "; highlighttext=2D3748\n"
+           "; syntaxkeyword=, syntaxstring=, syntaxcomment=, syntaxnumber=,\n"
+           "; syntaxfunction=, syntaxtype=, syntaxcontrolflow= color code blocks\n";
+}
+
 int themeCount() {
     return THEME_COUNT + (int)g_customThemes.size();
 }
@@ -405,7 +455,7 @@ void loadCustomThemes() {
     g_customThemes.clear();
     std::wstring path = themesIniPath();
     if (path.empty()) return;
-    std::ifstream file(path);
+    std::ifstream file{fsPath(path)};
     if (!file) return;
 
     std::unique_ptr<CustomTheme> current;
@@ -426,7 +476,7 @@ void loadCustomThemes() {
             current = std::make_unique<CustomTheme>();
             current->theme = THEMES[0];  // colors default to Paper
             current->fontFamily = L"Segoe UI";
-            current->codeFontFamily = L"Consolas";
+            current->codeFontFamily = kDefaultCodeFont;
             continue;
         }
         if (!current) continue;
@@ -459,7 +509,7 @@ int saveCustomTheme(const D2DTheme& t, const std::wstring& name,
     slot->name = name;
     slot->fontFamily = fontFamily.empty() ? L"Segoe UI" : fontFamily;
     slot->headingFontFamily = headingFontFamily;  // empty inherits font
-    slot->codeFontFamily = codeFontFamily.empty() ? L"Consolas" : codeFontFamily;
+    slot->codeFontFamily = codeFontFamily.empty() ? kDefaultCodeFont : codeFontFamily;
     slot->theme = t;
     bindStrings(*slot);
     writeThemesIni();

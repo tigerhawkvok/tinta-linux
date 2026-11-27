@@ -173,7 +173,7 @@ bool runSignalAction(App& app, HWND hwnd, int action) {
     switch (action) {
         case SIGA_OPEN_RELEASE:
             ShellExecuteW(nullptr, L"open",
-                          L"https://github.com/oipoistar/tinta/releases/latest",
+                          L"https://github.com/tigerhawkvok/tinta-linux/releases/latest",
                           nullptr, nullptr, SW_SHOWNORMAL);
             app.updateDismissed = true;
             return true;
@@ -359,11 +359,11 @@ void renderSignalChips(App& app) {
     IDWriteTextFormat* fmt = app.folderBrowserFormat;
     float margin = dpi(app, 14.0f);
     float bottom = (float)app.height - margin -
-                   (app.showStats ? dpi(app, 55.0f) : 0.0f);
+                   (app.showStats ? statsOverlayHeight(app) + dpi(app, 5.0f) : 0.0f);
     float right = (float)app.width - margin;
 
     // The unsaved-exit / create-file prompt chip owns the corner slot
-    if (!app.confirmExitPending && !app.createRefPending) {
+    if (!app.confirmExitPending && !app.createRefPending && !app.pasteImagePending) {
         app.promptChipRect = D2D1_RECT_F{};
     } else if (app.promptChipRect.right > app.promptChipRect.left) {
         bottom = std::min(bottom, app.promptChipRect.top - dpi(app, 8.0f));

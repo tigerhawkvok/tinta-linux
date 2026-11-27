@@ -1,6 +1,7 @@
 // Shared entry points and helpers for the extended Mermaid renderers.
 
 #include "mermaid_ext.h"
+#include "mermaid.h"
 
 #include <algorithm>
 #include <cctype>
@@ -199,8 +200,10 @@ void emitCylinder(std::vector<Prim>& out, const Prim& paint, float x1,
 
 }  // namespace detail
 
-Kind detectKind(std::string_view source) {
+Kind detectKind(std::string_view original) {
     using detail::trimView;
+    const std::string stripped = mermaid::stripPreamble(original);
+    std::string_view source = stripped;
     size_t position = 0;
     while (position <= source.size()) {
         size_t newline = source.find('\n', position);
@@ -220,7 +223,8 @@ Kind detectKind(std::string_view source) {
                            [](unsigned char c) {
                                return static_cast<char>(std::tolower(c));
                            });
-            if (keyword == "graph" || keyword == "flowchart") {
+            if (keyword == "graph" || keyword == "flowchart" ||
+                keyword == "flowchart-elk") {
                 return Kind::Flowchart;
             }
             if (keyword == "sequencediagram") return Kind::Sequence;
@@ -276,9 +280,11 @@ Kind detectKind(std::string_view source) {
     return Kind::None;
 }
 
-Built build(Kind kind, std::string_view source, const Measure& measure,
+Built build(Kind kind, std::string_view original, const Measure& measure,
             float scale) {
     using namespace detail;
+    const std::string stripped = mermaid::stripPreamble(original);
+    std::string_view source = stripped;
     switch (kind) {
         case Kind::Sequence: return buildSequence(source, measure, scale);
         case Kind::Pie: return buildPie(source, measure, scale);

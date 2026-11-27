@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "fs_path.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -25,7 +26,7 @@ std::wstring tintaConfigDir() {
         if (slash != std::wstring::npos) {
             dir = dir.substr(0, slash);
             DWORD attrs =
-                GetFileAttributesW((dir + L"\\settings.ini").c_str());
+                GetFileAttributesW(joinPath(dir, L"settings.ini").c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES &&
                 !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
                 cached = dir;
@@ -38,7 +39,23 @@ std::wstring tintaConfigDir() {
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0,
                                    appDataPath))) {
         std::wstring path = appDataPath;
-        path += L"\\Tinta";
+#ifdef _WIN32
+        // Tinta Mono keeps its own folder beside upstream Tinta's, so the two
+        // run side by side without sharing state. The first run copies
+        // Tinta's settings, themes and translations over (they are copies:
+        // Tinta keeps its own). Linux has no upstream Tinta: ~/.config/Tinta.
+        std::wstring upstream = joinPath(path, L"Tinta");
+        path = joinPath(path, L"TintaMono");
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW(upstream.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            CreateDirectoryW(path.c_str(), nullptr);
+            for (const wchar_t* name : {L"settings.ini", L"themes.ini", L"languages.ini"}) {
+                CopyFileW(joinPath(upstream, name).c_str(), joinPath(path, name).c_str(), TRUE);
+            }
+        }
+#else
+        path = joinPath(path, L"Tinta");
+#endif
         CreateDirectoryW(path.c_str(), nullptr);  // Create if not exists
         cached = path;
     }

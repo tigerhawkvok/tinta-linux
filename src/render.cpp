@@ -1,5 +1,7 @@
 #include "frontmatter_ui.h"
+#include "fs_path.h"
 #include "render.h"
+#include "admonition.h"
 #include "file_utils.h"
 #include "inline_style.h"
 #include "utils.h"
@@ -7,12 +9,20 @@
 #include "search.h"
 #include "mermaid.h"
 #include "mermaid_ext.h"
+#ifdef TINTA_MERMAN
+#include "editor.h"  // toUtf8
+#include "merman_engine.h"
+#endif
 #include "math_render.h"
 #include "image_loader.h"
+#include "table_format.h"
+#include "plantuml_app.h"
+#include "plantuml_queue.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <map>
@@ -25,6 +35,13 @@
 #include <thread>
 #include <d2d1_3.h>
 #include <shlwapi.h>
+#if defined(_WIN32) && defined(TINTA_MERMAN_PNG)
+#include <dwrite_3.h>
+#include <cwctype>
+#include <unordered_set>
+#endif
+#include <mutex>
+#include <unordered_map>
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "shlwapi.lib")
 
@@ -74,10 +91,9 @@ static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextForm
     return info;
 }
 
-static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size_t docLength,
-                        size_t runIndex = (size_t)-1) {
-    size_t idx = app.textRects.size();
-    app.textRects.push_back({rect, docStart, docLength, runIndex});
+// Files text rect idx into the line bucket at its top
+static void bucketTextRect(App& app, size_t idx) {
+    const D2D1_RECT_F rect = app.textRects[idx].rect;
 
     // Table cells are laid out column by column. A wrapped cell can append a
     // later line before the next column appends its first line, so buckets
@@ -115,6 +131,12 @@ static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size
             return existing.top < top;
         });
     app.lineBuckets.insert(insertAt, std::move(bucket));
+}
+
+static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size_t docLength,
+                        size_t runIndex = (size_t)-1) {
+    app.textRects.push_back({rect, docStart, docLength, runIndex});
+    bucketTextRect(app, app.textRects.size() - 1);
 }
 
 static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
@@ -180,6 +202,9 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     app.textRects.resize(s.textRects);
     app.lineBuckets.resize(s.lineBuckets);
     app.docText.resize(s.docTextLen);
+    while (!app.docSourceSpans.empty() && app.docSourceSpans.back().docStart >= s.docTextLen) {
+        app.docSourceSpans.pop_back();
+    }
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
 }
@@ -263,8 +288,85 @@ static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
     return measureText(app, L" ", format);
 }
 
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src);
+static void imageBoxSize(App& app, const Element& image, const App::ImageEntry& entry, float maxWidth,
+                         float& w, float& h);
+
+// Moves what a paragraph has laid out on its current line (everything
+// since `from` reaching below lineTop) down by dy: an image taller than the
+// text grew the line, and the text keeps to the new baseline. Text rects
+// move to the bucket of their new top.
+static void shiftLineDown(App& app, const LayoutSnapshot& from, float lineTop, float dy) {
+    auto below = [&](float bottom) { return bottom > lineTop + 0.5f; };
+    for (size_t i = from.textRuns; i < app.layoutTextRuns.size(); i++) {
+        auto& r = app.layoutTextRuns[i];
+        if (!below(r.bounds.bottom)) continue;
+        r.pos.y += dy;
+        r.bounds.top += dy;
+        r.bounds.bottom += dy;
+    }
+    for (size_t i = from.rects; i < app.layoutRects.size(); i++) {
+        auto& r = app.layoutRects[i].rect;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    for (size_t i = from.lines; i < app.layoutLines.size(); i++) {
+        auto& l = app.layoutLines[i];
+        if (below(std::max(l.p1.y, l.p2.y))) l.p1.y += dy, l.p2.y += dy;
+    }
+    for (size_t i = from.shapes; i < app.layoutShapes.size(); i++) {
+        auto& r = app.layoutShapes[i].rect;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    for (size_t i = from.connectors; i < app.layoutConnectors.size(); i++) {
+        auto& c = app.layoutConnectors[i];
+        if (!below(c.bounds.bottom)) continue;
+        c.bounds.top += dy;
+        c.bounds.bottom += dy;
+        for (auto& point : c.points) point.y += dy;
+    }
+    for (size_t i = from.bitmaps; i < app.layoutBitmaps.size(); i++) {
+        auto& r = app.layoutBitmaps[i].destRect;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    for (size_t i = from.links; i < app.linkRects.size(); i++) {
+        auto& r = app.linkRects[i].bounds;
+        if (below(r.bottom)) r.top += dy, r.bottom += dy;
+    }
+    std::vector<size_t> moved;
+    for (size_t i = from.textRects; i < app.textRects.size(); i++) {
+        auto& r = app.textRects[i].rect;
+        if (!below(r.bottom)) continue;
+        r.top += dy;
+        r.bottom += dy;
+        moved.push_back(i);
+    }
+    if (moved.empty()) return;
+    // Out of their old buckets (dropping any left empty), into new ones
+    for (auto& bucket : app.lineBuckets) {
+        auto& indices = bucket.textRectIndices;
+        indices.erase(std::remove_if(indices.begin(), indices.end(),
+                                     [&](size_t idx) {
+                                         return std::binary_search(moved.begin(), moved.end(), idx);
+                                     }),
+                      indices.end());
+        if (indices.empty()) continue;
+        bucket.bottom = std::numeric_limits<float>::lowest();
+        bucket.minX = std::numeric_limits<float>::max();
+        bucket.maxX = std::numeric_limits<float>::lowest();
+        for (size_t idx : indices) {
+            const auto& r = app.textRects[idx].rect;
+            bucket.bottom = std::max(bucket.bottom, r.bottom);
+            bucket.minX = std::min(bucket.minX, r.left);
+            bucket.maxX = std::max(bucket.maxX, r.right);
+        }
+    }
+    app.lineBuckets.erase(std::remove_if(app.lineBuckets.begin(), app.lineBuckets.end(),
+                                         [](const App::LineBucket& b) { return b.textRectIndices.empty(); }),
+                          app.lineBuckets.end());
+    for (size_t idx : moved) bucketTextRect(app, idx);
+}
+
 static void layoutElement(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
-static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 
 // --- UAX#14 line-break analysis ---
 //
@@ -397,18 +499,150 @@ void analyzeBreakOpportunities(App& app, const std::wstring& text, std::vector<b
 
 } // namespace
 
+// The first source offset in a subtree (the parser marks each element's
+// first text)
+static size_t firstSourceOffsetIn(const Element* elem) {
+    if (!elem) return SIZE_MAX;
+    size_t best = elem->sourceOffset;
+    for (const auto& child : elem->children) best = std::min(best, firstSourceOffsetIn(child.get()));
+    return best;
+}
+
+// Records where docText[docStart, +length) came from (markdown_copy.cpp)
+static void noteDocSource(App& app, size_t docStart, size_t length, const Element* leaf, bool code,
+                          size_t sourceHint) {
+    if (length == 0) return;
+    App::DocSourceSpan span;
+    span.docStart = docStart;
+    span.docLength = length;
+    span.sourceHint = sourceHint;
+    span.block = app.layoutSourceBlock;
+    span.table = app.layoutSourceTable;
+    span.code = code;
+    // Inline spans with delimiters around this text, innermost first; a
+    // code span or inline math leaf carries its own
+    for (const Element* e = leaf; e; e = e->parent) {
+        bool delimited = false;
+        switch (e->type) {
+            case ElementType::Code: case ElementType::MathInline:
+            case ElementType::Emphasis: case ElementType::Strong: case ElementType::Link:
+            case ElementType::Strikethrough: case ElementType::Highlight:
+            case ElementType::Superscript: case ElementType::Subscript:
+                delimited = true;
+                break;
+            case ElementType::Text: case ElementType::Anchor: case ElementType::Image:
+            case ElementType::Ruby: case ElementType::RubyText:
+                break;
+            default:
+                e = nullptr;  // reached the block
+                break;
+        }
+        if (!e) break;
+        if (delimited) span.inlines.push_back({e->type, reinterpret_cast<uintptr_t>(e)});
+    }
+    app.docSourceSpans.push_back(std::move(span));
+}
+
+// First-line baseline of a layout, measured from its top; negative
+// when the layout has no line to measure
+static float layoutBaseline(IDWriteTextLayout* layout) {
+    if (!layout) return -1.0f;
+    UINT32 count = 0;
+    layout->GetLineMetrics(nullptr, 0, &count);
+    if (!count) return -1.0f;
+    std::vector<DWRITE_LINE_METRICS> lines(count);
+    if (FAILED(layout->GetLineMetrics(lines.data(), count, &count))) return -1.0f;
+    return lines.front().baseline;
+}
+
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
                                 const std::string& baseLinkUrl = {}, float customLineHeight = 0.0f) {
+    // One block of text for docSourceSpans: where its source starts. The
+    // parser marks the block (its first text), not plain Text children
+    app.layoutSourceBlock++;
+    size_t blockSourceHint = SIZE_MAX;
+    if (!elements.empty() && elements.front()->parent) {
+        blockSourceHint = firstSourceOffsetIn(elements.front()->parent);
+    }
+    for (const auto& element : elements) {
+        blockSourceHint = std::min(blockSourceHint, firstSourceOffsetIn(element.get()));
+    }
     float x = startX;
     float lineHeight = customLineHeight > 0 ? customLineHeight : baseFormat->GetFontSize() * 1.7f;
     const float normalLineHeight = lineHeight;
+    // A line an image grew: its y after growing, and by how much
+    const LayoutSnapshot paragraphStart = takeSnapshot(app);
+    const float paragraphTop = y;
+    float grownLineY = -1.0f;
+    float lineGrowth = 0.0f;
     float mathTextOffset = 0;
     float maxX = startX + maxWidth;
     float spaceWidth = getSpaceWidth(app, baseFormat);
 
+
+    // First-line baseline and height of a format's layouts. Runs are
+    // top-aligned at the line, so a run in another face (inline code) sits
+    // on the paragraph's baseline only when shifted by the difference (#262).
+    struct FaceLine {
+        IDWriteTextFormat* format;
+        float baseline, height;
+    };
+    std::vector<FaceLine> faceLines;
+    auto faceLine = [&](IDWriteTextFormat* format) -> const FaceLine& {
+        for (const auto& known : faceLines) {
+            if (known.format == format) return known;
+        }
+        FaceLine line{format, format->GetFontSize() * 0.8f, format->GetFontSize() * 1.2f};
+        IDWriteTextLayout* probe = nullptr;
+        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(L"Ag", 2, format, 1000, 1000, &probe))) {
+            DWRITE_LINE_METRICS metrics{};
+            UINT32 count = 1;
+            if (SUCCEEDED(probe->GetLineMetrics(&metrics, 1, &count))) {
+                line.baseline = metrics.baseline;
+                line.height = metrics.height;
+            }
+            probe->Release();
+        }
+        faceLines.push_back(line);
+        return faceLines.back();
+    };
+    auto baselineOf = [&](IDWriteTextFormat* format) { return faceLine(format).baseline; };
+    // Every run sits on the baseline its format's own font gives Latin
+    // text (#259): DirectWrite hangs a run from the line top on the ascent
+    // of the fonts it uses, so a run drawing fallback glyphs (Chinese
+    // beside a Latin face, emoji) would otherwise drop. A run's own
+    // baseline counts its fallback fonts; its format's does not.
+    auto runBaseline = [&](IDWriteTextLayout* layout, IDWriteTextFormat* format) {
+        float baseline = layoutBaseline(layout);
+        return baseline >= 0.0f ? baseline : baselineOf(format);
+    };
+
+    // <ins> and <u> text (#263): a rule just under the baseline of the text
+    // the underline began in, and never above the run's own, so a subscript
+    // inside stays clear of it. The spaces between two underlined runs on
+    // one line (<ins>a **b** c</ins>) carry the rule across.
+    float underlineEndX = -1.0f;
+    float underlineLineY = 0.0f;
+    auto addUnderline = [&](const InlineStyle& style, float lineStartX, float lineEndX,
+                            float lineY, float runBaselineY, D2D1_COLOR_F color) {
+        if (lineEndX <= lineStartX) return;
+        if (underlineEndX >= 0.0f && underlineLineY == lineY && underlineEndX < lineStartX) {
+            lineStartX = underlineEndX;
+        }
+        IDWriteTextFormat* origin = style.underlineFormat ? style.underlineFormat : baseFormat;
+        float originBaseline = lineY + mathTextOffset + style.underlineYOffset + baselineOf(origin);
+        float baseline = std::max(originBaseline, runBaselineY);
+        float underlineY = baseline + std::max(1.0f, origin->GetFontSize() * 0.12f);
+        app.layoutLines.push_back({D2D1::Point2F(lineStartX, underlineY),
+                                   D2D1::Point2F(lineEndX, underlineY), color, 1.0f});
+        underlineEndX = lineEndX;
+        underlineLineY = lineY;
+    };
+
     std::string inlineAnchor;
+    bool linkUnderInsertion = false;  // a link inside <ins> shares its rule
     auto addLinkSegment = [&](float lineStartX, float lineEndX, float lineY,
                               const std::string& linkUrl, D2D1_COLOR_F color) {
         if (lineEndX <= lineStartX) return;
@@ -430,7 +664,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                                            D2D1::Point2F(ex, underlineY),
                                            dashColor, 1.0f});
             }
-        } else if (inlineAnchor.empty()) {
+        } else if (inlineAnchor.empty() && !linkUnderInsertion) {
             app.layoutLines.push_back({D2D1::Point2F(lineStartX, underlineY),
                                        D2D1::Point2F(lineEndX, underlineY),
                                        color, 1.0f});
@@ -449,6 +683,14 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     std::vector<StyledRun> runs;
     flattenInline(app, elements, rootStyle, lineHeight, runs);
 
+    // A code chip hugs its glyphs' line box, padded by a fifth of the code
+    // size, and stays inside the text line so cells never clip it (#262)
+    auto codeChip = [&](float left, float right, float lineTop, float codeTop, IDWriteTextFormat* format) {
+        const float pad = format->GetFontSize() * 0.2f;
+        return D2D1::RectF(left, std::max(lineTop, codeTop - pad), right,
+                           std::min(lineTop + normalLineHeight, codeTop + faceLine(format).height + pad));
+    };
+
     // Reserve a common baseline and enough vertical room before retaining
     // any runs. Uniform spacing within this paragraph keeps wrapping and
     // selection consistent even when a tall inline matrix occurs mid-line.
@@ -466,14 +708,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         float size = format->GetFontSize();
         mathBoxes[i] = mathParse(app, toWide(run.elem->text), size, false);
         if (!mathBoxes[i]) continue;
-        float baseline = size * 0.8f;
-        IDWriteTextLayout* probe = nullptr;
-        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(L"Ag", 2, format, 1000, 1000, &probe))) {
-            DWRITE_LINE_METRICS metrics{};
-            UINT32 count = 1;
-            if (SUCCEEDED(probe->GetLineMetrics(&metrics, 1, &count))) baseline = metrics.baseline;
-            probe->Release();
-        }
+        float baseline = baselineOf(format);
         mathBaselines[i] = baseline;
         mathExpandLine(mathBoxes[i], baseline + run.style.drawYOffset, normalLineHeight, mathTextOffset, mathBelow);
     }
@@ -483,12 +718,20 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         const auto& run = runs[runIndex];
         const ElementPtr& elem = run.elem;
         IDWriteTextFormat* format = run.style.format;
+        IDWriteTextFormat* textFormat = format ? format : baseFormat;
         D2D1_COLOR_F color = run.style.color;
         const std::string& linkUrl = run.style.linkUrl;
         inlineAnchor = run.style.anchorId;
         bool isLink = run.style.isLink;
         bool hasBg = run.style.hasBg;
         bool hasStrike = run.style.hasStrike;
+        // A link inside <ins> is underlined once, by the insertion's rule;
+        // a .md reference keeps its dashed one alone
+        bool fileRef = isLink && (linkUrl.rfind("fileref-ok:", 0) == 0 ||
+                                  linkUrl.rfind("fileref-missing:", 0) == 0);
+        bool hasUnderline = run.style.hasUnderline && !fileRef;
+        linkUnderInsertion = hasUnderline;
+        if (!hasUnderline) underlineEndX = -1.0f;
         D2D1_COLOR_F bgColor = run.style.bgColor;
         float drawYOffset = run.style.drawYOffset + mathTextOffset;
         bool wrappedCode = false;
@@ -501,7 +744,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 break;
 
             case ElementType::Code: {
-                format = inlineCodeFormat(app, run.style.bold, run.style.italic);
+                format = inlineCodeFormat(app, run.style.bold, run.style.italic, textFormat);
                 if (!isLink) color = themeInlineCodeColor(app.theme);
                 for (const auto& child : elem->children) {
                     if (child->type == ElementType::Text) {
@@ -513,6 +756,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 LayoutInfo info = createLayout(app, text, format, lineHeight, app.codeTypography);
                 float textWidth = info.width;
 
+                // On the surrounding text's baseline (#259, #262): the face
+                // of the style around it, such as a heading's bold face
+                const float codeBaselineShift = baselineOf(textFormat) - baselineOf(format);
                 // Keep fitting code spans atomic. Oversized ones share the
                 // Unicode/cluster-aware wrapping path below, including during
                 // table row measurement, so their chips cannot cover the next
@@ -520,7 +766,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 if (textWidth + kCodeSpanPadding > maxWidth) {
                     if (info.layout) info.layout->Release();
                     wrappedCode = true;
-                    drawYOffset = mathTextOffset + (normalLineHeight - format->GetFontSize() * 1.2f) / 2.0f;
+                    drawYOffset = mathTextOffset + codeBaselineShift;
                     break;
                 }
 
@@ -529,20 +775,22 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     y += lineHeight;
                 }
 
-                app.layoutRects.push_back({D2D1::RectF(x - 2, y + mathTextOffset,
-                                                      x + textWidth + kCodeSpanPadding,
-                                                      y + mathTextOffset + normalLineHeight),
+                D2D1_POINT_2F pos = D2D1::Point2F(
+                    x, y + mathTextOffset + codeBaselineShift + baselineOf(format) - runBaseline(info.layout, format));
+                app.layoutRects.push_back({codeChip(x - 2, x + textWidth + kCodeSpanPadding,
+                                                    y + mathTextOffset, pos.y, format),
                                            app.theme.codeBackground});
-
-                float codeFontHeight = format->GetFontSize() * 1.2f;
-                float verticalOffset = mathTextOffset + (normalLineHeight - codeFontHeight) / 2.0f;
-                D2D1_POINT_2F pos = D2D1::Point2F(x, y + verticalOffset);
                 D2D1_RECT_F bounds = D2D1::RectF(x, y, x + textWidth, y + lineHeight);
                 addTextRun(app, std::move(info), pos, bounds, color,
                            codeDocStart, text.length(), true);
 
+                noteDocSource(app, codeDocStart, text.length(), elem.get(), false, blockSourceHint);
                 app.docText += text;
                 if (isLink) addLinkSegment(x, x + textWidth, y, linkUrl, color);
+                if (hasUnderline) {
+                    addUnderline(run.style, x, x + textWidth, y, y + drawYOffset + baselineOf(textFormat),
+                                 color);
+                }
                 // Advance by the pill's own padding only: the surrounding text
                 // already carries the source's spacing, so a full space width
                 // here would double it and shove a following comma off the span
@@ -558,8 +806,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 MathBoxPtr box = mathBoxes[runIndex];
                 if (!box) {
                     // Unsupported TeX: show the raw source in code style
-                    format = inlineCodeFormat(app, run.style.bold, run.style.italic);
+                    format = inlineCodeFormat(app, run.style.bold, run.style.italic, textFormat);
                     if (!isLink) color = themeInlineCodeColor(app.theme);
+                    drawYOffset += baselineOf(textFormat) - baselineOf(format);
                     text = L"$" + latex + L"$";
                     break;
                 }
@@ -581,6 +830,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
                     app.layoutLines.push_back({D2D1::Point2F(x, strikeY),
                                                D2D1::Point2F(x + w, strikeY), color, 1.0f});
+                }
+                if (hasUnderline) {
+                    // On the text baseline, as under the words around it
+                    addUnderline(run.style, x, x + w, y, y + drawYOffset + textBaseline, color);
                 }
                 mathBoxRetain(app, box, x, boxTop, color);
                 if (isLink) addLinkSegment(x, x + w, y, linkUrl, color);
@@ -611,12 +864,67 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 continue;
 
             case ElementType::Image: {
-                // Break out of inline flow, render image as block
-                if (x > startX) {
-                    y += lineHeight;  // end current line
-                    x = startX;
+                // An image sits in the line as in a browser: its bottom on
+                // the baseline, wrapping like a word, the line growing when
+                // the image is taller than the text above the baseline. A
+                // badge row stays a row, a badge stays beside its heading.
+                // Inside a link it opens the link (no underline, as on GitHub).
+                auto& entry = getOrLoadImage(app, elem->url);
+                const float baseline = mathTextOffset + baselineOf(textFormat);
+                if (entry.failed || !entry.bitmap) {
+                    // Missing: its alt text, faded italics, as one word
+                    std::wstring alt;
+                    std::function<void(const ElementPtr&)> gather = [&](const ElementPtr& e) {
+                        if (e->type == ElementType::Text) alt += toWide(e->text);
+                        for (const auto& c : e->children) gather(c);
+                    };
+                    for (const auto& c : elem->children) gather(c);
+                    const std::wstring label = alt.empty() ? L"[image]" : L"[image: " + alt + L"]";
+                    LayoutInfo info = createLayout(app, label, app.italicFormat, lineHeight, app.bodyTypography);
+                    const float w = info.width;
+                    if (x + w > maxX && x > startX) {
+                        x = startX;
+                        y += lineHeight;
+                    }
+                    D2D1_COLOR_F faded = app.theme.text;
+                    faded.a = 0.6f;
+                    const D2D1_POINT_2F pos =
+                        D2D1::Point2F(x, y + baseline - runBaseline(info.layout, app.italicFormat));
+                    const D2D1_RECT_F bounds = D2D1::RectF(x, y, x + w, y + lineHeight);
+                    addTextRun(app, std::move(info), pos, bounds, faded, app.docText.size(), label.length(), false);
+                    app.docText += label;
+                    if (isLink && !linkUrl.empty()) app.linkRects.push_back({bounds, linkUrl});
+                    x += w;
+                    continue;
                 }
-                layoutImage(app, elem, y, startX, maxWidth);
+                float w = 0, h = 0;
+                imageBoxSize(app, *elem, entry, maxWidth, w, h);
+                if (x + w > maxX && x > startX) {
+                    x = startX;
+                    y += lineHeight;
+                }
+                if (grownLineY != y) lineGrowth = 0.0f;  // a line no image has grown yet
+                if (h - baseline > lineGrowth) {
+                    const float dy = h - baseline - lineGrowth;
+                    if (y - lineGrowth == paragraphTop) {
+                        // The first line: a list marker beside it follows
+                        auto known = std::find_if(app.grownFirstLines.begin(), app.grownFirstLines.end(),
+                                                  [&](const auto& g) { return g.first == paragraphTop; });
+                        if (known == app.grownFirstLines.end()) app.grownFirstLines.push_back({paragraphTop, 0.0f});
+                        known = std::find_if(app.grownFirstLines.begin(), app.grownFirstLines.end(),
+                                             [&](const auto& g) { return g.first == paragraphTop; });
+                        known->second = h - baseline;
+                    }
+                    shiftLineDown(app, paragraphStart, y, dy);
+                    if (underlineEndX >= 0.0f && underlineLineY == y) underlineLineY += dy;
+                    y += dy;
+                    lineGrowth = h - baseline;
+                }
+                grownLineY = y;
+                const D2D1_RECT_F rect = D2D1::RectF(x, y + baseline - h, x + w, y + baseline);
+                app.layoutBitmaps.push_back({entry.bitmap, rect});
+                if (isLink && !linkUrl.empty()) app.linkRects.push_back({rect, linkUrl});
+                x += w;
                 continue;
             }
 
@@ -684,6 +992,11 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                     D2D1_POINT_2F rubyPos = D2D1::Point2F(rubyPosX, y + mathTextOffset);
                     D2D1_RECT_F rubyBounds = D2D1::RectF(rubyPosX, y + mathTextOffset, rubyPosX + rubyWidth, y + mathTextOffset + rubyLineHeight);
                     addTextRun(app, std::move(rubyInfo), rubyPos, rubyBounds, rubyColor, 0, 0, false);
+                }
+
+                if (hasUnderline) {
+                    addUnderline(run.style, basePosX, basePosX + baseWidth, y,
+                                 baseY + std::max(0.0f, layoutBaseline(baseInfo.layout)), color);
                 }
 
                 // Draw base text (selectable)
@@ -784,10 +1097,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             }
             float segWidth = widthOf(segStart, segEnd);
             if (wrappedCode) {
-                app.layoutRects.push_back({
-                    D2D1::RectF(segX - 2, y + mathTextOffset, segX + segWidth + kCodeSpanPadding,
-                                y + mathTextOffset + normalLineHeight),
-                    app.theme.codeBackground});
+                app.layoutRects.push_back({codeChip(segX - 2, segX + segWidth + kCodeSpanPadding, y + mathTextOffset,
+                                                    y + drawYOffset, format),
+                                           app.theme.codeBackground});
             } else if (hasBg) {
                 app.layoutRects.push_back({
                     D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
@@ -800,7 +1112,16 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                                            D2D1::Point2F(segX + segWidth, strikeY),
                                            color, 1.0f});
             }
-            D2D1_POINT_2F segPos = D2D1::Point2F(segX, y + drawYOffset);
+            if (hasUnderline) {
+                addUnderline(run.style, segX, segX + segWidth, y, y + drawYOffset + baselineOf(format),
+                             color);
+            }
+            // A run that draws fallback glyphs (Chinese beside a Latin
+            // font, emoji) gets a taller line ascent from DirectWrite; put
+            // it back on its format's baseline like every other run (#259)
+            float segTop = drawYOffset + baselineOf(format) -
+                           runBaseline(info.layout, format);
+            D2D1_POINT_2F segPos = D2D1::Point2F(segX, y + segTop);
             D2D1_RECT_F segBounds = D2D1::RectF(segX, y, segX + segWidth, y + lineHeight);
             size_t runsBefore = app.layoutTextRuns.size();
             addTextRun(app, std::move(info), segPos, segBounds, color,
@@ -905,6 +1226,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         flushSegment(lastWordEnd);
         if (measureInfo.layout) measureInfo.layout->Release();
 
+        noteDocSource(app, textDocStart, text.length(), elem.get(), false, blockSourceHint);
         app.docText += text;
 
         if (isLink && lastWordEndX > linkLineStartX) {
@@ -917,6 +1239,12 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 }
 
 static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
+#ifdef TINTA_MERMAN
+static bool layoutMermanDiagram(App& app, const std::string& source,
+                                unsigned fitKey, float& y, float indent,
+                                float maxWidth, D2D1_RECT_F* bounds,
+                                bool* fitCandidate);
+#endif
 
 // Display math ($$...$$, #80): a centered block rendered natively; the raw
 // TeX joins docText so search and selection see the source
@@ -1765,7 +2093,7 @@ struct DiagramFormats {
         float size = (style.mono ? 13.0f : 14.0f) * scale * style.scale;
         IDWriteTextFormat* format = nullptr;
         app.dwriteFactory->CreateTextFormat(
-            family, nullptr,
+            family, fontCollectionFor(app, family),
             style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                        : DWRITE_FONT_WEIGHT_NORMAL,
             style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
@@ -2095,6 +2423,32 @@ static bool layoutMermaidExtDiagram(App& app, mermaidext::Kind kind,
     return true;
 }
 
+static App::ImageEntry& getOrLoadImage(App& app, const std::string& src);
+
+// UTF-8 form of a wide string (the PlantUML preamble and the image cache
+// key are narrow; render.cpp has no toUtf8 dependency)
+static std::string wideToUtf8(const std::wstring& s) {
+    if (s.empty()) return {};
+    const int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(),
+                                        (int)s.size(), nullptr, 0, nullptr,
+                                        nullptr);
+    std::string out(len > 0 ? (size_t)len : 0, '\0');
+    if (len > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(),
+                            out.data(), len, nullptr, nullptr);
+    }
+    return out;
+}
+
+// "RRGGBB" (no '#') for skinparam defaultFontColor
+static std::string colorHexNoHash(const D2D1_COLOR_F& c) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02X%02X%02X",
+             (int)(c.r * 255.0f + 0.5f), (int)(c.g * 255.0f + 0.5f),
+             (int)(c.b * 255.0f + 0.5f));
+    return buf;
+}
+
 static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     std::string code;
     for (const auto& child : elem->children) {
@@ -2114,6 +2468,24 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
         bool fitActive = fitBlockEnabled(app, fitKey);
         bool fitCandidate = false;
         bool rendered = false;
+#ifdef TINTA_MERMAN
+        // merman first (Mermaid's own layouts, every diagram type); the
+        // native renderer, then the code block, are the fallbacks
+        if (layoutMermanDiagram(app, code, fitKey, y, indent, maxWidth,
+                                &renderedBounds, &fitCandidate)) {
+            App::CodeBlockInfo info;
+            info.bounds = renderedBounds;
+            info.codeText = toWide(code);
+            info.isDiagram = true;
+            info.searchSource = true;
+            info.docPos = app.docText.size();
+            info.fitKey = fitKey;
+            info.fitCandidate = fitCandidate || fitActive;
+            info.fitActive = fitActive;
+            app.codeBlocks.push_back(std::move(info));
+            return;
+        }
+#endif
         LayoutSnapshot preSnap = takeSnapshot(app);
         float preY = y;
         float scaleMul = 1.0f;
@@ -2156,6 +2528,154 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
         }
         rollbackTo(app, preSnap);
         y = preY;
+    }
+
+    // PlantUML fence: render through the configured tool. The interactive
+    // path schedules off the UI thread; the print/PDF layout (which has no
+    // message pump) is the single synchronous exception, bounded below.
+    if (plantuml::isFenceLanguage(languageName)) {
+        plantumlResolve(app);
+        if (app.plantumlTool.available) {
+            const std::wstring toolPath = app.plantumlTool.isJar
+                                              ? app.plantumlTool.jar
+                                              : app.plantumlTool.program;
+            // Preamble from the live theme: family/size follow the mermaid
+            // diagram conventions, the text color comes from the shared
+            // role resolver so both renderers agree on the active theme.
+            // Dark palettes additionally theme shape fills and strokes from
+            // the same resolver (Fill = code surface, Stroke = accent);
+            // light palettes keep their byte-identical five-line preamble.
+            // The print layout swaps app.theme for the light Paper palette
+            // before reaching here, so printed diagrams stay on that light
+            // path by design.
+            mermaidext::Prim colorPrim{};
+            const std::string preambleText = plantuml::preamble(
+                wideToUtf8(app.theme.fontFamily), 14.0f,
+                colorHexNoHash(resolveDiagramRoleImpl(
+                    app, colorPrim, mermaidext::Role::Text)),
+                app.theme.isDark,
+                colorHexNoHash(resolveDiagramRoleImpl(
+                    app, colorPrim, mermaidext::Role::Fill)),
+                colorHexNoHash(resolveDiagramRoleImpl(
+                    app, colorPrim, mermaidext::Role::Stroke)));
+            std::string sourceWithPreamble = code;
+            // No @startuml anchor: nothing to render, fall through to the
+            // existing source-code rendering unchanged.
+            if (plantuml::injectPreamble(sourceWithPreamble,
+                                        preambleText)) {
+                const uint64_t key = plantuml::cacheKey(
+                    code, preambleText, toolPath,
+                    plantuml::toolStampFor(toolPath), 0 /*png*/);
+                // The fit ordinal is taken whether or not the image has
+                // arrived yet: a diagram still rendering must not shift
+                // the fit state of the diagrams after it
+                const unsigned fitKey = 0x80000000u | app.layoutDiagramSeq++;
+                // Adopt finished renders on this (owner) thread before
+                // deciding: a relayout may run before the posted
+                // WM_APP_PLANTUML_READY is dispatched, and drainFinished()
+                // is the ONLY cache mutation point - without it an
+                // identical key misses and gets spawned again.
+                if (app.plantumlQueue) app.plantumlQueue->drainFinished();
+                auto hit = app.plantumlQueue
+                               ? app.plantumlQueue->lookup(key)
+                               : nullptr;
+
+                // Lays the rendered PNG out as a diagram block: natural
+                // size is the PNG's pixel size (PlantUML renders 1x, not
+                // the mermaid 2x convention); scaling is exact math, so a
+                // fit computes one scale instead of the 4-pass loop.
+                auto layOutPng = [&](const std::wstring& pngPath) -> bool {
+                    auto& image = getOrLoadImage(app, wideToUtf8(pngPath));
+                    if (image.failed || !image.bitmap) return false;
+                    const float scale = app.contentScale * app.zoomFactor;
+                    const bool fitActive = fitBlockEnabled(app, fitKey);
+                    const float renderedW = (float)image.width * scale;
+                    const float renderedH = (float)image.height * scale;
+                    const bool fitCandidate = renderedW > maxWidth;
+                    float fitScale = 1.0f;
+                    if (fitActive && fitCandidate && renderedW > 0.0f) {
+                        fitScale = maxWidth / renderedW;
+                    }
+                    const D2D1_RECT_F bounds = D2D1::RectF(
+                        indent, y, indent + renderedW * fitScale,
+                        y + renderedH * fitScale);
+                    app.layoutBitmaps.push_back({image.bitmap, bounds});
+                    app.contentWidth = std::max(
+                        app.contentWidth, bounds.right + 40.0f * scale);
+                    y = bounds.bottom + 24.0f * scale;
+                    App::CodeBlockInfo info;
+                    info.bounds = bounds;
+                    info.codeText = toWide(code);
+                    info.isDiagram = true;
+                    info.fitKey = fitKey;
+                    info.fitCandidate = fitCandidate || fitActive;
+                    info.fitActive = fitActive;
+                    info.isPlantuml = true;
+                    info.plantumlKey = key;
+                    info.plantumlFormat = 0;
+                    app.codeBlocks.push_back(std::move(info));
+                    return true;
+                };
+
+                if (hit && hit->ok) {
+                    if (layOutPng(hit->filePath)) return;
+                } else if (!hit && app.plantumlPrintLayout &&
+                           app.plantumlPrintBudgetMsLeft > 0) {
+                    // Deliberate SYNC exception: the print/PDF layout runs
+                    // under the light Paper palette (print.cpp swaps
+                    // app.theme in), so this branch always renders the
+                    // light, byte-stable preamble built above.
+                    // without a message pump, so the async queue can never
+                    // deliver there. Bounded per diagram by the shared
+                    // budget; the interactive path never renders inline.
+                    //
+                    // A private print-sync subtree keeps these files away
+                    // from the queue's own <workRoot>\<key> directories,
+                    // where the worker may be mid-render for the same key
+                    // on another thread (renderSync truncates its output).
+                    // A pumpless flow (--printpages, --exportpdf) can reach
+                    // this branch before the interactive path ever ran,
+                    // but plantumlWorkRoot is computed by
+                    // plantumlEnsureQueue(). Without it the root would be
+                    // empty and the work dir would degenerate to a drive-
+                    // relative \print-sync\<key>. Idempotent.
+                    plantumlEnsureQueue(app);
+                    const std::wstring workDir = app.plantumlWorkRoot +
+                        plantuml::kPathSeparator + L"print-sync" + plantuml::kPathSeparator + plantuml::keyHex(key);
+                    // The post-print relayout at screen width reuses this
+                    // file instead of spawning the tool again; the tool
+                    // stamp is part of the key, so an upgrade invalidates.
+                    const std::wstring cachedPng = workDir + plantuml::kPathSeparator + L"input.png";
+                    if (GetFileAttributesW(cachedPng.c_str()) !=
+                            INVALID_FILE_ATTRIBUTES &&
+                        layOutPng(cachedPng)) {
+                        return;
+                    }
+                    std::wstring outFile;
+                    std::wstring error;
+                    const DWORD budgetMs = (DWORD)std::min(
+                        15000, app.plantumlPrintBudgetMsLeft);
+                    const auto t0 = Clock::now();
+                    const bool rendered = plantuml::renderSync(
+                        app.plantumlTool, sourceWithPreamble, 0, workDir,
+                        outFile, budgetMs, error, nullptr);
+                    app.plantumlPrintBudgetMsLeft -=
+                        (int)(usElapsed(t0) / 1000);
+                    if (rendered && layOutPng(outFile)) return;
+                } else if (!app.plantumlPrintLayout) {
+                    // Interactive path: schedule off the UI thread.
+                    // request() no-ops on a cache hit or a still-pending
+                    // key, so a relayout pass never enqueues twice.
+                    plantumlEnsureQueue(app);
+                    if (app.plantumlQueue) {
+                        app.plantumlQueue->request(elem->sourceOffset, key,
+                                                   sourceWithPreamble, 0,
+                                                   app.plantumlTool,
+                                                   app.plantumlWorkRoot);
+                    }
+                }
+            }
+        }
     }
 
     std::wstring langHint = toWide(elem->language);
@@ -2285,48 +2805,132 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
         app.contentWidth = std::max(app.contentWidth, indent + widestExtent);
     }
 
+    app.layoutSourceBlock++;
+    noteDocSource(app, codeDocStart, wcode.size(), nullptr, true, elem->sourceOffset);
     app.docText += wcode;
     app.docText += L"\n\n";
     y += blockHeight + 14 * scale;
 }
 
+// The lowest drawn content laid out since `since` (text, rectangles, lines,
+// shapes, connectors, bitmaps), or `startY` when there is none
+static float contentBottomSince(const App& app, const LayoutSnapshot& since, float startY) {
+    float bottom = startY;
+    for (size_t i = since.textRuns; i < app.layoutTextRuns.size(); ++i)
+        bottom = std::max(bottom, app.layoutTextRuns[i].bounds.bottom);
+    for (size_t i = since.textRects; i < app.textRects.size(); ++i)
+        bottom = std::max(bottom, app.textRects[i].rect.bottom);
+    for (size_t i = since.rects; i < app.layoutRects.size(); ++i)
+        bottom = std::max(bottom, app.layoutRects[i].rect.bottom);
+    for (size_t i = since.lines; i < app.layoutLines.size(); ++i) {
+        const auto& line = app.layoutLines[i];
+        bottom = std::max(bottom, std::max(line.p1.y, line.p2.y) + line.stroke / 2);
+    }
+    for (size_t i = since.shapes; i < app.layoutShapes.size(); ++i)
+        bottom = std::max(bottom, app.layoutShapes[i].rect.bottom);
+    for (size_t i = since.connectors; i < app.layoutConnectors.size(); ++i)
+        bottom = std::max(bottom, app.layoutConnectors[i].bounds.bottom);
+    for (size_t i = since.bitmaps; i < app.layoutBitmaps.size(); ++i)
+        bottom = std::max(bottom, app.layoutBitmaps[i].destRect.bottom);
+    return bottom;
+}
+
+// An admonition or callout (admonition.h), in every dialect: a box tinted
+// with its kind's accent, a bar down the left, and a title bar with the
+// kind's icon and the title (the type's label when none is given). A
+// foldable box shows a chevron and folds on a click; on paper every box is
+// open
+static void layoutAdmonition(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    const float scale = app.contentScale * app.zoomFactor;
+    const AdmonitionStyle& style = admonitionStyle(elem->alertKind);
+    const D2D1_COLOR_F accent = hexColor(app.theme.isDark ? style.dark : style.light);
+    D2D1_COLOR_F tint = accent;
+    tint.a = app.theme.isDark ? 0.14f : 0.09f;
+    const float bar = 4.0f * scale;
+    const float pad = 12.0f * scale;
+    const float left = indent + bar + pad;
+    const float inner = std::max(40.0f * scale, maxWidth - bar - 2.0f * pad);
+    const float startY = y;
+    const size_t tintIndex = app.layoutRects.size();
+    app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + maxWidth, startY), tint});
+    const size_t barIndex = app.layoutRects.size();
+    app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + bar, startY), accent});
+    const LayoutSnapshot contentStart = takeSnapshot(app);
+
+    const std::string foldKey = app.currentFile + "#" + std::to_string(elem->sourceOffset);
+    bool folded = elem->alertFold == 2;
+    if (elem->alertFold != 0 && app.admonitionFoldToggled.count(foldKey)) folded = !folded;
+    if (app.printLayout) folded = false;
+
+    float cursor = startY + pad * 0.75f;
+    if (!elem->alertNoTitle) {
+        IDWriteTextFormat* titleFormat = app.boldFormat ? app.boldFormat : app.textFormat;
+        const float lineH = app.textFormat->GetFontSize() * 1.7f;
+        float titleX = left;
+        if (style.icon[0]) {
+            std::wstring icon = style.icon;
+            LayoutInfo info = createLayout(app, icon, app.textFormat, lineH, app.bodyTypography);
+            const float iconW = info.width;
+            addTextRun(app, std::move(info), D2D1::Point2F(left, cursor),
+                       D2D1::RectF(left, cursor, left + iconW, cursor + lineH), accent, 0, 0, false);
+            titleX = left + iconW + 8.0f * scale;
+        }
+        float chevronW = 0.0f;
+        if (elem->alertFold != 0) {
+            std::wstring chevron = folded ? L"▸" : L"▾";
+            LayoutInfo info = createLayout(app, chevron, app.textFormat, lineH, app.bodyTypography);
+            chevronW = info.width + 4.0f * scale;
+            const float chevronX = indent + maxWidth - pad - info.width;
+            addTextRun(app, std::move(info), D2D1::Point2F(chevronX, cursor),
+                       D2D1::RectF(chevronX, cursor, chevronX + chevronW, cursor + lineH), accent, 0, 0, false);
+        }
+        float titleY = cursor;
+        if (elem->alertTitle && !elem->alertTitle->children.empty()) {
+            // Inline layout leaves titleY below its last line
+            layoutInlineContent(app, elem->alertTitle->children, titleX, titleY,
+                                std::max(20.0f * scale, left + inner - titleX - chevronW), titleFormat, accent);
+        } else {
+            std::wstring label = toWide(admonitionLabel(elem->alertKeyword));
+            LayoutInfo info = createLayout(app, label, titleFormat, lineH, app.bodyTypography);
+            const float w = info.width;
+            const size_t docStart = app.docText.size();
+            addTextRun(app, std::move(info), D2D1::Point2F(titleX, cursor),
+                       D2D1::RectF(titleX, cursor, titleX + w, cursor + lineH), accent, docStart, label.size(),
+                       false);
+            app.docText += label;
+            titleY = cursor + lineH;
+        }
+        app.docText += L"\n\n";
+        if (elem->alertFold != 0 && elem->sourceOffset != SIZE_MAX && !app.printLayout) {
+            app.admonitionFoldRects.push_back(
+                {D2D1::RectF(indent, startY, indent + maxWidth, titleY + pad * 0.25f), foldKey});
+        }
+        cursor = titleY + (folded ? 0.0f : pad * 0.5f);
+    }
+
+    if (!folded) {
+        for (const auto& child : elem->children) {
+            layoutElement(app, child, cursor, left, inner);
+        }
+    }
+    // Children advance past their own trailing margins; the box ends at
+    // the last drawn content (the title, for a folded box), padded
+    const float bottom = std::max(startY + pad * 0.75f, contentBottomSince(app, contentStart, startY)) + pad * 0.75f;
+    app.layoutRects[tintIndex].rect.bottom = bottom;
+    app.layoutRects[barIndex].rect.bottom = bottom;
+    y = bottom + 14.0f * scale;
+}
+
 static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    if (elem->alertKind != 0) {
+        layoutAdmonition(app, elem, y, indent, maxWidth);
+        return;
+    }
     float scale = app.contentScale * app.zoomFactor;
     float quoteIndent = 20.0f * scale;
     float startY = y;
     const LayoutSnapshot contentStart = takeSnapshot(app);
-
-    // GitHub alert callouts: accent-colored bar plus a bold title line.
-    // Colors are github.com's light/dark alert accents, picked by theme.
-    static const struct {
-        const wchar_t* title;
-        uint32_t light;
-        uint32_t dark;
-    } ALERT_STYLES[] = {
-        {L"\u24D8  Note",            0x0969DA, 0x4493F8},  // circled info
-        {L"\U0001F4A1\uFE0E  Tip",   0x1A7F37, 0x3FB950},  // bulb, text presentation
-        {L"\u2757\uFE0E  Important", 0x8250DF, 0xAB7DF8},  // exclamation
-        {L"\u26A0\uFE0E  Warning",   0x9A6700, 0xD29922},  // warning triangle
-        {L"\u26D4\uFE0E  Caution",   0xCF222E, 0xF85149},  // no-entry
-    };
-
     D2D1_COLOR_F barColor = app.theme.blockquoteBorder;
-    if (elem->alertKind >= 1 && elem->alertKind <= 5) {
-        const auto& style = ALERT_STYLES[elem->alertKind - 1];
-        barColor = hexColor(app.theme.isDark ? style.dark : style.light);
-
-        std::wstring title = style.title;
-        LayoutInfo info = createLayout(app, title, app.textFormat, 24.0f, app.bodyTypography);
-        if (info.layout) {
-            DWRITE_TEXT_RANGE range = {0, (UINT32)title.length()};
-            info.layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range);
-        }
-        D2D1_POINT_2F pos = D2D1::Point2F(indent + quoteIndent, y);
-        D2D1_RECT_F bounds = D2D1::RectF(indent + quoteIndent, y,
-                                         indent + maxWidth, y + 24 * scale);
-        addTextRun(app, std::move(info), pos, bounds, barColor, 0, 0, false);
-        y += 30 * scale;
-    }
 
     for (const auto& child : elem->children) {
         layoutElement(app, child, y, indent + quoteIndent, maxWidth - quoteIndent);
@@ -2335,23 +2939,7 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     // Child layout advances y past its trailing margin. Keep that spacing
     // outside the bar, without moving the next block. Use retained content
     // bounds so nested quotes, code padding, tables and math stay covered.
-    float contentBottom = startY;
-    for (size_t i = contentStart.textRuns; i < app.layoutTextRuns.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutTextRuns[i].bounds.bottom);
-    for (size_t i = contentStart.textRects; i < app.textRects.size(); ++i)
-        contentBottom = std::max(contentBottom, app.textRects[i].rect.bottom);
-    for (size_t i = contentStart.rects; i < app.layoutRects.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutRects[i].rect.bottom);
-    for (size_t i = contentStart.lines; i < app.layoutLines.size(); ++i) {
-        const auto& line = app.layoutLines[i];
-        contentBottom = std::max(contentBottom, std::max(line.p1.y, line.p2.y) + line.stroke / 2);
-    }
-    for (size_t i = contentStart.shapes; i < app.layoutShapes.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutShapes[i].rect.bottom);
-    for (size_t i = contentStart.connectors; i < app.layoutConnectors.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutConnectors[i].bounds.bottom);
-    for (size_t i = contentStart.bitmaps; i < app.layoutBitmaps.size(); ++i)
-        contentBottom = std::max(contentBottom, app.layoutBitmaps[i].destRect.bottom);
+    float contentBottom = contentBottomSince(app, contentStart, startY);
 
     app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
 }
@@ -2360,10 +2948,19 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
     int itemNum = elem->start;
+    // Items stand apart: at least half a body line between them, so a list
+    // of one-liners advances 1.5 lines per item while an item's own wrapped
+    // lines keep the paragraph pitch. Space an item already leaves below its
+    // content (a paragraph's, quote's or code block's margin) counts toward
+    // it, so loose lists and block-ending items are not spaced twice.
+    float itemGap = 0.5f * app.textFormat->GetFontSize() * 1.7f;
+    float trailingMargin = -1.0f;  // after the previous item; < 0 before the first
 
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
+        if (trailingMargin >= 0.0f) y += std::max(0.0f, itemGap - trailingMargin);
 
+        const LayoutSnapshot markerStart = takeSnapshot(app);
         if (child->isTask) {
             // Task item: a clickable checkbox replaces the bullet
             float box = 15.0f * scale;
@@ -2406,42 +3003,67 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
         }
 
-        bool hasBlockChildren = false;
-        for (const auto& itemChild : child->children) {
-            if (itemChild->type == ElementType::Paragraph ||
-                itemChild->type == ElementType::List ||
-                itemChild->type == ElementType::CodeBlock ||
-                itemChild->type == ElementType::BlockQuote) {
-                hasBlockChildren = true;
-                break;
+        // The same blocks a blockquote lays out as blocks. Tables were
+        // missing, so a table indented under an item ran together as text
+        auto isBlockChild = [](const ElementPtr& e) {
+            switch (e->type) {
+                case ElementType::Paragraph: case ElementType::Heading: case ElementType::CodeBlock:
+                case ElementType::BlockQuote: case ElementType::List: case ElementType::HorizontalRule:
+                case ElementType::HtmlBlock: case ElementType::Table:
+                    return true;
+                default:
+                    return false;
             }
-        }
+        };
+        bool hasBlockChildren = std::any_of(child->children.begin(), child->children.end(), isBlockChild);
 
         float itemStartY = y;
+        const LayoutSnapshot itemStart = takeSnapshot(app);
         if (hasBlockChildren) {
-            std::vector<ElementPtr> inlineElements, blockElements;
+            // In document order: a table between two paragraphs stays
+            // between them (inline text used to go first, then every block)
+            std::vector<ElementPtr> inlineRun;
+            auto flushInline = [&] {
+                if (inlineRun.empty()) return;
+                layoutInlineContent(app, inlineRun, indent + listIndent, y,
+                    maxWidth - listIndent, app.textFormat, app.theme.text);
+                inlineRun.clear();
+            };
             for (const auto& itemChild : child->children) {
-                if (itemChild->type == ElementType::Paragraph ||
-                    itemChild->type == ElementType::List ||
-                    itemChild->type == ElementType::CodeBlock ||
-                    itemChild->type == ElementType::BlockQuote) {
-                    blockElements.push_back(itemChild);
+                if (isBlockChild(itemChild)) {
+                    flushInline();
+                    layoutElement(app, itemChild, y, indent + listIndent, maxWidth - listIndent);
                 } else {
-                    inlineElements.push_back(itemChild);
+                    inlineRun.push_back(itemChild);
                 }
             }
-
-            if (!inlineElements.empty()) {
-                layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                    maxWidth - listIndent, app.textFormat, app.theme.text);
-            }
-
-            for (const auto& blockChild : blockElements) {
-                layoutElement(app, blockChild, y, indent + listIndent, maxWidth - listIndent);
-            }
+            flushInline();
         } else {
             layoutInlineContent(app, child->children, indent + listIndent, y,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
+        }
+
+        // An image that grew the item's first line moved its text down; the
+        // bullet, number or checkbox follows it to the same baseline
+        for (const auto& [top, growth] : app.grownFirstLines) {
+            if (top != itemStartY || growth <= 0.0f) continue;
+            for (size_t i = markerStart.textRuns; i < itemStart.textRuns; i++) {
+                app.layoutTextRuns[i].pos.y += growth;
+                app.layoutTextRuns[i].bounds.top += growth;
+                app.layoutTextRuns[i].bounds.bottom += growth;
+            }
+            for (size_t i = markerStart.rects; i < itemStart.rects; i++) {
+                app.layoutRects[i].rect.top += growth;
+                app.layoutRects[i].rect.bottom += growth;
+            }
+            for (size_t i = markerStart.lines; i < itemStart.lines; i++) {
+                app.layoutLines[i].p1.y += growth;
+                app.layoutLines[i].p2.y += growth;
+            }
+            for (size_t i = markerStart.tasks; i < itemStart.tasks; i++) {
+                app.taskRects[i].rect.top += growth;
+                app.taskRects[i].rect.bottom += growth;
+            }
         }
 
         app.docText += L"\n\n";
@@ -2449,6 +3071,8 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         if (y < itemStartY + 28 * scale) {
             y = itemStartY + 28 * scale;
         }
+        // The space the item already leaves below its content
+        trailingMargin = std::max(0.0f, y - contentBottomSince(app, itemStart, itemStartY));
     }
     y += 8 * scale;
 }
@@ -2507,61 +3131,112 @@ static void asyncImageWorker(HWND hwnd, UINT maxDimension,
         delete delivered;
 }
 
+// A WIC bitmap with a Direct2D SVG-capable context drawing into it
+// (ID2D1DeviceContext5, Windows 10 1703+; librsvg behind it on Linux)
+static bool createSvgTarget(App& app, UINT w, UINT h, IWICBitmap** wicOut,
+                            ID2D1DeviceContext5** dcOut) {
+    *wicOut = nullptr;
+    *dcOut = nullptr;
+    if (FAILED(app.wicFactory->CreateBitmap(
+            w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand,
+            wicOut))) {
+        return false;
+    }
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    ID2D1RenderTarget* rt = nullptr;
+    if (FAILED(app.d2dFactory->CreateWicBitmapRenderTarget(*wicOut, props,
+                                                           &rt))) {
+        (*wicOut)->Release();
+        *wicOut = nullptr;
+        return false;
+    }
+    HRESULT hr = rt->QueryInterface(IID_PPV_ARGS(dcOut));
+    rt->Release();
+    if (FAILED(hr) || !*dcOut) {
+        // Pre-1703 Windows: no Direct2D SVG; the alt text shows instead
+        (*wicOut)->Release();
+        *wicOut = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Draws SVG `bytes` (svgW x svgH units) at `pixelScale` pixels per unit
+// into the entry's bitmap; its size stays in SVG units
+static bool rasterizeSvg(App& app, const std::string& bytes, float svgW,
+                         float svgH, float pixelScale,
+                         App::ImageEntry& entry) {
+    UINT pxW = (UINT)std::ceil(svgW * pixelScale);
+    UINT pxH = (UINT)std::ceil(svgH * pixelScale);
+    UINT maxPx = app.renderTarget->GetMaximumBitmapSize();
+    if (pxW == 0 || pxH == 0 || pxW > maxPx || pxH > maxPx) return false;
+    IWICBitmap* wicBitmap = nullptr;
+    ID2D1DeviceContext5* dc = nullptr;
+    if (!createSvgTarget(app, pxW, pxH, &wicBitmap, &dc)) return false;
+    bool drawn = false;
+    {
+        IStream* stream = SHCreateMemStream((const BYTE*)bytes.data(),
+                                            (UINT)bytes.size());
+        ID2D1SvgDocument* doc = nullptr;
+        if (stream &&
+            SUCCEEDED(dc->CreateSvgDocument(stream, D2D1::SizeF(svgW, svgH),
+                                            &doc)) &&
+            doc) {
+            dc->BeginDraw();
+            dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(pixelScale, pixelScale));
+            dc->DrawSvgDocument(doc);
+            drawn = SUCCEEDED(dc->EndDraw());
+            doc->Release();
+        }
+        if (stream) stream->Release();
+    }
+    dc->Release();
+
+    if (drawn) {
+        D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                              D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0f * pixelScale, 96.0f * pixelScale);
+        ID2D1Bitmap* bitmap = nullptr;
+        if (SUCCEEDED(app.renderTarget->CreateBitmapFromWicBitmap(
+                wicBitmap, &bp, &bitmap)) &&
+            bitmap) {
+            entry.bitmap.Attach(bitmap);
+            entry.width = (int)svgW;
+            entry.height = (int)svgH;
+            entry.bytes = (size_t)pxW * pxH * 4;
+            entry.failed = false;
+        }
+    }
+    wicBitmap->Release();
+    return !entry.failed;
+}
+
 // SVG images rasterize at 2x through the Direct2D SVG renderer
 // (ID2D1DeviceContext5, Windows 10 1703+). Shapes, paths, and gradients
 // render; <text> elements are not supported by D2D's SVG subset.
 static bool loadSvgBitmap(App& app, const std::wstring& path,
                           App::ImageEntry& entry) {
     if (!app.d2dFactory || !app.wicFactory || !app.renderTarget) return false;
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(fsPath(path), std::ios::binary);
     if (!file) return false;
     std::string bytes((std::istreambuf_iterator<char>(file)),
                       std::istreambuf_iterator<char>());
     if (bytes.empty()) return false;
-
-    auto makeDc5 = [&](UINT w, UINT h, IWICBitmap** wicOut,
-                       ID2D1DeviceContext5** dcOut) -> bool {
-        *wicOut = nullptr;
-        *dcOut = nullptr;
-        if (FAILED(app.wicFactory->CreateBitmap(
-                w, h, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand,
-                wicOut))) {
-            return false;
-        }
-        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                              D2D1_ALPHA_MODE_PREMULTIPLIED),
-            96.0f, 96.0f);
-        ID2D1RenderTarget* rt = nullptr;
-        if (FAILED(app.d2dFactory->CreateWicBitmapRenderTarget(*wicOut, props,
-                                                               &rt))) {
-            (*wicOut)->Release();
-            *wicOut = nullptr;
-            return false;
-        }
-        HRESULT hr = rt->QueryInterface(IID_PPV_ARGS(dcOut));
-        rt->Release();
-        if (FAILED(hr) || !*dcOut) {
-            // Pre-1703 Windows: no Direct2D SVG; the alt text shows instead
-            (*wicOut)->Release();
-            *wicOut = nullptr;
-            return false;
-        }
-        return true;
-    };
-    auto makeStream = [&]() -> IStream* {
-        return SHCreateMemStream((const BYTE*)bytes.data(),
-                                 (UINT)bytes.size());
-    };
 
     // Pass 1: parse only, to learn the intrinsic size
     float svgW = 0.0f, svgH = 0.0f;
     {
         IWICBitmap* tmp = nullptr;
         ID2D1DeviceContext5* dc = nullptr;
-        if (!makeDc5(4, 4, &tmp, &dc)) return false;
-        IStream* stream = makeStream();
+        if (!createSvgTarget(app, 4, 4, &tmp, &dc)) return false;
+        IStream* stream = SHCreateMemStream((const BYTE*)bytes.data(),
+                                            (UINT)bytes.size());
         ID2D1SvgDocument* doc = nullptr;
         if (stream &&
             SUCCEEDED(dc->CreateSvgDocument(stream, D2D1::SizeF(512, 512),
@@ -2602,48 +3277,572 @@ static bool loadSvgBitmap(App& app, const std::wstring& path,
     svgH = std::min(svgH, 4096.0f);
 
     // Pass 2: rasterize at 2x for crisp zooming
-    UINT pxW = (UINT)std::ceil(svgW * 2.0f);
-    UINT pxH = (UINT)std::ceil(svgH * 2.0f);
-    IWICBitmap* wicBitmap = nullptr;
-    ID2D1DeviceContext5* dc = nullptr;
-    if (!makeDc5(pxW, pxH, &wicBitmap, &dc)) return false;
-    bool drawn = false;
-    {
-        IStream* stream = makeStream();
-        ID2D1SvgDocument* doc = nullptr;
-        if (stream &&
-            SUCCEEDED(dc->CreateSvgDocument(stream, D2D1::SizeF(svgW, svgH),
-                                            &doc)) &&
-            doc) {
-            dc->BeginDraw();
-            dc->Clear(D2D1::ColorF(0, 0, 0, 0));
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(2.0f, 2.0f));
-            dc->DrawSvgDocument(doc);
-            drawn = SUCCEEDED(dc->EndDraw());
-            doc->Release();
-        }
-        if (stream) stream->Release();
-    }
-    dc->Release();
-
-    if (drawn) {
-        D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                              D2D1_ALPHA_MODE_PREMULTIPLIED),
-            192.0f, 192.0f);
-        ID2D1Bitmap* bitmap = nullptr;
-        if (SUCCEEDED(app.renderTarget->CreateBitmapFromWicBitmap(
-                wicBitmap, &bp, &bitmap)) &&
-            bitmap) {
-            entry.bitmap.Attach(bitmap);
-            entry.width = (int)svgW;
-            entry.height = (int)svgH;
-            entry.failed = false;
-        }
-    }
-    wicBitmap->Release();
-    return !entry.failed;
+    return rasterizeSvg(app, bytes, svgW, svgH, 2.0f, entry);
 }
+
+#ifdef TINTA_MERMAN_PNG
+// PNG bytes into the entry's bitmap (merman's raster: Windows, where
+// Direct2D's SVG renderer draws no <text>)
+static bool decodePngBitmap(App& app, const std::string& png,
+                            App::ImageEntry& entry) {
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    ID2D1Bitmap* bitmap = nullptr;
+    UINT w = 0, h = 0;
+    bool ok =
+        SUCCEEDED(app.wicFactory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(
+            reinterpret_cast<BYTE*>(const_cast<char*>(png.data())),
+            (DWORD)png.size())) &&
+        SUCCEEDED(app.wicFactory->CreateDecoderFromStream(
+            stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+        SUCCEEDED(app.wicFactory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
+                                        WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeMedianCut)) &&
+        SUCCEEDED(converter->GetSize(&w, &h)) &&
+        SUCCEEDED(app.renderTarget->CreateBitmapFromWicBitmap(converter, nullptr,
+                                                              &bitmap)) &&
+        bitmap;
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    if (!ok) {
+        if (bitmap) bitmap->Release();
+        return false;
+    }
+    entry.bitmap.Attach(bitmap);
+    entry.bytes = (size_t)w * h * 4;
+    entry.failed = false;
+    return true;
+}
+#endif
+
+#ifdef TINTA_MERMAN
+// ---- Mermaid through merman (docs/linux-port/PLAN.md §6) --------------------
+namespace {
+
+std::string cssColor(D2D1_COLOR_F c) {
+    auto channel = [](float v) {
+        return (int)std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+    };
+    char text[8];
+    std::snprintf(text, sizeof text, "#%02x%02x%02x", channel(c.r),
+                  channel(c.g), channel(c.b));
+    return text;
+}
+
+D2D1_COLOR_F mixColor(D2D1_COLOR_F a, D2D1_COLOR_F b, float t) {
+    return D2D1::ColorF(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                        a.b + (b.b - a.b) * t, 1.0f);
+}
+
+// The installed family DirectWrite would use for `name` (a stand-in on
+// Linux: Segoe UI is Selawik there), which the SVG renderer can find
+std::string installedFamily(App& app, const wchar_t* name) {
+    std::wstring family = name ? name : L"";
+    IDWriteFontCollection* fonts = nullptr;
+    if (!family.empty() && app.dwriteFactory &&
+        SUCCEEDED(app.dwriteFactory->GetSystemFontCollection(&fonts, FALSE)) &&
+        fonts) {
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        IDWriteFontFamily* found = nullptr;
+        IDWriteLocalizedStrings* names = nullptr;
+        if (SUCCEEDED(fonts->FindFamilyName(family.c_str(), &index, &exists)) &&
+            exists && SUCCEEDED(fonts->GetFontFamily(index, &found)) && found &&
+            SUCCEEDED(found->GetFamilyNames(&names)) && names) {
+            UINT32 length = 0;
+            if (SUCCEEDED(names->GetStringLength(0, &length))) {
+                std::wstring resolved(length + 1, L'\0');
+                if (SUCCEEDED(names->GetString(0, resolved.data(), length + 1))) {
+                    resolved.resize(length);
+                    family = resolved;
+                }
+            }
+        }
+        if (names) names->Release();
+        if (found) found->Release();
+        fonts->Release();
+    }
+    return toUtf8(family);
+}
+
+// ---- Label widths for merman (MM2) ---------------------------------------------
+// merman sizes shapes from label widths. Measured here, in the face a label
+// is drawn with, labels fit their shapes in any theme: the first installed
+// family of the CSS list, as librsvg (fontconfig) and resvg pick it.
+namespace {
+
+struct LabelWidths {
+    IDWriteFactory* factory = nullptr;  // its own reference: outlives windows
+    std::mutex mutex;
+    std::string themeFamily;  // for labels that name none
+    std::unordered_map<std::string, std::wstring> faces;  // CSS list -> face
+    std::unordered_map<std::string, double> widths;
+};
+
+bool familyInstalled(IDWriteFactory* factory, const std::wstring& family) {
+    if (fontCollectionFor(factory, family.c_str())) return true;  // bundled
+    IDWriteFontCollection* fonts = nullptr;
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    if (SUCCEEDED(factory->GetSystemFontCollection(&fonts, FALSE)) && fonts) {
+        fonts->FindFamilyName(family.c_str(), &index, &exists);
+        fonts->Release();
+    }
+    return exists != FALSE;
+}
+
+// The face a CSS family list resolves to. A generic name ends the search:
+// fontconfig resolves it on Linux; on Windows, as resvg's font database does
+std::wstring labelFace(LabelWidths& widths, std::string_view list) {
+    std::string key(list);
+    auto known = widths.faces.find(key);
+    if (known != widths.faces.end()) return known->second;
+    std::wstring face;
+    size_t start = 0;
+    while (face.empty() && start <= list.size()) {
+        size_t comma = list.find(',', start);
+        std::string_view name = list.substr(start, comma == std::string_view::npos ? std::string_view::npos
+                                                                                    : comma - start);
+        start = comma == std::string_view::npos ? list.size() + 1 : comma + 1;
+        while (!name.empty() && (name.front() == ' ' || name.front() == '"' || name.front() == '\''))
+            name.remove_prefix(1);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '"' || name.back() == '\''))
+            name.remove_suffix(1);
+        if (name.empty()) continue;
+        std::string lower(name);
+        for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+        static const std::pair<const char*, const wchar_t*> generics[] = {
+            {"sans-serif", L"Arial"}, {"serif", L"Times New Roman"}, {"monospace", L"Courier New"},
+            {"system-ui", L"Segoe UI"}, {"cursive", L"Comic Sans MS"}, {"fantasy", L"Impact"}};
+        bool generic = false;
+        for (const auto& g : generics) {
+            if (lower != g.first) continue;
+            generic = true;
+#ifdef _WIN32
+            face = g.second;
+#else
+            face = toWide(std::string(name));
+#endif
+        }
+        if (generic) break;
+        std::wstring candidate = toWide(std::string(name));
+        if (familyInstalled(widths.factory, candidate)) face = candidate;
+    }
+    if (face.empty()) face = L"sans-serif";
+    widths.faces.emplace(std::move(key), face);
+    return face;
+}
+
+double labelWidth(const merman_engine::TextWidthQuery& query, void* user) {
+    auto& widths = *static_cast<LabelWidths*>(user);
+    std::lock_guard<std::mutex> lock(widths.mutex);
+    std::string_view family = query.family.empty() ? std::string_view(widths.themeFamily) : query.family;
+    char style[48];
+    std::snprintf(style, sizeof style, "\x1f%.3f\x1f%d\x1f%d\x1f", query.size, query.weight, query.italic ? 1 : 0);
+    std::string key;
+    key.reserve(family.size() + query.text.size() + sizeof style);
+    key.append(family).append(style).append(query.text);
+    auto known = widths.widths.find(key);
+    if (known != widths.widths.end()) return known->second;
+
+    std::wstring face = labelFace(widths, family);
+    std::wstring text = toWide(std::string(query.text));
+    double width = -1.0;
+    IDWriteTextFormat* format = nullptr;
+    if (SUCCEEDED(widths.factory->CreateTextFormat(
+            face.c_str(), fontCollectionFor(widths.factory, face.c_str()),
+            (DWRITE_FONT_WEIGHT)std::clamp(query.weight, 1, 999),
+            query.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            (float)query.size, L"en-us", &format)) &&
+        format) {
+        IDWriteTextLayout* layout = nullptr;
+        if (SUCCEEDED(widths.factory->CreateTextLayout(text.c_str(), (UINT32)text.size(), format, 1.0e6f,
+                                                       1.0e6f, &layout)) &&
+            layout) {
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TEXT_METRICS metrics{};
+            if (SUCCEEDED(layout->GetMetrics(&metrics))) width = metrics.widthIncludingTrailingWhitespace;
+            layout->Release();
+        }
+        format->Release();
+    }
+    if (widths.widths.size() > 50000) widths.widths.clear();
+    widths.widths.emplace(std::move(key), width);
+    return width;
+}
+
+// Once a process: every render after it sizes labels with labelWidth
+void installLabelWidths(App& app, const std::string& themeFamily) {
+    static LabelWidths* widths = nullptr;
+    if (!widths) {
+        if (!app.dwriteFactory || std::getenv("TINTA_MERMAN_ESTIMATED_LABELS")) return;
+        widths = new LabelWidths;
+        widths->factory = app.dwriteFactory;
+        widths->factory->AddRef();
+        widths->themeFamily = themeFamily;
+        merman_engine::setTextWidth(labelWidth, widths);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(widths->mutex);
+    widths->themeFamily = themeFamily;
+}
+
+}  // namespace
+
+// The active theme in merman's roles, matching the native renderer: nodes
+// fill with the code background, outline in the accent, label in the text
+// colour; series (pie, charts) take the syntax palette
+merman_engine::Theme mermanTheme(App& app) {
+    const D2DTheme& t = app.theme;
+    merman_engine::Theme theme;
+    theme.dark = t.isDark;
+    theme.roles = {
+        {"canvas", cssColor(t.background)},
+        {"surface", cssColor(t.codeBackground)},
+        {"surface-alt", cssColor(mixColor(t.codeBackground, t.accent, 0.15f))},
+        {"surface-muted", cssColor(mixColor(t.background, t.codeBackground, 0.5f))},
+        {"text", cssColor(t.text)},
+        {"subtle-text", cssColor(mixColor(t.text, t.background, 0.3f))},
+        {"border", cssColor(t.accent)},
+        {"line", cssColor(mixColor(t.text, t.background, 0.35f))},
+        {"edge-label-background", cssColor(t.background)},
+        {"cluster-background", cssColor(mixColor(t.background, t.codeBackground, 0.5f))},
+        {"cluster-border", cssColor(t.blockquoteBorder)},
+        {"note-background", cssColor(mixColor(t.background, t.accent, 0.15f))},
+        {"note-border", cssColor(t.accent)},
+        {"note-text", cssColor(t.text)},
+        {"actor-background", cssColor(t.codeBackground)},
+        {"actor-border", cssColor(t.accent)},
+        {"actor-text", cssColor(t.text)},
+        {"activation-background", cssColor(mixColor(t.codeBackground, t.accent, 0.2f))},
+        {"activation-border", cssColor(t.accent)},
+    };
+    theme.seriesPalette = {cssColor(t.accent), cssColor(t.syntaxString),
+                           cssColor(t.syntaxNumber), cssColor(t.syntaxFunction),
+                           cssColor(t.syntaxType), cssColor(t.syntaxKeyword),
+                           cssColor(t.link), cssColor(t.heading)};
+    // The theme's face first (unchanged wherever it exists), then faces Tinta
+    // ships or Linux usually has: merman's own raster (Windows) finds only
+    // system fonts, and draws no label in a face it cannot find
+    std::string family = installedFamily(app, t.fontFamily);
+    theme.fontFamily = family;
+    for (const char* fallback : {"Selawik", "Noto Sans", "DejaVu Sans", "sans-serif"}) {
+        if (family != fallback) theme.fontFamily += std::string(", ") + fallback;
+    }
+    float scale = app.contentScale * app.zoomFactor;
+    theme.fontSize = app.textFormat && scale > 0.0f
+                         ? app.textFormat->GetFontSize() / scale
+                         : 16.0f;
+    installLabelWidths(app, theme.fontFamily);
+    return theme;
+}
+
+#ifdef TINTA_MERMAN_PNG
+#ifdef _WIN32
+// The file behind font `index` of a font set, or empty (a font that is not
+// a local file, such as one Windows downloads on demand)
+std::wstring localFontPath(IDWriteFontSet* fonts, UINT32 index) {
+    std::wstring path;
+    IDWriteFontFaceReference* reference = nullptr;
+    IDWriteFontFile* file = nullptr;
+    IDWriteFontFileLoader* loader = nullptr;
+    IDWriteLocalFontFileLoader* local = nullptr;
+    const void* key = nullptr;
+    UINT32 keySize = 0;
+    UINT32 length = 0;
+    if (SUCCEEDED(fonts->GetFontFaceReference(index, &reference)) &&
+        SUCCEEDED(reference->GetFontFile(&file)) &&
+        SUCCEEDED(file->GetReferenceKey(&key, &keySize)) &&
+        SUCCEEDED(file->GetLoader(&loader)) &&
+        SUCCEEDED(loader->QueryInterface(__uuidof(IDWriteLocalFontFileLoader),
+                                         reinterpret_cast<void**>(&local))) &&
+        SUCCEEDED(local->GetFilePathLengthFromKey(key, keySize, &length))) {
+        path.resize(length + 1);
+        if (SUCCEEDED(local->GetFilePathFromKey(key, keySize, &path[0], length + 1))) {
+            path.resize(length);
+        } else {
+            path.clear();
+        }
+    }
+    if (local) local->Release();
+    if (loader) loader->Release();
+    if (file) file->Release();
+    if (reference) reference->Release();
+    return path;
+}
+#endif
+
+// Name the font files merman's raster loads, before its first PNG. Left to
+// itself merman opens every system font once per process: 2.9 s on a
+// managed Windows laptop. The list covers every theme's face and the rest
+// of the diagram stack (mermanTheme), fontdb's generic families, and the
+// faces Windows itself falls back to per script. DirectWrite's font set
+// answers the names from the font cache, without opening the files.
+void prepareMermanRasterFonts(App& app) {
+#ifdef _WIN32
+    static bool prepared = false;
+    if (prepared) return;
+    prepared = true;
+    auto t0 = Clock::now();
+    IDWriteFactory3* factory = nullptr;
+    IDWriteFontSet* fonts = nullptr;
+    if (!app.dwriteFactory ||
+        FAILED(app.dwriteFactory->QueryInterface(__uuidof(IDWriteFactory3),
+                                                 reinterpret_cast<void**>(&factory))) ||
+        FAILED(factory->GetSystemFontSet(&fonts))) {
+        if (factory) factory->Release();
+        return;  // no font sets (before Windows 10): merman scans
+    }
+    std::unordered_set<std::wstring> wanted;
+    auto want = [&](std::wstring name) {
+        for (auto& c : name) c = (wchar_t)std::towlower(c);
+        if (!name.empty()) wanted.insert(name);
+    };
+    for (int i = 0; i < themeCount(); i++) {
+        if (themeAt(i).fontFamily) want(themeAt(i).fontFamily);
+    }
+    for (const wchar_t* name : {
+             L"Selawik", L"Noto Sans", L"DejaVu Sans",          // the diagram stack
+             L"Arial", L"Times New Roman", L"Courier New",      // fontdb's generics
+             L"Segoe UI", L"Segoe UI Symbol", L"Segoe UI Emoji", L"Segoe UI Historic",
+             L"Microsoft YaHei", L"Microsoft JhengHei", L"Yu Gothic", L"Malgun Gothic",
+             L"Nirmala UI", L"Leelawadee UI", L"Ebrima", L"Gadugi", L"Javanese Text",
+             L"Myanmar Text", L"Mongolian Baiti", L"Microsoft Himalaya",
+             L"Microsoft New Tai Lue", L"Microsoft Tai Le", L"Microsoft Yi Baiti",
+             L"Sylfaen", L"Cambria Math"}) {
+        want(name);
+    }
+    const DWRITE_FONT_PROPERTY_ID kNames[] = {
+        DWRITE_FONT_PROPERTY_ID_WIN32_FAMILY_NAME,
+        DWRITE_FONT_PROPERTY_ID_TYPOGRAPHIC_FAMILY_NAME,
+        DWRITE_FONT_PROPERTY_ID_WEIGHT_STRETCH_STYLE_FAMILY_NAME,
+    };
+    std::unordered_set<std::wstring> seen;
+    std::wstring list;
+    UINT32 count = fonts->GetFontCount();
+    for (UINT32 i = 0; i < count; i++) {
+        bool match = false;
+        for (DWRITE_FONT_PROPERTY_ID id : kNames) {
+            IDWriteLocalizedStrings* names = nullptr;
+            BOOL exists = FALSE;
+            if (FAILED(fonts->GetPropertyValues(i, id, &exists, &names)) || !names) continue;
+            for (UINT32 n = 0; n < names->GetCount() && !match; n++) {
+                UINT32 length = 0;
+                if (FAILED(names->GetStringLength(n, &length))) continue;
+                std::wstring name(length + 1, L'\0');
+                if (FAILED(names->GetString(n, &name[0], length + 1))) continue;
+                name.resize(length);
+                for (auto& c : name) c = (wchar_t)std::towlower(c);
+                match = wanted.count(name) > 0;
+            }
+            names->Release();
+            if (match) break;
+        }
+        if (!match) continue;
+        std::wstring path = localFontPath(fonts, i);
+        if (path.empty() || !seen.insert(path).second) continue;
+        if (!list.empty()) list += L';';
+        list += path;
+    }
+    fonts->Release();
+    factory->Release();
+    if (!list.empty()) SetEnvironmentVariableW(L"MERMAN_RASTER_FONT_FILES", list.c_str());
+    // TINTA_TRACE_FONTS=<file> writes the list there, one path per line
+    if (const wchar_t* tracePath = _wgetenv(L"TINTA_TRACE_FONTS")) {
+        if (FILE* out = _wfopen(tracePath, L"w, ccs=UTF-8")) {
+            std::wstring lines = list;
+            std::replace(lines.begin(), lines.end(), L';', L'\n');
+            std::fwprintf(out, L"%ls\n", lines.c_str());
+            std::fclose(out);
+        }
+    }
+    app.diagramMetrics.fontFiles = seen.size();
+    app.diagramMetrics.fontListUs = usElapsed(t0);
+#else
+    (void)app;  // merman reads fontconfig's fonts, quickly
+#endif
+}
+#endif
+
+// Rendered SVG per source and theme: layout reruns on every resize and
+// scroll-driven relayout, merman only when the diagram or theme changes
+struct MermanRender {
+    merman_engine::Diagram diagram;
+    unsigned long long lastUsed = 0;
+};
+std::unordered_map<std::string, MermanRender>& mermanRenders() {
+    static std::unordered_map<std::string, MermanRender> renders;
+    return renders;
+}
+
+const merman_engine::Diagram& renderMerman(const std::string& source,
+                                           const merman_engine::Theme& theme,
+                                           std::string& key,
+                                           DiagramMetrics* metrics = nullptr) {
+    static unsigned long long clock = 0;
+    key = std::to_string(std::hash<std::string>{}(
+        source + '\n' + merman_engine::optionsJson(theme)));
+    auto& renders = mermanRenders();
+    auto it = renders.find(key);
+    if (it == renders.end()) {
+        if (renders.size() >= 64) {  // drop the least recently used
+            auto oldest = renders.begin();
+            for (auto i = renders.begin(); i != renders.end(); ++i) {
+                if (i->second.lastUsed < oldest->second.lastUsed) oldest = i;
+            }
+            renders.erase(oldest);
+        }
+        auto t0 = Clock::now();
+        it = renders.emplace(key, MermanRender{merman_engine::renderSvg(source, theme), 0}).first;
+        if (metrics) {
+            metrics->layouts++;
+            metrics->layoutUs += usElapsed(t0);
+        }
+    }
+    it->second.lastUsed = ++clock;
+    return it->second.diagram;
+}
+
+#ifdef TINTA_MERMAN_PNG
+// merman's PNG per raster key (diagram, theme, scale). Recreating the render
+// target (the switch to the GPU after startup, a DPI change) drops every
+// device bitmap; decoding the PNG again is cheap, rendering it is not.
+// Rendered on a miss; `rendered` says whether this call did
+const std::string& mermanPng(const std::string& rasterKey, const std::string& source,
+                             const merman_engine::Theme& theme, float scale, bool& rendered) {
+    struct Entry {
+        std::string png;
+        unsigned long long lastUsed = 0;
+    };
+    static std::unordered_map<std::string, Entry> pngs;
+    static unsigned long long clock = 0;
+    auto it = pngs.find(rasterKey);
+    rendered = it == pngs.end();
+    if (rendered) {
+        if (pngs.size() >= 32) {  // drop the least recently used
+            auto oldest = pngs.begin();
+            for (auto i = pngs.begin(); i != pngs.end(); ++i) {
+                if (i->second.lastUsed < oldest->second.lastUsed) oldest = i;
+            }
+            pngs.erase(oldest);
+        }
+        std::string error;
+        it = pngs.emplace(rasterKey, Entry{merman_engine::renderPng(source, theme, scale, "", error), 0}).first;
+    }
+    it->second.lastUsed = ++clock;
+    return it->second.png;
+}
+#endif
+
+}  // namespace
+
+// A Mermaid diagram rendered by merman and drawn as an image, rasterized at
+// the device pixels it covers (crisp at any zoom and display scale). Fit
+// to width when the reader asked for it, as native diagrams do.
+static bool layoutMermanDiagram(App& app, const std::string& source,
+                                unsigned fitKey, float& y, float indent,
+                                float maxWidth, D2D1_RECT_F* bounds,
+                                bool* fitCandidate) {
+    if (!app.d2dFactory || !app.wicFactory || !app.renderTarget) return false;
+    std::string key;
+    const merman_engine::Diagram& diagram =
+        renderMerman(source, mermanTheme(app), key, &app.diagramMetrics);
+    if (!diagram.ok || diagram.width <= 0.0f || diagram.height <= 0.0f) {
+        return false;
+    }
+    float scale = app.contentScale * app.zoomFactor;
+    float naturalW = diagram.width * scale;
+    bool wide = naturalW > maxWidth + 1.0f;
+    if (fitCandidate) *fitCandidate = wide;
+    bool fitted = wide && fitBlockEnabled(app, fitKey);
+    float pixelScale = scale;
+    if (fitted) pixelScale *= maxWidth / naturalW;
+
+    // The screen gets one pixel per pixel. Print and PDF place the same
+    // rectangle with 300 dpi worth of pixels per CSS pixel (96 dpi), within
+    // the largest bitmap the target allows
+    float rasterScale = pixelScale;
+    if (app.printLayout) {
+        float largest = std::max(diagram.width, diagram.height);
+        float allowed = (float)app.renderTarget->GetMaximumBitmapSize() / largest;
+        rasterScale = std::max(pixelScale, std::min(300.0f / 96.0f, allowed));
+    }
+    char rasterKey[96];
+    std::snprintf(rasterKey, sizeof rasterKey, "merman:%s:%.4f", key.c_str(),
+                  rasterScale);
+    auto it = app.imageCache.find(rasterKey);
+    if (it == app.imageCache.end()) {
+        App::ImageEntry entry;
+        entry.failed = true;
+        DiagramMetrics& metrics = app.diagramMetrics;
+#ifdef TINTA_MERMAN_PNG
+        prepareMermanRasterFonts(app);  // timed on its own
+#endif
+        auto t0 = Clock::now();
+#ifdef TINTA_MERMAN_PNG
+        bool rendered = false;
+        const std::string& png = mermanPng(rasterKey, source, mermanTheme(app),
+                                           rasterScale, rendered);
+        int64_t rasterUs = usElapsed(t0);
+        auto t1 = Clock::now();
+        if (!png.empty()) decodePngBitmap(app, png, entry);
+        metrics.decodeUs += usElapsed(t1);
+        entry.width = (int)diagram.width;
+        entry.height = (int)diagram.height;
+#else
+        const bool rendered = true;
+        rasterizeSvg(app, diagram.svg, diagram.width, diagram.height,
+                     rasterScale, entry);
+        int64_t rasterUs = usElapsed(t0);
+#endif
+        if (rendered) {
+            if (metrics.rasters++ == 0) metrics.firstRasterUs = rasterUs;
+            metrics.rasterUs += rasterUs;
+        }
+        app.storeImageCacheEntry(rasterKey, std::move(entry));
+        it = app.imageCache.find(rasterKey);
+    } else {
+        app.touchImageCacheEntry(it->second);
+    }
+    if (it == app.imageCache.end() || it->second.failed || !it->second.bitmap) {
+        return false;
+    }
+
+    float top = y + 10.0f * scale;
+    float w = diagram.width * pixelScale;
+    float h = diagram.height * pixelScale;
+    // Centred in the column like native diagrams; a wide one starts at the
+    // margin and scrolls sideways
+    float left = indent + std::max(0.0f, (maxWidth - w) * 0.5f);
+    if (!app.printLayout) {
+        // On screen the bitmap is the device pixels it covers: give it its
+        // exact size on whole pixels, so nothing resamples (blurs) it
+        D2D1_SIZE_U px = it->second.bitmap->GetPixelSize();
+        w = (float)px.width;
+        h = (float)px.height;
+        left = std::round(left);
+        top = std::round(top);
+    }
+    D2D1_RECT_F rect = D2D1::RectF(left, top, left + w, top + h);
+    app.layoutBitmaps.push_back({it->second.bitmap, rect});
+    if (bounds) *bounds = rect;
+    // A wide diagram the reader has not fitted scrolls sideways, as native
+    // ones do. A fitted or narrower one stays in the column: its raster may
+    // overshoot by a pixel, which the page margin absorbs
+    if (wide && !fitted) {
+        app.contentWidth = std::max(app.contentWidth, rect.right + 40.0f * scale);
+    }
+    y = rect.bottom + 24.0f * scale;
+    return true;
+}
+#endif
 
 static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     auto it = app.imageCache.find(src);
@@ -2658,6 +3857,19 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     if (!app.wicFactory || !app.renderTarget) {
         app.storeImageCacheEntry(src, std::move(entry));
         return app.imageCache[src];
+    }
+
+    // An image pasted inline: its bytes are in the source itself
+    {
+        std::string bytes;
+        if (imageDataUriBytes(src, bytes)) {
+            DecodedImage image;
+            if (SUCCEEDED(decodeImageMemory(app.wicFactory, bytes, app.renderTarget->GetMaximumBitmapSize(),
+                                            image)))
+                createDecodedBitmap(app, image, entry);
+            app.storeImageCacheEntry(src, std::move(entry));
+            return app.imageCache[src];
+        }
     }
 
     std::wstring widePath;
@@ -2686,14 +3898,14 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         // decodes through the ANSI codepage and mangles non-ASCII paths (#87)
         std::wstring wsrc = toWide(src);
         if (!app.currentFile.empty()) {
-            std::filesystem::path basePath(toWide(app.currentFile));
+            std::filesystem::path basePath = fsPath(toWide(app.currentFile));
             std::filesystem::path imgPath = basePath.parent_path() / wsrc;
             widePath = imgPath.wstring();
         } else {
             // An untitled note has no folder of its own: relative images
             // resolve against the launch folder, as they did while the
             // process still worked there (#253)
-            widePath = (std::filesystem::path(launchDirectory()) / wsrc).wstring();
+            widePath = (fsPath(launchDirectory()) / wsrc).wstring();
         }
     }
 
@@ -2718,61 +3930,37 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     return app.imageCache[src];
 }
 
-static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
-    auto& entry = getOrLoadImage(app, elem->url);
-
-    if (entry.failed || !entry.bitmap) {
-        // Render alt text as placeholder
-        std::wstring altText = L"[image";
-        std::wstring alt;
-        std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
-            if (!e) return;
-            if (e->type == ElementType::Text) alt += toWide(e->text);
-            else for (const auto& c : e->children) extract(c);
-        };
-        for (const auto& c : elem->children) extract(c);
-        if (!alt.empty()) {
-            altText += L": " + alt;
-        }
-        altText += L"]";
-
-        float lineHeight = app.italicFormat->GetFontSize() * 1.7f;
-        size_t docStart = app.docText.size();
-        LayoutInfo info = createLayout(app, altText, app.italicFormat, lineHeight, app.bodyTypography);
-
-        D2D1_COLOR_F color = app.theme.text;
-        color.a = 0.6f;
-        D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
-        D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + info.width, y + lineHeight);
-        addTextRun(app, std::move(info), pos, bounds, color, docStart, altText.length(), false);
-        app.docText += altText;
-        y += lineHeight;
-        return;
+// The size a loaded image draws at: an <img>'s width and height in CSS px,
+// which scale with the text, or else the picture's own pixels; then fitted
+// to the column and to 600 px (scaled) of height
+static void imageBoxSize(App& app, const Element& image, const App::ImageEntry& entry, float maxWidth,
+                         float& w, float& h) {
+    const float scale = app.contentScale * app.zoomFactor;
+    w = (float)entry.width;
+    h = (float)entry.height;
+    if (image.imageWidth > 0 || image.imageHeight > 0) {
+        imageDisplaySize(image, (float)entry.width, (float)entry.height, w, h);
+        w *= scale;
+        h *= scale;
     }
-
-    float scale = app.contentScale * app.zoomFactor;
-    float imgW = (float)entry.width;
-    float imgH = (float)entry.height;
-
-    // Scale to fit within maxWidth, never upscale
-    float displayScale = std::min(1.0f, maxWidth / imgW);
-    float displayW = imgW * displayScale;
-    float displayH = imgH * displayScale;
-
-    // Cap max height
-    float maxH = 600.0f * scale;
-    if (displayH > maxH) {
-        displayH = maxH;
-        displayW = displayH * (imgW / imgH);
+    if (w > maxWidth) {
+        h *= maxWidth / w;
+        w = maxWidth;
     }
-
-    app.layoutBitmaps.push_back({entry.bitmap,
-        D2D1::RectF(indent, y, indent + displayW, y + displayH)});
-
-    y += displayH + 12 * scale;
+    const float maxH = 600.0f * scale;
+    if (h > maxH) {
+        w *= maxH / h;
+        h = maxH;
+    }
 }
 
 static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    // Cells' docSourceSpans know their table, until it is done
+    struct SourceTable {
+        App& app;
+        explicit SourceTable(App& a) : app(a) { app.layoutSourceTable = ++app.layoutSourceBlock; }
+        ~SourceTable() { app.layoutSourceTable = 0; }
+    } sourceTable(app);
     float scale = app.contentScale * app.zoomFactor;
     float cellPadding = 8.0f * scale;
     float fontSize = app.textFormat->GetFontSize();
@@ -2805,10 +3993,10 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     std::vector<std::vector<float>> cellNatural(rows.size(), std::vector<float>(colCount, 0.0f));
     std::vector<std::vector<uint8_t>> cellSimple(rows.size(), std::vector<uint8_t>(colCount, 0));
 
-    std::wstring tsv;  // per-cell plain text doubles as the copy payload
+    // Per-cell plain text doubles as the CSV copy payload
+    std::vector<std::vector<std::wstring>> csvCells(rows.size());
     for (size_t r = 0; r < rows.size(); r++) {
         const auto& row = rows[r];
-        if (r > 0) tsv += L"\n";
         for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
             const auto& cell = row->children[c];
             cellAligns[r][c] = cell->align;
@@ -2822,12 +4010,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             };
             for (const auto& ch : cell->children) extract(ch);
 
-            if (c > 0) tsv += L"\t";
-            std::wstring tsvCell = text;
-            for (wchar_t& ch : tsvCell) {
-                if (ch == L'\t' || ch == L'\n' || ch == L'\r') ch = L' ';
-            }
-            tsv += tsvCell;
+            csvCells[r].push_back(text);
 
             // Measure natural width THE WAY THE RENDERER SHAPES IT — same
             // typography and the language-aware font fallback. A raw
@@ -3010,6 +4193,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         float cellX = indent;
         bool isHeader = (r == 0);
         const auto& row = rows[r];
+        // Printing keeps a row on one page, and the header with the first
+        // body row, rather than leaving an empty slice of a row at a page foot
+        float rowBottom = y + rowHeights[r];
+        if (isHeader && rows.size() > 1) rowBottom += rowHeights[1];
+        app.tableRowBands.push_back({y, rowBottom});
 
         // Header row background
         if (isHeader) {
@@ -3105,11 +4293,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             if (c < colCount) vx += colWidths[c];
         }
 
-        // Copy-as-TSV hover button hit region
+        // The copy buttons' table
         App::TableInfo info;
         info.bounds =
             D2D1::RectF(indent, tableStartY, indent + totalWidth, tableEndY);
-        info.tsv = std::move(tsv);
+        info.csv = csvQuoteAll(csvCells);
         info.fitKey = fitKey;
         info.fitCandidate = fitCandidate || fitActive;
         info.fitActive = fitActive;
@@ -3166,6 +4354,27 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
             layoutCodeBlock(app, elem, y, indent, maxWidth);
             break;
         case ElementType::MermaidDiagram:
+#ifdef TINTA_MERMAN
+            {
+                unsigned fitKey = 0x80000000u | app.layoutDiagramSeq++;
+                D2D1_RECT_F bounds{};
+                bool fitCandidate = false;
+                if (layoutMermanDiagram(app, elem->text, fitKey, y, indent,
+                                        maxWidth, &bounds, &fitCandidate)) {
+                    App::CodeBlockInfo info;
+                    info.bounds = bounds;
+                    info.codeText = toWide(elem->text);
+                    info.isDiagram = true;
+                    info.searchSource = true;
+                    info.docPos = app.docText.size();
+                    info.fitKey = fitKey;
+                    info.fitActive = fitBlockEnabled(app, fitKey);
+                    info.fitCandidate = fitCandidate || info.fitActive;
+                    app.codeBlocks.push_back(std::move(info));
+                    break;
+                }
+            }
+#endif
             if (!layoutMermaidDiagram(
                     app, elem->text, elem->sourceOffset, y, indent, maxWidth)) {
                 app.focusMermaidOnNextLayout = false;
@@ -3257,6 +4466,41 @@ static size_t countElements(const ElementPtr& elem) {
 
 } // namespace
 
+#ifdef TINTA_MERMAN
+bool mermanDiagramSvg(App& app, const std::string& source, bool forBrowsers,
+                      std::string& svg, float& width, float& height) {
+    merman_engine::Theme theme = mermanTheme(app);
+    merman_engine::Diagram diagram;
+    if (forBrowsers) {
+        diagram = merman_engine::renderParitySvg(source, theme);
+    } else {
+        std::string key;
+        diagram = renderMerman(source, theme, key);
+    }
+    if (!diagram.ok || diagram.width <= 0.0f || diagram.height <= 0.0f) {
+        return false;
+    }
+    svg = diagram.svg;
+    width = diagram.width;
+    height = diagram.height;
+    return true;
+}
+
+#ifdef TINTA_MERMAN_PNG
+bool mermanDiagramPng(App& app, const std::string& source, float scale,
+                      D2D1_COLOR_F background, std::string& png, float& width,
+                      float& height) {
+    std::string svg;
+    if (!mermanDiagramSvg(app, source, false, svg, width, height)) return false;
+    std::string error;
+    prepareMermanRasterFonts(app);
+    png = merman_engine::renderPng(source, mermanTheme(app), scale,
+                                   cssColor(background), error);
+    return !png.empty();
+}
+#endif
+#endif
+
 namespace {
 
 // Reset layout state and prepare for laying out blocks. Returns false when
@@ -3314,6 +4558,8 @@ bool layoutBegin(App& app) {
     app.scrollAnchors.clear();
     app.layoutTableSeq = 0;
     app.layoutDiagramSeq = 0;
+    app.layoutSourceBlock = 0;
+    app.layoutSourceTable = 0;
     return true;
 }
 
@@ -3426,6 +4672,135 @@ void ensureLayoutComplete(App& app) {
         layoutFinish(app);
         app.layoutTimeUs += (size_t)usElapsed(t0);
     }
+}
+
+namespace {
+
+size_t documentSourceSize(const App& app) {
+    return app.root && app.root->source ? app.root->source->mapped.size() : 0;
+}
+
+// The source offset drawn at document y, between the scroll anchors around
+// it (past the last one, spread over the rest of the source); false when y
+// lies beyond what the layout has reached
+bool sourceOffsetAtY(const App& app, float y, double& offset) {
+    const auto& anchors = app.scrollAnchors;
+    if (anchors.empty()) return false;
+    size_t lo = 0, hi = anchors.size();
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (anchors[mid].renderedY <= y) lo = mid;
+        else hi = mid;
+    }
+    offset = (double)anchors[lo].sourceOffset;
+    if (y <= anchors[lo].renderedY) return true;
+    if (lo + 1 < anchors.size()) {
+        if (anchors[lo + 1].renderedY > anchors[lo].renderedY) {
+            double t = (double)(y - anchors[lo].renderedY) /
+                       (double)(anchors[lo + 1].renderedY - anchors[lo].renderedY);
+            offset += std::clamp(t, 0.0, 1.0) *
+                      ((double)anchors[lo + 1].sourceOffset - (double)anchors[lo].sourceOffset);
+        }
+        return true;
+    }
+    if (!app.layoutComplete) return false;
+    size_t end = documentSourceSize(app);
+    if (app.contentHeight > anchors[lo].renderedY && end > anchors[lo].sourceOffset) {
+        double t = (double)(y - anchors[lo].renderedY) / (double)(app.contentHeight - anchors[lo].renderedY);
+        offset += std::clamp(t, 0.0, 1.0) * (double)(end - anchors[lo].sourceOffset);
+    }
+    return true;
+}
+
+// The inverse: the document y that draws a source offset
+float yForSourceOffset(const App& app, double offset) {
+    const auto& anchors = app.scrollAnchors;
+    if (anchors.empty()) return 0.0f;
+    size_t lo = 0, hi = anchors.size();
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if ((double)anchors[mid].sourceOffset <= offset) lo = mid;
+        else hi = mid;
+    }
+    float y = anchors[lo].renderedY;
+    if (offset <= (double)anchors[lo].sourceOffset) return y;
+    if (lo + 1 < anchors.size()) {
+        double span = (double)anchors[lo + 1].sourceOffset - (double)anchors[lo].sourceOffset;
+        if (span > 0) {
+            double t = std::clamp((offset - (double)anchors[lo].sourceOffset) / span, 0.0, 1.0);
+            y += (float)(t * (anchors[lo + 1].renderedY - anchors[lo].renderedY));
+        }
+        return y;
+    }
+    size_t end = documentSourceSize(app);
+    if (end > anchors[lo].sourceOffset && app.contentHeight > y) {
+        double t = std::clamp((offset - (double)anchors[lo].sourceOffset) /
+                                  (double)(end - anchors[lo].sourceOffset), 0.0, 1.0);
+        y += (float)(t * (app.contentHeight - y));
+    }
+    return y;
+}
+
+}  // namespace
+
+void reflowForViewportWidth(App& app) {
+    float width = documentViewportWidth(app);
+    if (width <= 0.0f || width == app.lastViewportWidth) return;
+    const bool laidOut = app.lastViewportWidth > 0.0f;
+    app.lastViewportWidth = width;
+    app.layoutDirty = true;
+    // The reader only: the edit-mode preview follows the source instead,
+    // and a document still restoring its saved place keeps that
+    app.readingPlacePending = false;
+    if (!laidOut || app.editMode || !app.root || app.scrollAnchors.empty() ||
+        app.pendingScrollRestore >= 0.0f) {
+        return;
+    }
+    // A heading Contents just jumped to, with no scrolling since
+    app.readingPlaceHeading = -1;
+    if (app.tocSpyOverride >= 0 && app.tocSpyOverride < (int)app.headings.size() &&
+        std::fabs(app.targetScrollY - app.tocSpyOverrideScroll) < 1.0f) {
+        app.readingPlaceHeading = app.tocSpyOverride;
+    }
+    app.readingPlaceAtTop = app.targetScrollY <= 0.5f;
+    double offset = 0.0;
+    if (app.readingPlaceHeading < 0 && !app.readingPlaceAtTop &&
+        !sourceOffsetAtY(app, app.targetScrollY + readingLineOffset(app), offset)) {
+        return;  // past the incremental layout's reach: nothing to anchor to
+    }
+    app.readingPlaceOffset = offset;
+    app.readingPlacePending = true;
+}
+
+void restoreReadingPlace(App& app) {
+    if (!app.readingPlacePending || app.layoutDirty) return;
+    app.readingPlacePending = false;
+    if (app.readingPlaceAtTop) {
+        app.scrollY = app.targetScrollY = 0.0f;
+        return;
+    }
+    if (app.readingPlaceHeading >= 0) {
+        if (app.readingPlaceHeading >= (int)app.headings.size()) ensureLayoutComplete(app);
+        if (app.readingPlaceHeading >= (int)app.headings.size()) return;
+        float headingY = app.headings[app.readingPlaceHeading].y;
+        if (!app.layoutComplete && headingY - readingLineOffset(app) > app.contentHeight - app.height) {
+            ensureLayoutComplete(app);  // the scroll limit needs the whole document
+        }
+        scrollToHeadingY(app, app.headings[app.readingPlaceHeading].y);
+        app.tocSpyOverride = app.readingPlaceHeading;
+        app.tocSpyOverrideScroll = app.targetScrollY;
+        return;
+    }
+    // The viewport-first layout stops two screens below the old place; the
+    // place may have moved further down in a narrower column
+    if (!app.layoutComplete && (app.scrollAnchors.empty() ||
+                                (double)app.scrollAnchors.back().sourceOffset <= app.readingPlaceOffset)) {
+        ensureLayoutComplete(app);
+    }
+    float target = yForSourceOffset(app, app.readingPlaceOffset) - readingLineOffset(app);
+    if (!app.layoutComplete && target > app.contentHeight - app.height) ensureLayoutComplete(app);
+    float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+    app.scrollY = app.targetScrollY = std::clamp(target, 0.0f, maxScroll);
 }
 
 

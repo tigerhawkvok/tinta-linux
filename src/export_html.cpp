@@ -4,7 +4,9 @@
 // re-uses the TeX layout engine through mathBoxSvg. No third-party code,
 // no external assets: local images are embedded as data URIs.
 
+#include "admonition.h"
 #include "export.h"
+#include "fs_path.h"
 
 #include "editor.h"
 #include "file_utils.h"
@@ -15,7 +17,17 @@
 #include "mermaid_ext.h"
 #include "render.h"
 #include "utils.h"
+#include "plantuml.h"
+#include "plantuml_app.h"
+#include "plantuml_queue.h"
 
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <filesystem>
+
+#include <functional>
 #include <commdlg.h>
 #include <cmath>
 #include <fstream>
@@ -26,6 +38,13 @@ using namespace qmd;
 namespace {
 
 constexpr float kDiagramFontSize = 14.0f;
+
+// HTML export PlantUML budget: a fence may hold the export at most
+// kPlantumlFenceTimeoutMs; once kPlantumlExportBudgetMs are spent the
+// export stops calling the tool and the remaining fences fall back to
+// source code (no unbounded UI freeze).
+constexpr int kPlantumlFenceTimeoutMs = 20000;
+constexpr int kPlantumlExportBudgetMs = 60000;
 
 // --- small emit helpers ---
 
@@ -111,7 +130,7 @@ const char* mimeForPath(const std::string& path) {
 }
 
 bool readBinary(const std::wstring& path, std::string& out) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(fsPath(path), std::ios::binary);
     if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -169,7 +188,7 @@ WrappedLines wrapLines(App& app, const std::wstring& text, float wrapWidth,
     constexpr float kHuge = 100000.0f;
     IDWriteTextFormat* format = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        style.mono ? app.theme.codeFontFamily : app.theme.fontFamily, nullptr,
+        style.mono ? app.theme.codeFontFamily : app.theme.fontFamily, fontCollectionFor(app, style.mono ? app.theme.codeFontFamily : app.theme.fontFamily),
         style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
         style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, diagramFontSize(style, scale), L"en-us",
@@ -914,7 +933,7 @@ mermaidext::Built buildDiagramPrims(App& app, const std::string& sourceUtf8,
         const wchar_t* family =
             style.mono ? app.theme.codeFontFamily : app.theme.fontFamily;
         app.dwriteFactory->CreateTextFormat(
-            family, nullptr,
+            family, fontCollectionFor(app, family),
             style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                        : DWRITE_FONT_WEIGHT_NORMAL,
             style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
@@ -946,6 +965,17 @@ namespace {
 std::string diagramSvg(App& app, const std::string& sourceUtf8,
                        const std::string& bodyFontCss,
                        const std::string& monoFontCss) {
+#ifdef TINTA_MERMAN
+    // Mermaid's own SVG for the browser (HTML labels, math), sized like the
+    // viewer's; the native renderer below is the fallback
+    {
+        std::string svg;
+        float width = 0.0f, height = 0.0f;
+        if (mermanDiagramSvg(app, sourceUtf8, true, svg, width, height)) {
+            return "<div style=\"max-width:" + num(width) + "px;margin:0 auto\">" + svg + "</div>";
+        }
+    }
+#endif
     mermaidext::Built built = buildDiagramPrims(app, sourceUtf8, 1.0f);
     if (!built.ok || built.prims.empty()) return {};
 
@@ -1020,12 +1050,111 @@ struct ExportCtx {
     std::string bodyFontCss;
     std::string monoFontCss;
     std::string textColorCss;
+    // Cumulative PlantUML render time left in this export; shared across
+    // all fences through the recursion (see plantumlFenceSvg).
+    int plantumlBudgetMsLeft = kPlantumlExportBudgetMs;
 };
 
 void walk(ExportCtx& ctx, const ElementPtr& elem);
 
 void walkChildren(ExportCtx& ctx, const ElementPtr& elem) {
     for (const auto& child : elem->children) walk(ctx, child);
+}
+
+// --- PlantUML fences -> inline SVG ---
+
+std::string wideToUtf8Str(const std::wstring& s) {
+    if (s.empty()) return {};
+    const int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(),
+                                        nullptr, 0, nullptr, nullptr);
+    std::string out(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], len,
+                        nullptr, nullptr);
+    return out;
+}
+
+std::string colorHexNoHash(D2D1_COLOR_F c) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02X%02X%02X", (int)(c.r * 255.0f + 0.5f),
+             (int)(c.g * 255.0f + 0.5f), (int)(c.b * 255.0f + 0.5f));
+    return buf;
+}
+
+// Render one PlantUML fence synchronously through the configured tool and
+// return its SVG text. The preamble mirrors the preview's: live theme font
+// family + kDiagramFontSize + the Role::Text hex, plus the Fill and Stroke
+// hexes on dark palettes so exported SVGs stay legible there too. An empty
+// return means no inline diagram: missing tool, source without @startuml,
+// render failure/timeout or exhausted budget; the caller then emits the
+// source-code block unchanged.
+//
+// Documented asymmetry: the queue cache holds PNGs for the preview, this
+// path renders SVGs for the page, so it deliberately does not reuse it.
+std::string plantumlFenceSvg(ExportCtx& ctx, const std::string& code) {
+    plantumlResolve(ctx.app);
+    if (!ctx.app.plantumlTool.available) return {};
+    if (ctx.plantumlBudgetMsLeft <= 0) return {};
+
+    const std::wstring toolPath = ctx.app.plantumlTool.isJar
+                                      ? ctx.app.plantumlTool.jar
+                                      : ctx.app.plantumlTool.program;
+    mermaidext::Prim colorPrim{};
+    const std::string preambleText = plantuml::preamble(
+        wideToUtf8Str(ctx.app.theme.fontFamily), kDiagramFontSize,
+        colorHexNoHash(
+            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Text)),
+        ctx.app.theme.isDark,
+        colorHexNoHash(
+            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Fill)),
+        colorHexNoHash(
+            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Stroke)));
+
+    std::string sourceWithPreamble = code;
+    if (!plantuml::injectPreamble(sourceWithPreamble, preambleText)) return {};
+
+    const uint64_t key =
+        plantuml::cacheKey(code, preambleText, toolPath,
+                           plantuml::toolStampFor(toolPath), 1 /*svg*/);
+    // A private export-html subtree under the same tinta-plantuml-pid
+    // temp-root convention as the queue: the queue's worker may be
+    // mid-render on another thread for the same key, so never share a
+    // directory with it.
+    std::wstring workRoot = ctx.app.plantumlWorkRoot;
+    if (workRoot.empty()) {
+        wchar_t temp[MAX_PATH] = {};
+        if (GetTempPathW(MAX_PATH, temp) == 0) {
+            temp[0] = L'.';
+            temp[1] = L'\0';  // no temp path: fall back to the cwd
+        }
+        workRoot = std::wstring(temp) + L"tinta-plantuml-" +
+                   std::to_wstring(GetCurrentProcessId());
+    }
+    const std::wstring workDir =
+        workRoot + plantuml::kPathSeparator + L"export-html" + plantuml::kPathSeparator + plantuml::keyHex(key);
+
+    std::wstring outFile;
+    std::wstring error;
+    const DWORD perFenceMs =
+        (DWORD)std::min(kPlantumlFenceTimeoutMs, ctx.plantumlBudgetMsLeft);
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool rendered =
+        plantuml::renderSync(ctx.app.plantumlTool, sourceWithPreamble,
+                             1 /*svg*/, workDir, outFile, perFenceMs, error);
+    const long long spentMs = (long long)std::chrono::duration_cast
+                                  <std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+    ctx.plantumlBudgetMsLeft -=
+        (int)std::min<long long>(spentMs, ctx.plantumlBudgetMsLeft);
+
+    std::string svg;
+    if (rendered) readBinary(outFile, svg);
+
+    // The export leaves nothing behind: delete the per-fence work dir
+    // whether the render succeeded, failed or timed out.
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path(workDir), ec);
+    return svg;
 }
 
 void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
@@ -1035,7 +1164,7 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
         std::wstring widePath = toWide(src);
         // Resolve relative to the document folder
         if (widePath.size() < 2 || widePath[1] != L':') {
-            widePath = ctx.baseDir + L"\\" + widePath;
+            widePath = joinPath(ctx.baseDir, widePath);
         }
         std::string data;
         const char* mime = mimeForPath(src);
@@ -1043,12 +1172,20 @@ void emitImage(ExportCtx& ctx, const ElementPtr& elem) {
             src = std::string("data:") + mime + ";base64," + base64(data);
         }
     }
+    // Nested spans (<sub>, emphasis) in the alt text keep their words
     std::string alt;
-    for (const auto& child : elem->children) {
-        if (child->type == ElementType::Text) alt += child->text;
-    }
-    ctx.out += "<img src=\"" + htmlEscape(src) + "\" alt=\"" +
-               htmlEscape(alt) + "\"/>";
+    std::function<void(const ElementPtr&)> gather = [&](const ElementPtr& e) {
+        if (e->type == ElementType::Text) alt += e->text;
+        for (const auto& child : e->children) gather(child);
+    };
+    for (const auto& child : elem->children) gather(child);
+    ctx.out += "<img src=\"" + htmlEscape(src) + "\" alt=\"" + htmlEscape(alt) + "\"";
+    // An <img>'s own size goes with it; the browser keeps the proportions
+    // when only one is given
+    auto px = [](float v) { return std::to_string((int)std::lround(v)); };
+    if (elem->imageWidth > 0) ctx.out += " width=\"" + px(elem->imageWidth) + "\"";
+    if (elem->imageHeight > 0) ctx.out += " height=\"" + px(elem->imageHeight) + "\"";
+    ctx.out += "/>";
 }
 
 void emitMath(ExportCtx& ctx, const ElementPtr& elem, bool display) {
@@ -1126,6 +1263,27 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
                     break;
                 }
             }
+            // PlantUML fence: inline the tool's own SVG while the export
+            // budget lasts. A missing tool, a source without @startuml,
+            // a render failure/timeout or an exhausted budget falls
+            // through to the source-code rendering below, unchanged.
+            {
+                std::string fenceLang = elem->language;
+                for (char& c : fenceLang) c = (char)tolower((unsigned char)c);
+                if (plantuml::isFenceLanguage(fenceLang)) {
+                    std::string source;
+                    for (const auto& child : elem->children) {
+                        if (child->type == ElementType::Text) {
+                            source += child->text;
+                        }
+                    }
+                    std::string svg = plantumlFenceSvg(ctx, source);
+                    if (!svg.empty()) {
+                        ctx.out += "<div class=\"diagram\">" + svg + "</div>\n";
+                        break;
+                    }
+                }
+            }
             ctx.out += "<pre><code";
             if (!elem->language.empty()) {
                 ctx.out +=
@@ -1152,28 +1310,32 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             break;
         }
         case ElementType::BlockQuote: {
-            // GitHub alert callouts: class for the palette plus the same
-            // icon-and-label title line the viewer draws
-            static const struct {
-                const char* cls;
-                const char* title;  // icon (text presentation) + label
-            } kAlert[] = {
-                {"note", "\xE2\x93\x98\xEF\xB8\x8E  Note"},
-                {"tip", "\xF0\x9F\x92\xA1\xEF\xB8\x8E  Tip"},
-                {"important", "\xE2\x9D\x97\xEF\xB8\x8E  Important"},
-                {"warning", "\xE2\x9A\xA0\xEF\xB8\x8E  Warning"},
-                {"caution", "\xE2\x9B\x94\xEF\xB8\x8E  Caution"},
-            };
-            int kind =
-                elem->alertKind >= 1 && elem->alertKind <= 5 ? elem->alertKind
-                                                             : 0;
-            if (kind) {
-                const auto& a = kAlert[kind - 1];
-                ctx.out += std::string("<blockquote class=\"alert-") + a.cls +
-                           "\"><p class=\"alert-title\">" + a.title + "</p>";
-            } else {
-                ctx.out += "<blockquote>";
+            if (elem->alertKind != 0) {
+                // An admonition in any dialect (admonition.h): the viewer's
+                // box, as a <details> when it folds
+                const AdmonitionStyle& style = admonitionStyle(elem->alertKind);
+                const bool foldable = elem->alertFold != 0;
+                const std::string tag = foldable ? "details" : "div";
+                ctx.out += "<" + tag + " class=\"admonition " + style.cls + "\"" +
+                           (elem->alertFold == 1 ? " open" : "") + ">";
+                if (!elem->alertNoTitle) {
+                    const std::string titleTag = foldable ? "summary" : "p";
+                    ctx.out += "<" + titleTag + " class=\"admonition-title\">";
+                    if (style.iconUtf8[0]) {
+                        ctx.out += std::string("<span class=\"admonition-icon\">") + style.iconUtf8 + "</span>";
+                    }
+                    if (elem->alertTitle && !elem->alertTitle->children.empty()) {
+                        walkChildren(ctx, elem->alertTitle);
+                    } else {
+                        ctx.out += htmlEscape(admonitionLabel(elem->alertKeyword));
+                    }
+                    ctx.out += "</" + titleTag + ">";
+                }
+                walkChildren(ctx, elem);
+                ctx.out += "</" + tag + ">\n";
+                break;
             }
+            ctx.out += "<blockquote>";
             walkChildren(ctx, elem);
             ctx.out += "</blockquote>\n";
             break;
@@ -1261,6 +1423,11 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             ctx.out += "<del>";
             walkChildren(ctx, elem);
             ctx.out += "</del>";
+            break;
+        case ElementType::Underline:
+            ctx.out += "<ins>";
+            walkChildren(ctx, elem);
+            ctx.out += "</ins>";
             break;
         case ElementType::Superscript:
             ctx.out += "<sup>";
@@ -1370,28 +1537,26 @@ std::string themeCss(const App& app, const std::string& bodyFont,
            colorCss(t.blockquoteBorder) +
            ";margin:1em 0;padding:2px 18px;color:" + colorCss(mutedText) +
            ";}";
-    // github.com's alert accents, light or dark side picked by the theme
-    // (the same table the viewer uses)
-    {
-        static const struct {
-            const char* cls;
-            uint32_t light;
-            uint32_t dark;
-        } kAlertCss[] = {
-            {"note", 0x0969DA, 0x4493F8},
-            {"tip", 0x1A7F37, 0x3FB950},
-            {"important", 0x8250DF, 0xAB7DF8},
-            {"warning", 0x9A6700, 0xD29922},
-            {"caution", 0xCF222E, 0xF85149},
-        };
-        css += ".alert-title{font-weight:600;margin:0 0 4px 0;}";
-        for (const auto& a : kAlertCss) {
-            std::string hex = colorCss(hexColor(t.isDark ? a.dark : a.light));
-            css += std::string("blockquote.alert-") + a.cls +
-                   "{border-color:" + hex + ";}";
-            css += std::string("blockquote.alert-") + a.cls +
-                   " .alert-title{color:" + hex + ";}";
-        }
+    // Admonitions (admonition.h): the viewer's palette, tint and bar,
+    // light or dark side picked by the theme; <details> for the foldable
+    css += ".admonition{margin:1em 0;padding:8px 16px;border-left:4px solid;}";
+    css += ".admonition>.admonition-title{font-weight:700;margin:4px 0 8px 0;}";
+    css += ".admonition-icon{margin-right:8px;}";
+    css += ".admonition>:last-child{margin-bottom:4px;}";
+    css += "details.admonition>summary{cursor:pointer;list-style:none;}";
+    css += "details.admonition>summary::-webkit-details-marker{display:none;}";
+    css += "details.admonition>summary::after{content:\"\\25BE\";float:right;}";
+    css += "details.admonition:not([open])>summary::after{content:\"\\25B8\";}";
+    css += "details.admonition:not([open])>summary{margin-bottom:4px;}";
+    for (int kind = 1; kind < AdmonitionKindCount; ++kind) {
+        if (kind != AdmonitionNote && std::string(admonitionStyle(kind).cls) == "note") continue;
+        const AdmonitionStyle& style = admonitionStyle(kind);
+        D2D1_COLOR_F accent = hexColor(t.isDark ? style.dark : style.light);
+        D2D1_COLOR_F tint = accent;
+        tint.a = t.isDark ? 0.14f : 0.09f;
+        css += std::string(".admonition.") + style.cls + "{border-color:" + colorCss(accent) +
+               ";background:" + colorCss(tint) + ";}";
+        css += std::string(".admonition.") + style.cls + ">.admonition-title{color:" + colorCss(accent) + ";}";
     }
     css += "table{border-collapse:collapse;margin:1em 0;}";
     css += "th,td{border:1px solid " + colorCss(border) +
@@ -1401,6 +1566,9 @@ std::string themeCss(const App& app, const std::string& bodyFont,
            ";margin:24px 0;}";
     css += "img{max-width:100%;}";
     css += "li.task{list-style:none;margin-left:-20px;}";
+    // As in the viewer: half a line (of 1.6em) between list items; a loose
+    // item's paragraph margin collapses into it rather than adding
+    css += "li+li{margin-top:0.8em;}";
     css += ".diagram{text-align:center;margin:1em 0;overflow-x:auto;}";
     css += ".math-display{text-align:center;margin:1em 0;}";
     css += ".math-inline svg{vertical-align:middle;}";
@@ -1451,7 +1619,7 @@ bool exportHtmlFile(App& app, const std::wstring& path) {
     walk(ctx, app.root);
     ctx.out += "</body>\n</html>\n";
 
-    std::ofstream out(path, std::ios::binary);
+    std::ofstream out(fsPath(path), std::ios::binary);
     if (!out) return false;
     out.write(ctx.out.data(), ctx.out.size());
     return out.good();

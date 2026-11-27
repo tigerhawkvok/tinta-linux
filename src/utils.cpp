@@ -91,21 +91,24 @@ const App::TextRect* findTextRectAt(const App& app, int x, int y) {
 }
 
 
-void updateWindowTitle(App& app) {
-    std::wstring title = L"Tinta";
+// Document first, as Windows titles read, so a taskbar thumbnail names the
+// file (#2): "README.md - Tinta Mono", "* README.md - Tinta Mono" with
+// unsaved edits
+std::wstring windowTitle(const App& app) {
+    std::wstring name;
     if (!app.currentFile.empty()) {
         std::wstring wpath = toWide(app.currentFile);
         size_t lastSep = wpath.find_last_of(L"\\/");
-        if (lastSep != std::wstring::npos)
-            title = L"Tinta - " + wpath.substr(lastSep + 1);
-        else
-            title = L"Tinta - " + wpath;
+        name = lastSep != std::wstring::npos ? wpath.substr(lastSep + 1) : wpath;
     } else if (app.editMode) {
-        // Quick note (Ctrl+N): no backing file until the first save
-        title = L"Tinta - ";
-        title += tr(app, "title.untitled");
+        name = tr(app, "title.untitled");  // quick note (Ctrl+N): no file until the first save
     }
-    SetWindowTextW(app.hwnd, title.c_str());
+    if (name.empty()) return L"Tinta Mono";
+    return (app.editorDirty ? L"* " : L"") + name + L" - Tinta Mono";
+}
+
+void updateWindowTitle(App& app) {
+    SetWindowTextW(app.hwnd, windowTitle(app).c_str());
 }
 
 void launchQuickNoteWindow() {
@@ -161,10 +164,14 @@ std::string slugifyHeading(const std::wstring& text) {
     return out;
 }
 
+float readingLineOffset(const App& app) {
+    return chromeTopHeight(app) + dpi(app, 14.0f);
+}
+
 void scrollToHeadingY(App& app, float headingY) {
     // The title-bar tab strip draws over the document's top band, so the
     // landing margin must clear it or the heading arrives half-hidden
-    float targetY = headingY - chromeTopHeight(app) - dpi(app, 14.0f);
+    float targetY = headingY - readingLineOffset(app);
     float maxScroll = std::max(0.0f, app.contentHeight - app.height);
     app.scrollY = std::max(0.0f, std::min(targetY, maxScroll));
     app.targetScrollY = app.scrollY;
@@ -239,6 +246,18 @@ bool copyToClipboard(HWND hwnd, const std::wstring& text) {
     if (!copied) GlobalFree(hMem);  // ownership transfers only on success
     CloseClipboard();
     return copied;
+}
+
+// The block text ends with its last line's break, which the copy button
+// leaves out, as GitHub's does. A blank line written before the closing
+// fence is content and stays.
+std::wstring codeCopyText(const std::wstring& code) {
+    std::wstring text = code;
+    if (!text.empty() && text.back() == L'\n') {
+        text.pop_back();
+        if (!text.empty() && text.back() == L'\r') text.pop_back();
+    }
+    return text;
 }
 
 std::wstring absoluteFilePath(const std::string& path) {

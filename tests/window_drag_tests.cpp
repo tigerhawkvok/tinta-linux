@@ -118,7 +118,6 @@ void stripLayout(App& app) {
     for (const auto& hit : app.tabHits) {
         check(hit.rect.right <= drag.left + 0.1f || hit.rect.left >= drag.right - 0.1f,
               "interactive controls never cover the reserved drag area");
-        if (hit.index == -4) continue; // pin belongs to the caption island
         check(hit.rect.left >= appMenuButtonRect(app).right && hit.rect.right <= drag.left + 0.1f,
               "tabs and controls stay between icon and drag area");
         if (hit.index == -3) overflow = true;

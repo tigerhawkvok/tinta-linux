@@ -151,6 +151,6 @@ bool appMenuButtonAt(const App& app, float x, float y) {
 
 bool appMenuAvailable(const App& app) {
     return !app.zenMode && !app.confirmExitPending && !app.createRefPending &&
-           !app.showPrintPreview && !app.showLightbox && !app.annotEditorOpen &&
+           !app.pasteImagePending && !app.showPrintPreview && !app.showLightbox && !app.annotEditorOpen &&
            !app.showThemeEditor && !app.showShortcutEditor;
 }

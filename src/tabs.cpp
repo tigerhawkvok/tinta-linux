@@ -3,6 +3,7 @@
 // document surface with an accent underline, unsaved buffers show a dot,
 // a chevron opens the open-files switcher when the strip is crowded.
 
+#include "emacs_keys.h"
 #include "tabs.h"
 #include "d2d_init.h"
 #include "search.h"
@@ -101,7 +102,7 @@ void tabsInit(App& app) {
     tab.path = app.currentFile;
     tab.title = titleForPath(app, app.currentFile);
     // A pathless viewer tab is the start page, not an untitled note
-    if (app.currentFile.empty() && !app.editMode) tab.title = L"Tinta";
+    if (app.currentFile.empty() && !app.editMode) tab.title = L"Tinta Mono";
     app.tabs.push_back(std::move(tab));
     app.activeTab = 0;
 }
@@ -141,6 +142,8 @@ void tabActivate(App& app, HWND hwnd, int index) {
     // Leaving an embedded Learn document: an empty tab activated later
     // shows the launcher again
     app.startPageEmbeddedOpen = false;
+    // A paste-image card is the leaving document's
+    app.pasteImagePending = false;
 
     syncActiveTab(app);
     parkActiveEditBuffer(app);
@@ -166,7 +169,7 @@ void tabActivate(App& app, HWND hwnd, int index) {
         // An empty viewer tab in a launcher window shows the start page
         // again; its label follows suit
         if (!tab.editMode && startPageActive(app)) {
-            tab.title = L"Tinta";
+            tab.title = L"Tinta Mono";
         }
     }
     if (tab.editMode) {
@@ -289,7 +292,7 @@ void tabBecomeStartPage(App& app, HWND hwnd) {
     App::DocTab& tab = app.tabs[app.activeTab];
     draftsDeleteForTab(app, tab.id);
     tab.path.clear();
-    tab.title = L"Tinta";
+    tab.title = L"Tinta Mono";
     tab.editMode = false;
     tab.editorDirty = false;
     tab.editorText.clear();
@@ -316,7 +319,7 @@ void tabOpenStartPage(App& app, HWND hwnd) {
     parkActiveEditBuffer(app);
     App::DocTab tab;
     tab.id = ++app.tabIdCounter;
-    tab.title = L"Tinta";
+    tab.title = L"Tinta Mono";
     app.tabs.push_back(std::move(tab));
     app.activeTab = (int)app.tabs.size() - 1;
     app.currentFile.clear();
@@ -364,12 +367,9 @@ void tabOpenQuickNote(App& app, HWND hwnd) {
 namespace {
 
 float captionButtonWidth(const App& app) { return dpi(app, 46.0f); }
-// Always-on-top pin, left of the caption buttons
-float pinButtonWidth(const App& app) { return dpi(app, 34.0f); }
-D2D1_RECT_F pinButtonRect(const App& app) {
-    float right = (float)app.width - captionButtonWidth(app) * 3.0f;
-    return D2D1::RectF(right - pinButtonWidth(app), 0.0f, right,
-                       chromeTopHeight(app));
+// Left edge of the minimize / maximize / close buttons
+float captionButtonsLeft(const App& app) {
+    return (float)app.width - captionButtonWidth(app) * 3.0f;
 }
 
 struct StripMetrics {
@@ -475,14 +475,13 @@ D2D1_RECT_F captionButtonRect(const App& app, int button) {
     return D2D1::RectF(right - w, 0.0f, right, chromeTopHeight(app));
 }
 
-// Left edge of the caption controls: the pin and the window buttons
+// Left edge of the caption controls (the window buttons) and their gap
 float captionIslandLeft(const App& app) {
-    return (float)app.width - captionButtonWidth(app) * 3.0f -
-           pinButtonWidth(app) - dpi(app, 8.0f);
+    return captionButtonsLeft(app) - dpi(app, 8.0f);
 }
 
 D2D1_RECT_F titleDragRect(const App& app) {
-    float right = pinButtonRect(app).left;
+    float right = captionButtonsLeft(app);
     right = std::max(appMenuButtonRect(app).right, right);
     // A very narrow split pane still needs a title/tab context target and
     // room for its controls. Reduce the gap only after that space runs out.
@@ -636,7 +635,7 @@ void renderTabStrip(App& app) {
     if (tabless) {
         // Single document: the caption shows the plain window title, with
         // the + button right after it so the tab row is discoverable
-        std::wstring title = L"Tinta";
+        std::wstring title = L"Tinta Mono";
         if (!app.tabs.empty() && !app.tabs[0].title.empty() &&
             !startPageActive(app)) {
             title = app.tabs[0].title;
@@ -912,48 +911,6 @@ void renderTabStrip(App& app) {
         }
     }
 
-    // Always-on-top pin: an upright pushpin, accent-filled while pinned
-    {
-        D2D1_RECT_F r = pinButtonRect(app);
-        bool hover = (float)app.mouseX >= r.left && (float)app.mouseX < r.right &&
-                     (float)app.mouseY >= r.top && (float)app.mouseY < r.bottom;
-        if (hover) {
-            D2D1_COLOR_F bg = text;
-            bg.a = 0.07f;
-            app.brush->SetColor(bg);
-            app.renderTarget->FillRectangle(r, app.brush);
-        }
-        float cx = (r.left + r.right) * 0.5f;
-        float cy = (r.top + r.bottom) * 0.5f - dpi(app, 1.0f);
-        D2D1_COLOR_F pin = app.alwaysOnTop ? app.theme.accent : text;
-        if (!app.alwaysOnTop && !hover) pin.a = 0.45f;
-        app.brush->SetColor(pin);
-        float bw = dpi(app, 3.0f);   // body half-width
-        float bh = dpi(app, 4.0f);   // body half-height
-        D2D1_RECT_F body = D2D1::RectF(cx - bw, cy - bh, cx + bw, cy + bh - 1);
-        if (app.alwaysOnTop) {
-            app.renderTarget->FillRectangle(body, app.brush);
-        } else {
-            app.renderTarget->DrawRectangle(body, app.brush, dpi(app, 1.0f));
-        }
-        // Head bar, flange, and needle
-        app.renderTarget->DrawLine(
-            D2D1::Point2F(cx - bw - dpi(app, 1.0f), cy - bh),
-            D2D1::Point2F(cx + bw + dpi(app, 1.0f), cy - bh), app.brush,
-            dpi(app, 1.2f));
-        app.renderTarget->DrawLine(
-            D2D1::Point2F(cx - bw - dpi(app, 2.0f), cy + bh - 1),
-            D2D1::Point2F(cx + bw + dpi(app, 2.0f), cy + bh - 1), app.brush,
-            dpi(app, 1.2f));
-        app.renderTarget->DrawLine(
-            D2D1::Point2F(cx, cy + bh - 1),
-            D2D1::Point2F(cx, cy + bh + dpi(app, 4.0f)), app.brush,
-            dpi(app, 1.2f));
-        App::TabHit pinHit;
-        pinHit.rect = r;
-        pinHit.index = -4;
-        app.tabHits.push_back(pinHit);
-    }
 }
 
 void renderTabSwitcher(App& app) {
@@ -1107,7 +1064,8 @@ const App::TabHit* tabHitFor(const App& app, int tab) {
 // Menus, dialogs and drags own the pointer: no card over them
 bool tabHoverCardBlocked(const App& app) {
     return app.showTabSwitcher || app.showTabMenu || app.showContextMenu ||
-           app.confirmExitPending || app.createRefPending || app.showHelp ||
+           app.confirmExitPending || app.createRefPending || app.pasteImagePending ||
+           app.showHelp ||
            app.showSettings || app.showThemeChooser || app.showThemeEditor ||
            app.showShortcutEditor || app.showLightbox ||
            app.showPrintPreview || app.tabDragIndex >= 0;
@@ -1410,18 +1368,6 @@ bool tabStripMouseDown(App& app, HWND hwnd, int x, int y, bool middle) {
             }
             return true;
         }
-        if (hit.index == -4) {
-            // Pin: toggle always-on-top for this window
-            if (!middle) {
-                app.alwaysOnTop = !app.alwaysOnTop;
-                SetWindowPos(hwnd,
-                             app.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
-                             0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-            return true;
-        }
         if (middle) {
             tabCloseIndex(app, hwnd, hit.index);
             return true;
@@ -1660,10 +1606,11 @@ void renderTabMenu(App& app) {
             D2D1::RectF(x + inset, textY, x + w - inset, top + itemH),
             app.brush);
 
-        if (TAB_MENU[i].shortcut[0]) {
+        const wchar_t* tabShortcut = profileChord(app, TAB_MENU[i].shortcut);
+        if (tabShortcut[0]) {
             IDWriteTextLayout* hint = nullptr;
             app.dwriteFactory->CreateTextLayout(
-                TAB_MENU[i].shortcut, (UINT32)wcslen(TAB_MENU[i].shortcut),
+                tabShortcut, (UINT32)wcslen(tabShortcut),
                 format, 1000.0f, itemH, &hint);
             if (hint) {
                 DWRITE_TEXT_METRICS metrics{};
@@ -1908,6 +1855,26 @@ void tabDragMove(App& app, HWND hwnd, int x, int y) {
         // Keep the cursor on the card even when the tab was wider than it
         int grab = std::min((int)app.tabDragOffsetX,
                             (int)dpi(app, 166.0f));
+#ifndef _WIN32
+        // Linux: the desktop carries the card (no window there knows where
+        // it is, so neither WindowFromPoint nor a placed new window works);
+        // the outcome comes back as WM_APP_TAB_DRAG_DONE
+        if (!app.tabDragDetached) {
+            float scale = app.contentScale > 0.0f ? app.contentScale : 1.0f;
+            TintaTabDragCard card{app.tabs[index].title.c_str(), toColorref(tabStripBackground(app)),
+                                  toColorref(app.theme.text), toColorref(app.theme.text), 190, 34, 8,
+                                  (int)(chromeTopHeight(app) / scale)};
+            int hotX = std::max(12, std::min((int)(grab / scale), 166));
+            if (tintaBeginTabDrag(hwnd, path.c_str(), card, hotX, 17, WM_APP_TAB_DRAG_DONE)) {
+                app.tabDragOutPath = path;
+                app.tabDragIndex = -1;
+                app.tabDragging = false;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return;
+            }
+        }
+#endif
         int ghostX = screen.x - std::max(grab, (int)dpi(app, 12.0f));
         int ghostY = screen.y - (int)dpi(app, 17.0f);
         if (!app.tabDragDetached) {
@@ -1965,7 +1932,7 @@ void tabDragEnd(App& app, HWND hwnd, int x, int y) {
         wchar_t className[16] = {};
         if (root && root != hwnd &&
             GetClassNameW(root, className, _countof(className)) &&
-            wcscmp(className, L"Tinta") == 0) {
+            wcscmp(className, L"TintaMono") == 0) {
             if (tabSendDrop(root, path, screen)) {
                 SetForegroundWindow(root);
                 dragCloseLocal(app, hwnd, index);
@@ -1990,6 +1957,41 @@ void tabDragEnd(App& app, HWND hwnd, int x, int y) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+void tabDragDone(App& app, HWND hwnd, int outcome) {
+    std::string path = std::move(app.tabDragOutPath);
+    app.tabDragOutPath.clear();
+    if (path.empty()) return;
+    // The tab may have moved since the drag began: find it by its path
+    int index = -1;
+    for (int i = 0; i < (int)app.tabs.size(); i++) {
+        const std::string& p = i == app.activeTab ? app.currentFile : app.tabs[i].path;
+        if (p == path) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) return;
+#ifndef _WIN32
+    if (outcome == TINTA_TAB_DRAG_MOVED) {
+        dragCloseLocal(app, hwnd, index);
+    } else if (outcome == TINTA_TAB_DRAG_NO_TARGET && app.tabs.size() > 1) {
+        // Released where no Tinta window took it: the tab tears off into a
+        // window of its own (the desktop places it)
+        wchar_t exePath[MAX_PATH];
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH)) {
+            std::wstring args = L"--cascade --tabbed \"" + toWide(path) + L"\"";
+            if ((INT_PTR)ShellExecuteW(nullptr, L"open", exePath, args.c_str(), nullptr, SW_SHOWNORMAL) > 32) {
+                dragCloseLocal(app, hwnd, index);
+            }
+        }
+    }
+#else
+    (void)outcome;
+    (void)hwnd;
+#endif
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void tabWindowDropMerge(App& app, HWND hwnd) {
     // A tabless window dropped so the cursor lands on another Tinta
     // window's tab strip donates its document there (Notepad-style);
@@ -2004,8 +2006,8 @@ void tabWindowDropMerge(App& app, HWND hwnd) {
     HWND target = nullptr;
     // Top-level Tinta windows in z-order; the first one under the cursor
     // (other than us) is the drop candidate
-    for (HWND w = FindWindowExW(nullptr, nullptr, L"Tinta", nullptr); w;
-         w = FindWindowExW(nullptr, w, L"Tinta", nullptr)) {
+    for (HWND w = FindWindowExW(nullptr, nullptr, L"TintaMono", nullptr); w;
+         w = FindWindowExW(nullptr, w, L"TintaMono", nullptr)) {
         if (w == hwnd || !IsWindowVisible(w) || IsIconic(w)) continue;
         RECT r;
         if (!GetWindowRect(w, &r) || !PtInRect(&r, cursor)) continue;

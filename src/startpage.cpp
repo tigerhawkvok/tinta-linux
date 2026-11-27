@@ -22,9 +22,10 @@
 
 // The old bare-launch tutorial, now behind the "Sample document" card
 // (and still the fallback when a requested file cannot be loaded)
-static const char* kSampleDocument = R"(# Welcome to Tinta
+static const char* kSampleDocument = R"(# Welcome to Tinta Mono
 
-**Tinta** is a fast, lightweight Markdown and Mermaid viewer for Windows.
+**Tinta Mono** is a fast, native Markdown and Mermaid viewer for Windows and Linux, a fork of
+Tinta by oipoistar.
 
 ## Getting Started
 
@@ -142,6 +143,9 @@ gantt
 Class, state, ER, gitGraph, mindmap, timeline, journey, quadrant and XY
 charts all render the same way. A file ending in `.mmd` opens straight
 as a diagram — no fences needed.
+
+A `.puml` or `.plantuml` file opens straight as a diagram too — it
+renders through the PlantUML tool configured in Settings.
 )";
 
 static const char* kMarkdownBasics = R"(# Markdown basics
@@ -246,7 +250,7 @@ static IDWriteTextLayout* spLayout(App& app, const std::wstring& text,
                                    float trackingDip = 0.0f) {
     IDWriteTextFormat* fmt = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        L"Segoe UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+        L"Segoe UI", fontCollectionFor(app, L"Segoe UI"), weight, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, dpi(app, sizeDip), L"en-us", &fmt);
     if (!fmt) return nullptr;
     useUiFontFallback(app, fmt);
@@ -497,7 +501,7 @@ void renderStartPage(App& app) {
     };
 
     // --- Hero: icon, wordmark, version, tagline
-    IDWriteTextLayout* wm = spLayout(app, L"Tinta", 38.0f,
+    IDWriteTextLayout* wm = spLayout(app, L"Tinta Mono", 38.0f,
                                      DWRITE_FONT_WEIGHT_EXTRA_BOLD, 4096.0f,
                                      false, false, -1.0f);
     DWRITE_TEXT_METRICS wmM = spMetrics(wm);

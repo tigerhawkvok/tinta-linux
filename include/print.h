@@ -9,6 +9,10 @@
 // dedicated light print palette in the active theme's fonts.
 bool printDocument(App& app);
 
+// Page break positions (document Y) for pages pageContentH tall, cut
+// between text lines, images, shapes and table rows
+std::vector<float> computePageBreaks(const App& app, float pageContentH);
+
 // Print preview overlay: Ctrl+P opens it, the user flips through the
 // paginated pages, then confirms into the printer dialog or cancels.
 // Pages are previewed at the default printer's paper size (A4 fallback);
@@ -35,6 +39,10 @@ inline constexpr int PRINT_PAPER_COUNT = 4;
 
 // Re-paginates the open preview for a new paper size / orientation
 void printPreviewSetFormat(App& app, int paper, bool landscape);
+
+// Lays the open preview out again: an image or a PlantUML diagram that
+// finished while it was open takes its place in the pages (no-op when closed)
+void printPreviewRefresh(App& app);
 
 // Page margins the preview offers, in mm: 0.5, 0.75 (the default) and 1 in.
 // settings.ini's printMarginMm takes any value from 5 to 50 (#257).

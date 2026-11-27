@@ -3,6 +3,7 @@
 // Much faster startup than OpenGL
 
 #include "app.h"
+#include "fs_path.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
@@ -41,6 +42,7 @@
 #include <thread>
 #pragma comment(lib, "winhttp.lib")
 #include "input.h"
+#include "emacs_keys.h"
 #include "editor.h"
 #include "print.h"
 #include "export.h"
@@ -111,15 +113,10 @@ void render(App& app) {
         return;
     }
 
-    // Any viewport width change (folder browser toggle, preview split)
-    // re-flows the reading column for the space that remains
-    {
-        float vw = documentViewportWidth(app);
-        if (vw > 0.0f && vw != app.lastViewportWidth) {
-            app.lastViewportWidth = vw;
-            app.layoutDirty = true;
-        }
-    }
+    // Any viewport width change (a side panel, the window, the preview
+    // split) re-flows the reading column for the space that remains; the
+    // reader keeps its place
+    reflowForViewportWidth(app);
 
     if (app.layoutDirty) {
         if (app.editMode && !editorPreviewVisible(app)) {
@@ -144,6 +141,7 @@ void render(App& app) {
             }
         }
     }
+    restoreReadingPlace(app);
 
     // Incremental layout grows contentHeight in small steps. Keep scrollbar
     // visibility latched for the duration of that layout and only let its
@@ -157,67 +155,7 @@ void render(App& app) {
                                               app.contentHeight);
     }
 
-    // Sync preview scroll to editor scroll position using source-offset anchors
-    if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
-        !app.editorLineByteOffsets.empty()) {
-        // Find the editor's top visible line (row-aware in wrap mode)
-        int topLine = (int)editorTopVisibleLine(app);
-        topLine = std::max(0, std::min(topLine, (int)app.editorLineByteOffsets.size() - 1));
-        size_t topByteOffset = app.editorLineByteOffsets[topLine];
-
-        // Binary search for the anchor just before this byte offset
-        size_t lo = 0, hi = app.scrollAnchors.size();
-        while (lo + 1 < hi) {
-            size_t mid = (lo + hi) / 2;
-            if (app.scrollAnchors[mid].sourceOffset <= topByteOffset) lo = mid;
-            else hi = mid;
-        }
-
-        // Interpolate between anchor[lo] and anchor[lo+1]
-        float targetY;
-        if (lo + 1 < app.scrollAnchors.size() &&
-            app.scrollAnchors[lo + 1].sourceOffset > app.scrollAnchors[lo].sourceOffset) {
-            float t = (float)(topByteOffset - app.scrollAnchors[lo].sourceOffset) /
-                      (float)(app.scrollAnchors[lo + 1].sourceOffset - app.scrollAnchors[lo].sourceOffset);
-            t = std::max(0.0f, std::min(t, 1.0f));
-            targetY = app.scrollAnchors[lo].renderedY +
-                       t * (app.scrollAnchors[lo + 1].renderedY - app.scrollAnchors[lo].renderedY);
-        } else {
-            // Last anchor or single anchor — use ratio for remaining content
-            targetY = app.scrollAnchors[lo].renderedY;
-            if (app.contentHeight > app.scrollAnchors[lo].renderedY) {
-                size_t lastOffset = app.scrollAnchors[lo].sourceOffset;
-                size_t totalBytes = app.editorLineByteOffsets.back();
-                if (totalBytes > lastOffset) {
-                    float t = (float)(topByteOffset - lastOffset) / (float)(totalBytes - lastOffset);
-                    t = std::max(0.0f, std::min(t, 1.0f));
-                    targetY += t * (app.contentHeight - app.scrollAnchors[lo].renderedY);
-                }
-            }
-        }
-
-        // The docked pane runs to the window's bottom edge (#245), so the
-        // preview scrolls exactly as far as the reader does
-        float previewMaxScroll =
-            std::max(0.0f, app.contentHeight - (float)app.height);
-        // renderedY includes the page's top padding below the strip;
-        // subtract it so an editor at its top means a page at its top, and
-        // snap the last half-line so the page top is always reachable
-        // (t11 feedback)
-        float alignY = targetY - documentContentTop(app);
-        float synced = std::max(0.0f, std::min(alignY, previewMaxScroll));
-        if (app.editorScrollY <= 0.5f) synced = 0.0f;
-        float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
-        if (app.editorScrollY >= editorMax - 1.0f) {
-            // The editor has bottomed out, but rendered content is taller
-            // than its source (images, diagrams): let the preview overshoot
-            // to reach its tail (#85). Scrolling the editor up re-syncs.
-            app.scrollY = std::min(std::max(app.scrollY, synced), previewMaxScroll);
-        } else {
-            app.scrollY = synced;
-        }
-        app.targetScrollY = app.scrollY;
-    }
+    editorSyncPreviewScroll(app);
 
     // Edit mode: split view rendering — the source on the desk surface,
     // the preview docked beside it on the reader's page (#245)
@@ -564,11 +502,26 @@ render_document:
             bmp.destRect.top > viewportBottom + cullMargin) continue;
         if (bmp.destRect.right < viewportLeft - cullMargin ||
             bmp.destRect.left > viewportRight + cullMargin) continue;
-        app.renderTarget->DrawBitmap(bmp.bitmap.Get(),
-            D2D1::RectF(bmp.destRect.left - app.scrollX,
-                         bmp.destRect.top - app.scrollY,
-                         bmp.destRect.right - app.scrollX,
-                         bmp.destRect.bottom - app.scrollY));
+        D2D1_RECT_F dest = D2D1::RectF(bmp.destRect.left - app.scrollX,
+                                       bmp.destRect.top - app.scrollY,
+                                       bmp.destRect.right - app.scrollX,
+                                       bmp.destRect.bottom - app.scrollY);
+        // A bitmap made for its device pixels (a diagram) is copied onto
+        // whole pixels: a fractional scroll or viewport offset, or linear
+        // filtering, would resample and blur it. Photos scale smoothly.
+        D2D1_SIZE_U px = bmp.bitmap->GetPixelSize();
+        if (std::fabs((dest.right - dest.left) - px.width) < 0.5f &&
+            std::fabs((dest.bottom - dest.top) - px.height) < 0.5f) {
+            D2D1_MATRIX_3X2_F m;
+            app.renderTarget->GetTransform(&m);
+            float x = std::round(dest.left + m._31) - m._31;
+            float y = std::round(dest.top + m._32) - m._32;
+            dest = D2D1::RectF(x, y, x + px.width, y + px.height);
+            app.renderTarget->DrawBitmap(bmp.bitmap.Get(), dest, 1.0f,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        } else {
+            app.renderTarget->DrawBitmap(bmp.bitmap.Get(), dest);
+        }
         app.drawCalls++;
     }
 
@@ -723,54 +676,48 @@ render_document:
         }
     }
 
-    // Table copy-as-TSV button on hover (same pattern as code blocks;
-    // wide tables clamp the button into the visible viewport)
+    // Table copy buttons on hover, Markdown and CSV (same pattern as code
+    // blocks; wide tables clamp them into the visible viewport)
     if (app.hoveredTable >= 0 && app.hoveredTable < (int)app.tableRects.size()) {
         const auto& tb = app.tableRects[app.hoveredTable];
         if (tb.bounds.bottom >= viewportTop - cullMargin &&
             tb.bounds.top <= viewportBottom + cullMargin) {
-            float btnW = dpi(app, 88.0f);
-            float btnH = dpi(app, 26.0f);
-            float btnPad = 8.0f * app.contentScale * app.zoomFactor;
-            float rightEdge = std::min(
-                tb.bounds.right, app.scrollX + documentViewportWidth(app));
-            float btnX = rightEdge - btnW - btnPad - app.scrollX;
-            float btnY = tb.bounds.top + btnPad - app.scrollY;
-
-            app.brush->SetColor(D2D1::ColorF(
-                app.theme.isDark ? 0.3f : 0.85f,
-                app.theme.isDark ? 0.3f : 0.85f,
-                app.theme.isDark ? 0.3f : 0.85f,
-                0.9f));
-            app.renderTarget->FillRoundedRectangle(
-                D2D1::RoundedRect(
-                    D2D1::RectF(btnX, btnY, btnX + btnW, btnY + btnH), 4, 4),
-                app.brush);
-
-            app.brush->SetColor(D2D1::ColorF(
-                app.theme.isDark ? 0.9f : 0.15f,
-                app.theme.isDark ? 0.9f : 0.15f,
-                app.theme.isDark ? 0.9f : 0.15f,
-                1.0f));
-            IDWriteTextLayout* btnLayout = nullptr;
-            const wchar_t* copyLabel = tr(app, "table.copy");
-            app.dwriteFactory->CreateTextLayout(
-                copyLabel, (UINT32)wcslen(copyLabel), app.codeFormat, btnW,
-                btnH, &btnLayout);
-            if (btnLayout) {
-                useUiFontFallback(app, btnLayout);
-                btnLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                btnLayout->SetParagraphAlignment(
-                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                app.renderTarget->DrawTextLayout(
-                    D2D1::Point2F(btnX, btnY), btnLayout, app.brush);
-                btnLayout->Release();
+            D2D1_RECT_F mdRect, csvRect, fitRect;
+            tableButtonRects(app, tb, mdRect, csvRect, fitRect);
+            float btnH = mdRect.bottom - mdRect.top;
+            float btnY = mdRect.top - app.scrollY;
+            for (int b = 0; b < 2; b++) {
+                const D2D1_RECT_F& r = b == 0 ? mdRect : csvRect;
+                const wchar_t* label = b == 0 ? L"Markdown" : L"CSV";
+                float bx = r.left - app.scrollX, bw = r.right - r.left;
+                app.brush->SetColor(D2D1::ColorF(
+                    app.theme.isDark ? 0.3f : 0.85f,
+                    app.theme.isDark ? 0.3f : 0.85f,
+                    app.theme.isDark ? 0.3f : 0.85f,
+                    0.9f));
+                app.renderTarget->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(bx, btnY, bx + bw, btnY + btnH), 4, 4), app.brush);
+                app.brush->SetColor(D2D1::ColorF(
+                    app.theme.isDark ? 0.9f : 0.15f,
+                    app.theme.isDark ? 0.9f : 0.15f,
+                    app.theme.isDark ? 0.9f : 0.15f,
+                    1.0f));
+                IDWriteTextLayout* btnLayout = nullptr;
+                app.dwriteFactory->CreateTextLayout(label, (UINT32)wcslen(label), app.codeFormat, bw, btnH,
+                                                    &btnLayout);
+                if (btnLayout) {
+                    useUiFontFallback(app, btnLayout);
+                    btnLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    btnLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    app.renderTarget->DrawTextLayout(D2D1::Point2F(bx, btnY), btnLayout, app.brush);
+                    btnLayout->Release();
+                }
             }
 
             // Oversized tables add the fit-to-width toggle
             if (tb.fitCandidate) {
-                float fitW = dpi(app, 44.0f);
-                float fitX = btnX - fitW - dpi(app, 6.0f);
+                float fitW = fitRect.right - fitRect.left;
+                float fitX = fitRect.left - app.scrollX;
                 app.brush->SetColor(D2D1::ColorF(
                     app.theme.isDark ? 0.3f : 0.85f,
                     app.theme.isDark ? 0.3f : 0.85f,
@@ -1032,6 +979,28 @@ render_document:
                 app.brush);
             app.drawCalls++;
         }
+
+        // Matches in a diagram's source outline the diagram (filling it would
+        // hide it): once per diagram, orange when it holds the current match
+        int lastBlock = -1;
+        for (size_t i = 0; i < app.searchMatches.size(); i++) {
+            const auto& m = app.searchMatches[i];
+            if (m.codeBlock < 0 || m.codeBlock >= (int)app.codeBlocks.size()) continue;
+            bool current = (int)i == app.searchCurrentIndex;
+            if (m.codeBlock == lastBlock && !current) continue;
+            lastBlock = m.codeBlock;
+            const D2D1_RECT_F& b = app.codeBlocks[m.codeBlock].bounds;
+            if (b.bottom < viewportTop - cullMargin || b.top > viewportBottom + cullMargin) continue;
+            app.brush->SetColor(current ? D2D1::ColorF(1.0f, 0.6f, 0.0f, 0.95f)
+                                        : D2D1::ColorF(1.0f, 0.82f, 0.0f, 0.75f));
+            float pad = dpi(app, 4.0f);
+            app.renderTarget->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(b.left - pad - app.scrollX, b.top - pad - app.scrollY,
+                                              b.right + pad - app.scrollX, b.bottom + pad - app.scrollY),
+                                  dpi(app, 6.0f), dpi(app, 6.0f)),
+                app.brush, dpi(app, current ? 3.0f : 2.0f));
+            app.drawCalls++;
+        }
     }
 
     renderFrontmatterOverflow(app);
@@ -1049,9 +1018,10 @@ render_document:
     renderLinkPeek(app);
 
     if (app.showStats) {
-        wchar_t stats[768];
+        wchar_t stats[1024];
         wchar_t statsLine1[256];
         wchar_t statsLine2[512];
+        wchar_t statsLine3[256] = L"";
         swprintf_s(statsLine1, _countof(statsLine1), tr(app, "stats.line1"),
             app.parseTimeUs,
             app.layoutTimeUs,
@@ -1062,12 +1032,37 @@ render_document:
             app.metrics.d2dInitUs / 1000.0,
             app.metrics.dwriteInitUs / 1000.0,
             app.metrics.fileLoadUs / 1000.0);
-        swprintf_s(stats, _countof(stats), L"Tinta v%d.%d.%d  |  %ls\n%ls",
+        const DiagramMetrics& dm = app.diagramMetrics;
+        if (dm.layouts > 0) {
+            wchar_t fonts[64] = L"";
+            if (dm.fontFiles > 0) {
+                swprintf_s(fonts, _countof(fonts), L" | %zu fonts %.1f ms", dm.fontFiles,
+                           dm.fontListUs / 1000.0);
+            }
+            swprintf_s(statsLine3, _countof(statsLine3),
+                L"\nmerman \u00D7%zu: SVG %.1f ms | raster \u00D7%zu %.1f ms (1st %.1f) | decode %.1f ms%ls",
+                dm.layouts, dm.layoutUs / 1000.0, dm.rasters, dm.rasterUs / 1000.0,
+                dm.firstRasterUs / 1000.0, dm.decodeUs / 1000.0, fonts);
+        }
+        swprintf_s(stats, _countof(stats), L"Tinta v%d.%d.%d  |  %ls\n%ls%ls",
                    TINTA_VERSION_MAJOR, TINTA_VERSION_MINOR,
-                   TINTA_VERSION_PATCH, statsLine1, statsLine2);
+                   TINTA_VERSION_PATCH, statsLine1, statsLine2, statsLine3);
 
+        // As wide as its longest line: the diagram line outruns 600 px
+        IDWriteTextFormat* statsFmt = app.statsFormat ? app.statsFormat : app.codeFormat;
         float statsWidth = dpi(app, 600.0f);
-        float statsHeight = dpi(app, 50.0f);
+        IDWriteTextLayout* measure = nullptr;
+        if (app.dwriteFactory &&
+            SUCCEEDED(app.dwriteFactory->CreateTextLayout(stats, (UINT32)wcslen(stats), statsFmt,
+                                                          100000.0f, 1000.0f, &measure))) {
+            DWRITE_TEXT_METRICS tm{};
+            if (SUCCEEDED(measure->GetMetrics(&tm))) {
+                statsWidth = std::max(statsWidth, tm.widthIncludingTrailingWhitespace + dpi(app, 20.0f));
+            }
+            measure->Release();
+        }
+        statsWidth = std::min(statsWidth, (float)app.width - dpi(app, 20.0f));
+        float statsHeight = statsOverlayHeight(app);
 
         app.brush->SetColor(D2D1::ColorF(0, 0, 0, 0.8f));
         app.renderTarget->FillRectangle(
@@ -1076,8 +1071,7 @@ render_document:
             app.brush);
 
         app.brush->SetColor(D2D1::ColorF(0.7f, 0.9f, 0.7f));
-        app.renderTarget->DrawText(stats, (UINT32)wcslen(stats),
-            app.statsFormat ? app.statsFormat : app.codeFormat,
+        app.renderTarget->DrawText(stats, (UINT32)wcslen(stats), statsFmt,
             D2D1::RectF(app.width - statsWidth - dpi(app, 5.0f), app.height - statsHeight - dpi(app, 5.0f),
                        app.width - dpi(app, 15.0f), app.height - dpi(app, 15.0f)),
             app.brush);
@@ -1139,6 +1133,7 @@ render_document:
     // Unsaved-changes dialog above it all (also entered from tab closes)
     if (app.confirmExitPending) renderConfirmExitDialog(app);
     if (app.createRefPending) renderCreateRefDialog(app);
+    if (app.pasteImagePending) renderPasteImagePrompt(app);
 
     app.renderTarget->EndDraw();
 }
@@ -1176,7 +1171,7 @@ static bool isNewerVersion(const std::string& version) {
     return patch > TINTA_VERSION_PATCH;
 }
 
-static void updateCheckWorker(HWND hwnd) {
+static void updateCheckWorker(HWND hwnd, bool manual) {
     std::string version;
     HINTERNET session = WinHttpOpen(
         L"tinta-update-check", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -1186,7 +1181,7 @@ static void updateCheckWorker(HWND hwnd) {
                                            INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (connect) {
             HINTERNET request = WinHttpOpenRequest(
-                connect, L"GET", L"/repos/oipoistar/tinta/releases/latest",
+                connect, L"GET", L"/repos/tigerhawkvok/tinta-linux/releases/latest",
                 nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                 WINHTTP_FLAG_SECURE);
             if (request) {
@@ -1231,7 +1226,7 @@ static void updateCheckWorker(HWND hwnd) {
         WinHttpCloseHandle(session);
     }
     auto* result = new std::string(std::move(version));
-    if (!PostMessageW(hwnd, WM_APP_UPDATE_CHECK, 0, (LPARAM)result)) {
+    if (!PostMessageW(hwnd, WM_APP_UPDATE_CHECK, manual ? 1 : 0, (LPARAM)result)) {
         delete result;
     }
 }
@@ -1424,6 +1419,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             break;
+
+        case WM_APP_TAB_DRAG_DONE:
+            if (app) tabDragDone(*app, hwnd, (int)wParam);
+            return 0;
 
         case WM_COPYDATA:
             if (app) {
@@ -1624,6 +1623,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 handleKeyDown(*app, hwnd, wParam);
                 return 0;
             }
+            // The Emacs profile's Meta chords (M-f, M-w, M-v, M-<...)
+            if (app) app->emacsSwallowSysChar = false;
+            if (app && emacsSysKeyDown(*app, hwnd, wParam)) return 0;
             // Alt+Up / Alt+Down move the editor's lines (#251)
             if (app && editorAltArrowKey(*app, hwnd, wParam)) return 0;
             // Alt+Left / Alt+Right mirror the mouse side buttons
@@ -1639,6 +1641,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CHAR:
             if (app) handleCharInput(*app, hwnd, wParam);
             return 0;
+
+        case WM_SYSCHAR:
+            // A Meta chord the Emacs profile used: no menu mnemonic, no beep
+            if (app && app->emacsSwallowSysChar) {
+                app->emacsSwallowSysChar = false;
+                return 0;
+            }
+            break;
 
         case WM_SYSCOMMAND:
             // Releasing Alt after an Alt+click (#251) is not a menu request
@@ -1692,7 +1702,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == TIMER_UPDATE_CHECK && app) {
                 KillTimer(hwnd, TIMER_UPDATE_CHECK);
-                std::thread(updateCheckWorker, hwnd).detach();
+                if (!app->updateCheckRunning) {
+                    app->updateCheckRunning = true;
+                    std::thread(updateCheckWorker, hwnd, false).detach();
+                }
             }
             if (wParam == TIMER_DRAFT_SAVE && app) {
                 draftsSweep(*app);
@@ -1704,6 +1717,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // One relayout for however many images arrived since armed
                 KillTimer(hwnd, TIMER_IMAGE_REFLOW);
                 app->layoutDirty = true;
+                // The open print preview draws its own cached pages: lay
+                // them out again so the diagram appears and paginates as
+                // it will print
+                printPreviewRefresh(*app);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (wParam == TIMER_ZOOM_APPLY && app) {
@@ -1725,6 +1742,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else discardAsyncImage((void*)lParam);
             return 0;
 
+        case WM_APP_PLANTUML_READY:
+            // A PlantUML render finished on the worker thread. Adoption is
+            // owner-thread only: drainFinished() is the sole cache mutation
+            // point. Work-dir cleanup belongs to the queue (LRU eviction and
+            // shutdown) - nothing is deleted here; the wParam key is only a
+            // hint, the reflow re-reads the cache.
+            if (app && app->plantumlQueue) {
+                app->plantumlQueue->drainFinished();
+                // Same coalesced reflow discipline as completeAsyncImage:
+                // the TIMER handler marks the layout dirty once for however
+                // many completions arrived since it was armed.
+                if (app->hwnd) {
+                    SetTimer(app->hwnd, TIMER_IMAGE_REFLOW, 60, nullptr);
+                }
+            }
+            return 0;
+
         case WM_CONTEXTMENU:
             if (app) tabHoverCardDismiss(*app, hwnd);
             if (app) handleContextMenu(*app, hwnd, lParam);
@@ -1735,14 +1769,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app) completeFolderSearch(*app, (void*)lParam);
             return 0;
 
+        case WM_APP_UPDATE_CHECK_NOW:
+            if (app && !app->updateCheckRunning) {
+                app->updateCheckRunning = true;
+                InvalidateRect(hwnd, nullptr, FALSE);  // the chip shows it is out
+                std::thread(updateCheckWorker, hwnd, true).detach();
+            }
+            return 0;
+
         case WM_APP_UPDATE_CHECK: {
             // Update worker finished (handler takes ownership). A failed
-            // check does not stamp the day, so it retries next launch.
+            // check does not stamp the day, so it retries next launch. A
+            // check the reader asked for (wParam) answers every outcome and
+            // offers a release even after it was dismissed.
             auto* version = (std::string*)lParam;
+            bool manual = wParam != 0;
+            if (app) app->updateCheckRunning = false;
             if (app && version && !version->empty()) {
                 app->updateLastCheck = todayString();
+                if (manual && !isNewerVersion(*version)) {
+                    wchar_t current[32];
+                    swprintf_s(current, _countof(current), L"%d.%d.%d", TINTA_VERSION_MAJOR,
+                               TINTA_VERSION_MINOR, TINTA_VERSION_PATCH);
+                    wchar_t label[96];
+                    swprintf_s(label, _countof(label), tr(*app, "update.current"), current);
+                    signalPush(*app, SIG_SUCCESS, SIGI_CHECK, label);
+                }
                 if (isNewerVersion(*version) &&
-                    *version != app->updateDismissedVersion) {
+                    (manual || *version != app->updateDismissedVersion)) {
                     app->updateVersion = *version;
                     app->updateAvailable = true;
                     wchar_t label[96];
@@ -1754,7 +1808,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                SIGC_DISMISS_UPDATE, false);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
+            } else if (app && manual) {
+                signalPushKey(*app, SIG_WARN, SIGI_WARNING, "update.failed");
             }
+            if (app && manual) InvalidateRect(hwnd, nullptr, FALSE);
             delete version;
             return 0;
         }
@@ -1806,6 +1863,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hwnd, TIMER_NOTIFICATION);
             KillTimer(hwnd, TIMER_ZOOM_APPLY);
             KillTimer(hwnd, TIMER_DRAFT_SAVE);
+            // Join the PlantUML worker and delete every unadopted work dir
+            // before the window goes away; later messages see a shut-down
+            // queue (not a null one) and become no-ops.
+            if (app && app->plantumlQueue) app->plantumlQueue->shutdown();
             // A graceful close resolved every dirty buffer through the
             // unsaved-changes flow; leftover drafts would resurrect
             // content the user already decided about. With "Close without
@@ -1957,8 +2018,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.showWordCount = savedSettings.showWordCount;
     app.printMarginMm = savedSettings.printMarginMm;
     app.closeKeepsDrafts = savedSettings.closeKeepsDrafts;
+    app.pasteImageMode = savedSettings.pasteImage;
     app.frontmatter = savedSettings.frontmatter;
     app.pandocUserPath = toWide(savedSettings.pandocPath);
+    app.plantumlUserPath = toWide(savedSettings.plantumlPath);
     int startTheme = app.followSystemTheme ? autoThemeIndex(app)
                                            : savedSettings.themeIndex;
     app.currentThemeIndex = startTheme;
@@ -2031,7 +2094,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             posX = _wtoi(argv[++i]);
             posY = _wtoi(argv[++i]);
             hasPos = true;
-        } else if (arg[0] != L'-' && arg[0] != L'/') {
+        } else if (arg[0] != L'-' &&
+                   (arg[0] != L'/' ||
+                    GetFileAttributesW(arg.c_str()) != INVALID_FILE_ATTRIBUTES)) {
+            // A leading '/' marks a switch unless it names a file (an
+            // absolute path outside Windows)
             // Convert to UTF-8
             int len = WideCharToMultiByte(CP_UTF8, 0, arg.c_str(), -1, nullptr, 0, nullptr, nullptr);
             inputFile.resize(len - 1);
@@ -2063,7 +2130,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         printPagesDir.empty() && exportHtmlPath.empty() &&
         exportDocxPath.empty() && exportPdfPath.empty() &&
         savedSettings.openInTabs) {
-        HWND existing = FindWindowW(L"Tinta", nullptr);
+        HWND existing = FindWindowW(L"TintaMono", nullptr);
         if (existing) {
             // inputFile is absolute by now: the receiving window has its
             // own working directory
@@ -2082,8 +2149,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     if (forceRegister) {
         if (registerFileAssociation()) {
             MessageBoxW(nullptr,
-                       tr(app, "fileassoc.done_body"),
-                       tr(app, "fileassoc.done_title"),
+                       tr(app, TINTA_FILEASSOC_DONE_BODY),
+                       tr(app, TINTA_FILEASSOC_DONE_TITLE),
                        MB_OK | MB_ICONINFORMATION);
             openDefaultAppsSettings();
         } else {
@@ -2113,7 +2180,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(hInstance, L"IDI_ICON1");
     wc.hIconSm = LoadIconW(hInstance, L"IDI_ICON1");
-    wc.lpszClassName = L"Tinta";
+    wc.lpszClassName = L"TintaMono";
     RegisterClassExW(&wc);
 
     // Validate the saved window position against the monitors that exist
@@ -2160,8 +2227,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     app.hwnd = CreateWindowExW(
         WS_EX_ACCEPTFILES,
-        L"Tinta",
-        L"Tinta",
+        L"TintaMono",   // window class: not upstream Tinta's "Tinta", so the two run side by side
+        L"Tinta Mono",
         WS_OVERLAPPEDWINDOW,
         windowX, windowY,
         savedSettings.windowWidth, savedSettings.windowHeight,
@@ -2225,9 +2292,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     };
 
     auto loadFile = [&](const std::string& path) -> bool {
-        // Use wide string path for ifstream to support non-ASCII paths (MSVC extension)
+        // Wide path for ifstream to support non-ASCII paths
         std::wstring widePath = toWide(path);
-        std::ifstream file(widePath);
+        std::ifstream file(fsPath(widePath));
         if (!file) return false;
         std::stringstream buffer;
         buffer << file.rdbuf();
@@ -2269,7 +2336,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     } else if (!inputFile.empty()) {
         if (loadFile(inputFile)) {
             app.currentFile = inputFile;
-            app.focusMermaidOnNextLayout = isMermaidDocumentPath(inputFile);
+            app.focusMermaidOnNextLayout = isMermaidDocumentPath(inputFile) ||
+                                           isPlantUmlDocumentPath(inputFile);
             persistRecentFile(app.currentFile);
         } else {
             showStartPage();
@@ -2279,7 +2347,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         if (loadFile(sessionPaths[sessionActive])) {
             app.currentFile = sessionPaths[sessionActive];
             app.focusMermaidOnNextLayout =
-                isMermaidDocumentPath(sessionPaths[sessionActive]);
+                isMermaidDocumentPath(sessionPaths[sessionActive]) ||
+                isPlantUmlDocumentPath(sessionPaths[sessionActive]);
         } else {
             showStartPage();
         }

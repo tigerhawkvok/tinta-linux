@@ -4,13 +4,20 @@
 // baked in; mermaid diagrams and math rasterize to PNG at 2x through the
 // same primitives the viewer draws, and land as embedded pictures.
 
+#include "admonition.h"
 #include "export.h"
+#include "image_loader.h"
+#include "fs_path.h"
 #include "d2d_init.h"
+#include <functional>
 #include <set>
 
 #include "editor.h"
 #include "math_render.h"
 #include "mermaid_ext.h"
+#include "plantuml.h"
+#include "plantuml_app.h"
+#include "plantuml_queue.h"
 #include "render.h"
 #include "utils.h"
 
@@ -19,6 +26,8 @@
 #include <wincodec.h>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +38,10 @@
 #include <vector>
 
 using namespace qmd;
+
+// Shared with the clipboard copy below the anonymous namespace
+bool plantumlOpaquePixels(App& app, const std::wstring& pngPath, UINT scale,
+                          std::vector<BYTE>& pixels, UINT& outW, UINT& outH);
 
 namespace {
 
@@ -168,7 +181,7 @@ std::string hexOver(D2D1_COLOR_F c, D2D1_COLOR_F background) {
 }
 
 bool readBinaryFile(const std::wstring& path, std::string& out) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(fsPath(path), std::ios::binary);
     if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -479,7 +492,8 @@ void drawPrims(App& app, RasterTarget& rt, const mermaidext::Built& built,
                 app.dwriteFactory->CreateTextFormat(
                     prim.style.mono ? app.theme.codeFontFamily
                                     : app.theme.fontFamily,
-                    nullptr,
+                    fontCollectionFor(app, prim.style.mono ? app.theme.codeFontFamily
+                                    : app.theme.fontFamily),
                     prim.style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                                     : DWRITE_FONT_WEIGHT_NORMAL,
                     prim.style.italic ? DWRITE_FONT_STYLE_ITALIC
@@ -529,6 +543,47 @@ void drawPrims(App& app, RasterTarget& rt, const mermaidext::Built& built,
 // Diagram source -> PNG at 2x plus its logical (1x) size
 bool diagramToPng(App& app, const std::string& source, std::string& png,
                   float& logicalWidth, float& logicalHeight) {
+#ifdef TINTA_MERMAN_PNG
+    // merman's own raster on the theme background (Windows)
+    if (mermanDiagramPng(app, source, kRasterScale, app.theme.background, png,
+                         logicalWidth, logicalHeight)) {
+        return true;
+    }
+#elif defined(TINTA_MERMAN)
+    // merman's diagram on the theme background, as native ones are drawn;
+    // the native renderer below is the fallback
+    {
+        std::string svg;
+        float width = 0.0f, height = 0.0f;
+        RasterTarget rt;
+        ID2D1DeviceContext5* dc = nullptr;
+        if (mermanDiagramSvg(app, source, false, svg, width, height) &&
+            rt.open(app, width * kRasterScale, height * kRasterScale) &&
+            SUCCEEDED(rt.target->QueryInterface(IID_PPV_ARGS(&dc))) && dc) {
+            IStream* stream = SHCreateMemStream(
+                reinterpret_cast<const BYTE*>(svg.data()), (UINT)svg.size());
+            ID2D1SvgDocument* doc = nullptr;
+            bool drawn = false;
+            if (stream && SUCCEEDED(dc->CreateSvgDocument(
+                              stream, D2D1::SizeF(width, height), &doc)) && doc) {
+                dc->BeginDraw();
+                dc->Clear(app.theme.background);
+                dc->SetTransform(D2D1::Matrix3x2F::Scale(kRasterScale, kRasterScale));
+                dc->DrawSvgDocument(doc);
+                drawn = SUCCEEDED(dc->EndDraw());
+                doc->Release();
+            }
+            if (stream) stream->Release();
+            dc->Release();
+            if (drawn) {
+                png = encodeWicPng(app, rt.bitmap, rt.width, rt.height);
+                logicalWidth = width;
+                logicalHeight = height;
+                if (!png.empty()) return true;
+            }
+        }
+    }
+#endif
     mermaidext::Built built = buildDiagramPrims(app, source, kRasterScale);
     if (!built.ok || built.prims.empty()) return false;
     RasterTarget rt;
@@ -574,6 +629,14 @@ bool mathToPng(App& app, const std::string& tex, bool display,
 constexpr long long kEmuPerPixel = 9525;
 constexpr long long kMaxImageEmu = 6100000;  // fits A4 with 2cm margins
 
+// Word half-points are the viewer's px * 1.5 at 96 dpi: body 16, code 14,
+// headings 32/26/22/18/16/14
+constexpr int kHeadingHalfPoints[6] = {48, 39, 33, 27, 24, 21};
+constexpr int kCodeHalfPoints = 21;
+
+// Inline code at 7/8 of the text around it, as in the viewer (#1)
+int codeHalfPointsFor(int textHalfPoints) { return (textHalfPoints * 7 + 4) / 8; }
+
 struct RunProps {
     bool bold = false;
     bool italic = false;
@@ -585,6 +648,7 @@ struct RunProps {
     bool subScript = false;
     std::string color;  // hex override (links, wiki links)
     bool underline = false;
+    int codeHalfPoints = kCodeHalfPoints;
 };
 
 struct DocxCtx {
@@ -605,6 +669,13 @@ struct DocxCtx {
     std::string accentHex, linkHex, quoteBorderHex;
     std::string inlineCodeHex;  // explicit override; legacy paper colors otherwise
     std::string bodyFont, monoFont;
+
+    // PlantUML export state: the cumulative wall-clock budget for sync
+    // fallback renders in THIS export (shared across fences so one export
+    // can never freeze the UI for more than a minute), and whether the
+    // private export-docx temp subtree was used (deleted at export end).
+    int plantumlBudgetMsLeft = 60000;
+    bool plantumlTempUsed = false;
     // CJK faces the screen draws with, and the theme's own heading face
     // (empty: headings use the body face)
     std::string bodyEastAsia, monoEastAsia, headingFont, headingEastAsia;
@@ -653,7 +724,10 @@ std::string runPropsXml(const DocxCtx& ctx, const RunProps& props) {
     if (props.code && !props.isLink && !ctx.inlineCodeHex.empty())
         xml += "<w:color w:val=\"" + ctx.inlineCodeHex + "\"/>";
     else if (!props.color.empty()) xml += "<w:color w:val=\"" + props.color + "\"/>";
-    if (props.code) xml += "<w:sz w:val=\"21\"/><w:szCs w:val=\"21\"/>";
+    if (props.code) {
+        const std::string size = std::to_string(props.codeHalfPoints);
+        xml += "<w:sz w:val=\"" + size + "\"/><w:szCs w:val=\"" + size + "\"/>";
+    }
     if (props.highlight && ctx.highlightBgHex.empty()) xml += "<w:highlight w:val=\"yellow\"/>";
     if (props.underline) xml += "<w:u w:val=\"single\"/>";
     if (props.highlight && !ctx.highlightBgHex.empty())
@@ -716,6 +790,7 @@ struct ParaProps {
     int indentTwips = 0;
     bool center = false;
     std::string extraRunProps;  // colored quote text etc.
+    int codeHalfPoints = kCodeHalfPoints;  // inline code, sized to the paragraph's text
 };
 
 std::string paraPropsXml(const ParaProps& props) {
@@ -810,6 +885,14 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
             }
             break;
         }
+        case ElementType::Underline: {
+            RunProps under = props;
+            under.underline = true;
+            for (const auto& child : elem->children) {
+                walkInline(ctx, child, under, out);
+            }
+            break;
+        }
         case ElementType::Superscript: {
             RunProps sup = props;
             sup.superScript = true;
@@ -862,10 +945,26 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
             std::string data;
             int width = 0, height = 0;
             std::string extension;
-            if (!remote) {
+            // An image pasted inline carries its bytes in the address
+            if (imageDataUriBytes(src, data)) {
+                size_t end = src.find_first_of(";,", 11);
+                extension = src.substr(11, end == std::string::npos ? 0 : end - 11);
+                if (extension == "jpg") extension = "jpeg";
+                if ((extension == "png" || extension == "jpeg" || extension == "gif") &&
+                    imageDimensions(data, width, height)) {
+                    int rel = addImageRel(ctx, extension, data);
+                    long long cx, cy;
+                    float w, h;  // an <img>'s width and height, as the viewer draws it
+                    imageDisplaySize(*elem, (float)width, (float)height, w, h);
+                    fitEmu(w, h, cx, cy);
+                    out += "<w:r>" + drawingXml(ctx, rel, cx, cy) + "</w:r>";
+                    break;
+                }
+                data.clear();
+            } else if (!remote) {
                 std::wstring widePath = toWide(src);
                 if (widePath.size() < 2 || widePath[1] != L':') {
-                    widePath = ctx.baseDir + L"\\" + widePath;
+                    widePath = joinPath(ctx.baseDir, widePath);
                 }
                 size_t dot = src.find_last_of('.');
                 if (dot != std::string::npos) {
@@ -881,20 +980,28 @@ void walkInline(DocxCtx& ctx, const ElementPtr& elem, RunProps props,
                     imageDimensions(data, width, height)) {
                     int rel = addImageRel(ctx, extension, data);
                     long long cx, cy;
-                    fitEmu((float)width, (float)height, cx, cy);
+                    float w, h;  // an <img>'s width and height, as the viewer draws it
+                    imageDisplaySize(*elem, (float)width, (float)height, w, h);
+                    fitEmu(w, h, cx, cy);
                     out += "<w:r>" + drawingXml(ctx, rel, cx, cy) + "</w:r>";
                     break;
                 }
             }
             // Unsupported or remote: alt text plus the address as a link
+            // Nested spans (<sub>, emphasis) in the alt text keep their words
             std::string alt;
-            for (const auto& child : elem->children) {
-                if (child->type == ElementType::Text) alt += child->text;
-            }
+            std::function<void(const ElementPtr&)> gather = [&](const ElementPtr& e) {
+                if (e->type == ElementType::Text) alt += e->text;
+                for (const auto& child : e->children) gather(child);
+            };
+            for (const auto& child : elem->children) gather(child);
             RunProps altProps = props;
             altProps.italic = true;
-            emitTextRun(ctx, alt.empty() ? elem->url : alt + " (" +
-                        elem->url + ")", altProps, out);
+            // A data: address names its type, not its bytes
+            std::string shown = elem->url.rfind("data:", 0) == 0
+                                    ? elem->url.substr(0, elem->url.find(',')) + ",\xE2\x80\xA6"
+                                    : elem->url;
+            emitTextRun(ctx, alt.empty() ? shown : alt + " (" + shown + ")", altProps, out);
             break;
         }
         case ElementType::SoftBreak:
@@ -950,6 +1057,7 @@ void emitParagraph(DocxCtx& ctx, const ElementPtr& elem,
                    const ParaProps& props) {
     ctx.body += "<w:p>" + paraPropsXml(props);
     RunProps runProps;
+    runProps.codeHalfPoints = props.codeHalfPoints;
     if (!props.extraRunProps.empty()) {
         // Colored quote text rides on every run via the color override
         runProps.color = props.extraRunProps;
@@ -958,6 +1066,160 @@ void emitParagraph(DocxCtx& ctx, const ElementPtr& elem,
         walkInline(ctx, child, runProps, ctx.body);
     }
     ctx.body += "</w:p>";
+}
+
+// Removes `dir` recursively, tolerating every failure: the export temp tree
+// is best-effort cleanup and the 24 h sweep of %TEMP%\tinta-plantuml-* is the
+// backstop.
+void removeDirTreeBestEffort(const std::wstring& dir) {
+    if (dir.empty()) return;
+    WIN32_FIND_DATAW find{};
+    HANDLE h = FindFirstFileW((dir + plantuml::kPathSeparator + L"*").c_str(), &find);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = find.cFileName;
+            if (name == L"." || name == L"..") continue;
+            const std::wstring child = dir + plantuml::kPathSeparator + name;
+            if (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                removeDirTreeBestEffort(child);
+            else
+                DeleteFileW(child.c_str());
+        } while (FindNextFileW(h, &find));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+
+// RAII: deletes <plantumlWorkRoot>\export-docx when the export ended and
+// the synchronous PlantUML fallback wrote into it. The queue's own cache
+// directories stay untouched: they belong to the queue and its stale-root
+// sweep.
+struct PlantumlExportTempGuard {
+    App& app;
+    const DocxCtx& ctx;
+    ~PlantumlExportTempGuard() {
+        if (ctx.plantumlTempUsed && !app.plantumlWorkRoot.empty()) {
+            removeDirTreeBestEffort(app.plantumlWorkRoot + plantuml::kPathSeparator + L"export-docx");
+        }
+    }
+};
+
+// PlantUML fence -> embedded PNG paragraph. Preference order: (1) the render
+// the interactive queue already finished (identical key to the preview, so
+// a cached render is adopted without spawning the tool), (2) a synchronous
+// render under the export's per-fence and cumulative budgets, (3) give up -
+// return false and let the caller emit the shaded source paragraph. Returns
+// true only after appending the drawing paragraph.
+bool emitPlantumlImage(DocxCtx& ctx, const std::string& source,
+                       const std::string& language) {
+    std::string lang = language;
+    std::transform(lang.begin(), lang.end(), lang.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    if (!plantuml::isFenceLanguage(lang)) return false;
+
+    App& app = ctx.app;
+    plantumlResolve(app);
+    if (!app.plantumlTool.available) return false;
+
+    const std::wstring toolPath = app.plantumlTool.isJar
+                                      ? app.plantumlTool.jar
+                                      : app.plantumlTool.program;
+    // Byte-identical preamble to the preview branch: family, size, text
+    // color and (on dark palettes) the fill/stroke colors come from the
+    // live theme through the shared role resolver, and hex6 matches
+    // render.cpp's colorHexNoHash rounding, so the same fence hashes to the
+    // same cache key in both places.
+    mermaidext::Prim colorPrim{};
+    const std::string preambleText = plantuml::preamble(
+        toUtf8(app.theme.fontFamily), 14.0f,
+        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Text)),
+        app.theme.isDark,
+        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Fill)),
+        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Stroke)));
+    std::string sourceWithPreamble = source;
+    // No @startuml anchor: nothing to render, emit the source unchanged.
+    if (!plantuml::injectPreamble(sourceWithPreamble, preambleText))
+        return false;
+
+    // Same key formula the preview's queue request uses: raw fence source
+    // plus preamble plus tool identity, format PNG (0).
+    const uint64_t key = plantuml::cacheKey(
+        source, preambleText, toolPath, plantuml::toolStampFor(toolPath),
+        0 /*png*/);
+
+    std::wstring pngPath;
+    if (app.plantumlQueue) {
+        // Adopt finished renders before deciding: drainFinished() is the
+        // queue's only cache mutation point and runs on the owner thread.
+        app.plantumlQueue->drainFinished();
+        auto hit = app.plantumlQueue->lookup(key);
+        if (hit && hit->ok) pngPath = hit->filePath;
+    }
+    if (pngPath.empty()) {
+        if (ctx.plantumlBudgetMsLeft <= 0) return false;
+        // Private export-docx subtree under the queue's per-process work
+        // root: keeps export files away from the <workRoot>\<keyHex> dir
+        // the worker may be mid-render in for the same key (renderSync
+        // truncates its output). plantumlEnsureQueue only computes the
+        // work root lazily, exactly like the interactive layout branch.
+        plantumlEnsureQueue(app);
+        if (app.plantumlWorkRoot.empty()) return false;
+        const std::wstring workDir = app.plantumlWorkRoot +
+                                     plantuml::kPathSeparator + L"export-docx" + plantuml::kPathSeparator + plantuml::keyHex(key);
+        ctx.plantumlTempUsed = true;
+        const std::wstring rendered = workDir + plantuml::kPathSeparator + L"input.png";
+        if (GetFileAttributesW(rendered.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            // A duplicate fence in this same export: reuse the file the
+            // earlier pass rendered instead of spawning the tool again.
+            pngPath = rendered;
+        } else {
+            std::wstring outFile;
+            std::wstring error;
+            const DWORD fenceMs = static_cast<DWORD>(
+                (std::min)(20000, ctx.plantumlBudgetMsLeft));
+            const auto t0 = std::chrono::steady_clock::now();
+            if (plantuml::renderSync(app.plantumlTool, sourceWithPreamble,
+                                     0 /*png*/, workDir, outFile, fenceMs,
+                                     error)) {
+                pngPath = outFile;
+            }
+            ctx.plantumlBudgetMsLeft -= static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count());
+        }
+    }
+
+    std::string png;
+    int width = 0, height = 0;
+    if (pngPath.empty() || !readBinaryFile(pngPath, png) ||
+        !imageDimensions(png, width, height)) {
+        return false;
+    }
+    // On the theme's own background, as the mermaid diagrams are: a dark
+    // theme's light labels must not land on Word's white page
+    std::vector<BYTE> pixels;
+    UINT opaqueW = 0, opaqueH = 0;
+    if (plantumlOpaquePixels(app, pngPath, 1, pixels, opaqueW, opaqueH)) {
+        IWICBitmap* bitmap = nullptr;
+        if (SUCCEEDED(app.wicFactory->CreateBitmapFromMemory(
+                opaqueW, opaqueH, GUID_WICPixelFormat32bppPBGRA, opaqueW * 4,
+                static_cast<UINT>(pixels.size()), pixels.data(), &bitmap))) {
+            std::string opaque = encodeWicPng(app, bitmap, opaqueW, opaqueH);
+            if (!opaque.empty()) png = std::move(opaque);
+            bitmap->Release();
+        }
+    }
+    const int rel = addImageRel(ctx, "png", png);
+    long long cx, cy;
+    // PlantUML renders at 1x, so the PNG's pixel size is its natural size
+    // (the mermaid path above divides out its own 2x raster scale).
+    fitEmu(static_cast<float>(width), static_cast<float>(height), cx, cy);
+    ctx.body += "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r>" +
+                drawingXml(ctx, rel, cx, cy) + "</w:r></w:p>";
+    return true;
 }
 
 void emitDiagramOrCode(DocxCtx& ctx, const std::string& source,
@@ -975,6 +1237,10 @@ void emitDiagramOrCode(DocxCtx& ctx, const std::string& source,
             return;
         }
     }
+    // PlantUML fences prefer a rendered image over the source paragraph,
+    // mirroring the mermaid branch above; any failure falls through below.
+    if (emitPlantumlImage(ctx, source, language)) return;
+
     // Code block: one shaded paragraph, lines separated by breaks
     ctx.body += "<w:p><w:pPr><w:pStyle w:val=\"CodeBlock\"/>";
     if (!props.borderColor.empty()) {
@@ -1001,18 +1267,6 @@ void emitDiagramOrCode(DocxCtx& ctx, const std::string& source,
 }
 
 // GitHub alert palette (light/dark hex pairs, same table as the viewer)
-struct AlertInfo {
-    const char* title;
-    uint32_t light;
-    uint32_t dark;
-};
-const AlertInfo kAlerts[] = {
-    {"\xE2\x93\x98\xEF\xB8\x8E  Note", 0x0969DA, 0x4493F8},
-    {"\xF0\x9F\x92\xA1\xEF\xB8\x8E  Tip", 0x1A7F37, 0x3FB950},
-    {"\xE2\x9D\x97\xEF\xB8\x8E  Important", 0x8250DF, 0xAB7DF8},
-    {"\xE2\x9A\xA0\xEF\xB8\x8E  Warning", 0x9A6700, 0xD29922},
-    {"\xE2\x9B\x94\xEF\xB8\x8E  Caution", 0xCF222E, 0xF85149},
-};
 
 std::string hexOfRgb(uint32_t rgb) {
     char buf[8];
@@ -1041,6 +1295,7 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
             int level = std::max(1, std::min(6, elem->level));
             ParaProps heading = props;
             heading.styleId = "Heading" + std::to_string(level);
+            heading.codeHalfPoints = codeHalfPointsFor(kHeadingHalfPoints[level - 1]);
             emitParagraph(ctx, elem, heading);
             break;
         }
@@ -1057,22 +1312,32 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
             break;
         case ElementType::BlockQuote: {
             ParaProps quote = props;
-            int kind = elem->alertKind >= 1 && elem->alertKind <= 5
-                           ? elem->alertKind
-                           : 0;
-            if (kind) {
-                const auto& alert = kAlerts[kind - 1];
+            if (elem->alertKind != 0) {
+                // An admonition in any dialect (admonition.h): the viewer's
+                // accent down the left, then its icon and title
+                const AdmonitionStyle& style = admonitionStyle(elem->alertKind);
                 std::string color = hexOfRgb(
-                    ctx.app.theme.isDark ? alert.dark : alert.light);
+                    ctx.app.theme.isDark ? style.dark : style.light);
                 quote.borderColor = color;
                 quote.indentTwips = 240;
-                // Title line with the viewer's icon and label
-                ctx.body += "<w:p><w:pPr><w:pBdr><w:left w:val=\"single\" "
-                            "w:sz=\"24\" w:space=\"12\" w:color=\"" + color +
-                            "\"/></w:pBdr><w:ind w:left=\"240\"/></w:pPr>"
-                            "<w:r><w:rPr><w:b/><w:color w:val=\"" + color +
-                            "\"/></w:rPr><w:t xml:space=\"preserve\">" +
-                            xmlEscape(alert.title) + "</w:t></w:r></w:p>";
+                std::function<void(const ElementPtr&, std::string&)> plain =
+                    [&](const ElementPtr& e, std::string& out) {
+                        if (e->type == ElementType::Text || e->type == ElementType::Code) out += e->text;
+                        else if (e->type == ElementType::SoftBreak || e->type == ElementType::HardBreak) out += " ";
+                        for (const auto& c : e->children) plain(c, out);
+                    };
+                std::string title;
+                if (elem->alertTitle) plain(elem->alertTitle, title);
+                if (title.empty()) title = admonitionLabel(elem->alertKeyword);
+                if (style.iconUtf8[0]) title = std::string(style.iconUtf8) + "  " + title;
+                if (!elem->alertNoTitle) {
+                    ctx.body += "<w:p><w:pPr><w:pBdr><w:left w:val=\"single\" "
+                                "w:sz=\"24\" w:space=\"12\" w:color=\"" + color +
+                                "\"/></w:pBdr><w:ind w:left=\"240\"/></w:pPr>"
+                                "<w:r><w:rPr><w:b/><w:color w:val=\"" + color +
+                                "\"/></w:rPr><w:t xml:space=\"preserve\">" +
+                                xmlEscape(title) + "</w:t></w:r></w:p>";
+                }
             } else {
                 quote.borderColor = ctx.quoteBorderHex;
                 quote.indentTwips = 240;
@@ -1265,23 +1530,24 @@ void walkBlocks(DocxCtx& ctx, const ElementPtr& elem, ParaProps props,
 // --------------------------------------------------------------------------
 
 std::string stylesXml(const DocxCtx& ctx) {
-    // Viewer pixel sizes: body 16, code 14, headings 32/26/22/18/16/14.
-    // Word half-points are px * 1.5 at 96dpi.
-    const int headingSizes[6] = {48, 39, 33, 27, 24, 21};
+    const int* headingSizes = kHeadingHalfPoints;
+    const std::string bodyRun = rFontsXml(ctx.bodyFont, ctx.bodyEastAsia) +
+        "<w:color w:val=\"" + ctx.textHex + "\"/>"
+        "<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>";
+    // The Normal style repeats the defaults: Word in Chinese otherwise sets
+    // CJK text in its own East Asian default, DengXian, rather than the
+    // theme's face (#256)
     std::string xml =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<w:styles "
         "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/"
         "main\">"
-        "<w:docDefaults><w:rPrDefault><w:rPr>" +
-        rFontsXml(ctx.bodyFont, ctx.bodyEastAsia) +
-        "<w:color w:val=\"" + ctx.textHex + "\"/>"
-        "<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>"
+        "<w:docDefaults><w:rPrDefault><w:rPr>" + bodyRun +
         "</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>"
         "<w:spacing w:after=\"160\" w:line=\"312\" w:lineRule=\"auto\"/>"
         "</w:pPr></w:pPrDefault></w:docDefaults>"
         "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
-        "<w:name w:val=\"Normal\"/></w:style>";
+        "<w:name w:val=\"Normal\"/><w:rPr>" + bodyRun + "</w:rPr></w:style>";
     for (int i = 0; i < 6; i++) {
         std::string n = std::to_string(i + 1);
         xml += "<w:style w:type=\"paragraph\" w:styleId=\"Heading" + n +
@@ -1357,6 +1623,10 @@ bool exportDocxFile(App& app, const std::wstring& path) {
     if (!app.root) return false;
 
     DocxCtx ctx{app};
+    // Deletes the sync-PlantUML fallback's temp subtree when this export
+    // ends (no-op unless a fence actually rendered into it).
+    PlantumlExportTempGuard plantumlTempGuard{app, ctx};
+
     if (!app.currentFile.empty()) {
         std::wstring wide = toWide(app.currentFile);
         size_t slash = wide.find_last_of(L"/\\");
@@ -1528,31 +1798,51 @@ bool exportDocxFile(App& app, const std::wstring& path) {
     }
     std::string package = zip.finish();
 
-    std::ofstream out(path, std::ios::binary);
+    std::ofstream out(fsPath(path), std::ios::binary);
     if (!out) return false;
     out.write(package.data(), package.size());
     return out.good();
 }
 
-// Rasterizes the diagram exactly like the DOCX path, then hands the pixels
-// to the clipboard as CF_DIB (universal) plus a "PNG" stream (kept by apps
-// that prefer lossless with metadata)
+// The DOCX export's image of the diagram (merman first, then native), as a
+// "PNG" stream (kept by apps that prefer lossless with metadata) plus its
+// pixels as CF_DIB (universal)
 bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
-    mermaidext::Built built = buildDiagramPrims(app, sourceUtf8, kRasterScale);
-    if (!built.ok || built.prims.empty()) return false;
-    RasterTarget rt;
-    if (!rt.open(app, built.width, built.height)) return false;
-    rt.target->BeginDraw();
-    rt.target->Clear(app.theme.background);
-    drawPrims(app, rt, built, kRasterScale);
-    if (FAILED(rt.target->EndDraw())) return false;
-
-    UINT stride = rt.width * 4;
-    std::vector<BYTE> pixels((size_t)stride * rt.height);
-    if (FAILED(rt.bitmap->CopyPixels(nullptr, stride, (UINT)pixels.size(),
-                                     pixels.data()))) {
+    std::string png;
+    float logicalWidth = 0.0f, logicalHeight = 0.0f;
+    if (!app.wicFactory ||
+        !diagramToPng(app, sourceUtf8, png, logicalWidth, logicalHeight)) {
         return false;
     }
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    UINT width = 0, height = 0;
+    std::vector<BYTE> pixels;
+    bool decoded =
+        SUCCEEDED(app.wicFactory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(
+            reinterpret_cast<BYTE*>(png.data()), (DWORD)png.size())) &&
+        SUCCEEDED(app.wicFactory->CreateDecoderFromStream(
+            stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+        SUCCEEDED(app.wicFactory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+                                        WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeMedianCut)) &&
+        SUCCEEDED(converter->GetSize(&width, &height)) && width && height;
+    if (decoded) {
+        pixels.resize((size_t)width * 4 * height);
+        decoded = SUCCEEDED(converter->CopyPixels(
+            nullptr, width * 4, (UINT)pixels.size(), pixels.data()));
+    }
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    if (!decoded) return false;
+    UINT stride = width * 4;
 
     // CF_DIB: header plus bottom-up 32bpp rows (background is opaque, so
     // the ignored alpha byte is 255 everywhere)
@@ -1562,16 +1852,16 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
     if (BYTE* out = (BYTE*)GlobalLock(dib)) {
         BITMAPINFOHEADER hdr{};
         hdr.biSize = sizeof(hdr);
-        hdr.biWidth = (LONG)rt.width;
-        hdr.biHeight = (LONG)rt.height;
+        hdr.biWidth = (LONG)width;
+        hdr.biHeight = (LONG)height;
         hdr.biPlanes = 1;
         hdr.biBitCount = 32;
         hdr.biCompression = BI_RGB;
         hdr.biSizeImage = (DWORD)pixels.size();
         memcpy(out, &hdr, sizeof(hdr));
-        for (UINT row = 0; row < rt.height; row++) {
+        for (UINT row = 0; row < height; row++) {
             memcpy(out + sizeof(hdr) + (size_t)row * stride,
-                   pixels.data() + (size_t)(rt.height - 1 - row) * stride,
+                   pixels.data() + (size_t)(height - 1 - row) * stride,
                    stride);
         }
         GlobalUnlock(dib);
@@ -1580,7 +1870,6 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
         return false;
     }
 
-    std::string png = encodeWicPng(app, rt.bitmap, rt.width, rt.height);
     HGLOBAL pngGlobal = nullptr;
     if (!png.empty()) {
         pngGlobal = GlobalAlloc(GMEM_MOVEABLE, png.size());
@@ -1613,31 +1902,176 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
     return ok;
 }
 
-// Ctrl+V in the editor with a bitmap on the clipboard: encode it as PNG
-// into the given file (screenshots land beside the document)
-bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path) {
-    if (!IsClipboardFormatAvailable(CF_BITMAP) || !app.wicFactory) {
+// A rendered PlantUML PNG decoded at `scale` and composited over the
+// active theme background, made opaque: PlantUML draws on a transparent
+// page, which would leave a dark theme's light labels on white paper in
+// Word, and CF_DIB consumers ignore alpha. Premultiplied BGRA rows.
+bool plantumlOpaquePixels(App& app, const std::wstring& pngPath, UINT scale,
+                          std::vector<BYTE>& pixels, UINT& outW, UINT& outH) {
+    pixels.clear();
+    outW = outH = 0;
+    if (!app.wicFactory || pngPath.empty() || scale == 0) return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    IWICBitmapScaler* scaler = nullptr;
+
+    if (SUCCEEDED(app.wicFactory->CreateDecoderFromFilename(
+            pngPath.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame))) {
+        UINT w = 0, h = 0;
+        frame->GetSize(&w, &h);
+        if (w > 0 && h > 0 && w <= 8000 && h <= 8000 &&
+            SUCCEEDED(app.wicFactory->CreateFormatConverter(&converter)) &&
+            SUCCEEDED(converter->Initialize(
+                frame, GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone, nullptr, 0.0,
+                WICBitmapPaletteTypeCustom)) &&
+            SUCCEEDED(app.wicFactory->CreateBitmapScaler(&scaler)) &&
+            SUCCEEDED(scaler->Initialize(converter, w * scale, h * scale,
+                                         WICBitmapInterpolationModeFant))) {
+            outW = w * scale;
+            outH = h * scale;
+            const UINT stride = outW * 4;
+            pixels.resize((size_t)stride * outH);
+            if (SUCCEEDED(scaler->CopyPixels(nullptr, stride,
+                                             (UINT)pixels.size(),
+                                             pixels.data()))) {
+                // Premultiplied source over the opaque theme background:
+                // out = src + bg * (1 - alpha), then alpha forced opaque.
+                const float bgB = app.theme.background.b * 255.0f;
+                const float bgG = app.theme.background.g * 255.0f;
+                const float bgR = app.theme.background.r * 255.0f;
+                for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+                    const float inv = 1.0f - pixels[i + 3] / 255.0f;
+                    pixels[i + 0] =
+                        (BYTE)std::min(255.0f, pixels[i + 0] + bgB * inv + 0.5f);
+                    pixels[i + 1] =
+                        (BYTE)std::min(255.0f, pixels[i + 1] + bgG * inv + 0.5f);
+                    pixels[i + 2] =
+                        (BYTE)std::min(255.0f, pixels[i + 2] + bgR * inv + 0.5f);
+                    pixels[i + 3] = 255;
+                }
+            } else {
+                pixels.clear();
+            }
+        }
+    }
+    if (scaler) scaler->Release();
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    return !pixels.empty();
+}
+
+// Puts a rendered PlantUML PNG on the clipboard at 2x, mirroring the
+// mermaid Image button (CF_DIB plus a "PNG" stream), composited over the
+// theme background (plantumlOpaquePixels). Failure is silent: the caller
+// shows no toast.
+bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
+    UINT outW = 0, outH = 0;
+    std::vector<BYTE> pixels;
+    if (!plantumlOpaquePixels(app, pngPath, 2, pixels, outW, outH)) return false;
+
+    // CF_DIB: header plus bottom-up 32bpp rows
+    const UINT stride = outW * 4;
+    HGLOBAL dib =
+        GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixels.size());
+    if (!dib) return false;
+    if (BYTE* out = (BYTE*)GlobalLock(dib)) {
+        BITMAPINFOHEADER hdr{};
+        hdr.biSize = sizeof(hdr);
+        hdr.biWidth = (LONG)outW;
+        hdr.biHeight = (LONG)outH;
+        hdr.biPlanes = 1;
+        hdr.biBitCount = 32;
+        hdr.biCompression = BI_RGB;
+        hdr.biSizeImage = (DWORD)pixels.size();
+        memcpy(out, &hdr, sizeof(hdr));
+        for (UINT row = 0; row < outH; row++) {
+            memcpy(out + sizeof(hdr) + (size_t)row * stride,
+                   pixels.data() + (size_t)(outH - 1 - row) * stride,
+                   stride);
+        }
+        GlobalUnlock(dib);
+    } else {
+        GlobalFree(dib);
         return false;
     }
-    if (!OpenClipboard(hwnd)) return false;
-    bool ok = false;
-    if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP)) {
-        IWICBitmap* bitmap = nullptr;
-        if (SUCCEEDED(app.wicFactory->CreateBitmapFromHBITMAP(
-                hbm, nullptr, WICBitmapIgnoreAlpha, &bitmap))) {
-            UINT w = 0, h = 0;
-            bitmap->GetSize(&w, &h);
-            std::string png = encodeWicPng(app, bitmap, w, h);
-            bitmap->Release();
-            if (!png.empty()) {
-                std::ofstream out(path, std::ios::binary | std::ios::trunc);
-                if (out) {
-                    out.write(png.data(), (std::streamsize)png.size());
-                    ok = out.good();
+
+    HGLOBAL pngGlobal = nullptr;
+    IWICBitmap* wicBitmap = nullptr;
+    if (SUCCEEDED(app.wicFactory->CreateBitmapFromMemory(
+            outW, outH, GUID_WICPixelFormat32bppPBGRA, stride,
+            (UINT)pixels.size(), pixels.data(), &wicBitmap))) {
+        std::string png = encodeWicPng(app, wicBitmap, outW, outH);
+        wicBitmap->Release();
+        if (!png.empty()) {
+            pngGlobal = GlobalAlloc(GMEM_MOVEABLE, png.size());
+            if (pngGlobal) {
+                if (void* bits = GlobalLock(pngGlobal)) {
+                    memcpy(bits, png.data(), png.size());
+                    GlobalUnlock(pngGlobal);
+                } else {
+                    GlobalFree(pngGlobal);
+                    pngGlobal = nullptr;
                 }
             }
         }
     }
+
+    if (!OpenClipboard(app.hwnd)) {
+        GlobalFree(dib);
+        if (pngGlobal) GlobalFree(pngGlobal);
+        return false;
+    }
+    EmptyClipboard();
+    bool ok = SetClipboardData(CF_DIB, dib) != nullptr;
+    if (!ok) GlobalFree(dib);
+    if (pngGlobal) {
+        UINT pngFormat = RegisterClipboardFormatW(L"PNG");
+        if (!pngFormat || !SetClipboardData(pngFormat, pngGlobal)) {
+            GlobalFree(pngGlobal);
+        }
+    }
     CloseClipboard();
     return ok;
+}
+
+bool clipboardHasImage() {
+    return IsClipboardFormatAvailable(RegisterClipboardFormatW(L"PNG")) ||
+           IsClipboardFormatAvailable(CF_BITMAP);
+}
+
+bool clipboardImagePng(App& app, HWND hwnd, std::string& png) {
+    png.clear();
+    UINT pngFormat = RegisterClipboardFormatW(L"PNG");
+    if (IsClipboardFormatAvailable(pngFormat) && OpenClipboard(hwnd)) {
+        if (HANDLE data = GetClipboardData(pngFormat)) {
+            SIZE_T size = GlobalSize(data);
+            if (const auto* bytes = static_cast<const char*>(GlobalLock(data))) {
+                png.assign(bytes, size);
+                GlobalUnlock(data);
+            }
+        }
+        CloseClipboard();
+        if (png.size() > 8 && png.compare(1, 3, "PNG") == 0) return true;
+        png.clear();
+    }
+    if (IsClipboardFormatAvailable(CF_BITMAP) && app.wicFactory && OpenClipboard(hwnd)) {
+        if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP)) {
+            IWICBitmap* bitmap = nullptr;
+            if (SUCCEEDED(app.wicFactory->CreateBitmapFromHBITMAP(hbm, nullptr, WICBitmapIgnoreAlpha,
+                                                                  &bitmap))) {
+                UINT w = 0, h = 0;
+                bitmap->GetSize(&w, &h);
+                png = encodeWicPng(app, bitmap, w, h);
+                bitmap->Release();
+            }
+        }
+        CloseClipboard();
+    }
+    return !png.empty();
 }

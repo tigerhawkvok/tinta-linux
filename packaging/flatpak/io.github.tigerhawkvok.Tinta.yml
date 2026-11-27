@@ -1,0 +1,56 @@
+# Tinta as a Flatpak, built from this checkout (build-flatpak.sh).
+#
+# A local build: md4c, Corrosion and merman's crates download during the
+# build (`--share=network` below), which Flathub would not allow; a Flathub
+# submission would vendor them instead.
+app-id: io.github.tigerhawkvok.Tinta
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: tinta
+rename-desktop-file: tinta.desktop
+rename-icon: tinta
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The update check (GitHub releases)
+  - --share=network
+  # Documents open and save anywhere, with the images beside them
+  - --filesystem=host
+  # Single instance: a second launch joins the first window as a tab
+  - --own-name=org.tinta.Instance
+modules:
+  - name: tinta
+    # Explicit commands rather than cmake-ninja: only Tinta's install
+    # component, as the AppImage does (md4c's own install rules fail as a
+    # FetchContent subproject)
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/tinta/cargo
+    build-commands:
+      # The SDK's Rust extension, not rustup's pinned toolchain
+      - cmake -S . -B _build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app
+        -DBUILD_TESTING=OFF -DTINTA_MERMAN=ON -DTINTA_MERMAN_RUSTUP=OFF
+      - cmake --build _build --target tinta
+      - cmake --install _build --component tinta
+      - install -Dm644 packaging/flatpak/io.github.tigerhawkvok.Tinta.metainfo.xml
+        /app/share/metainfo/io.github.tigerhawkvok.Tinta.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - build
+          - build-png
+          - build-appimage
+          - build-system
+          - build-clang
+          - .flatpak-builder

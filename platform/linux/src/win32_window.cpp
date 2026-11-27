@@ -1,0 +1,1191 @@
+// Win32 windows, messages, timers, capture, cursors, clipboard, GDI, IME and
+// dialogs for the Linux compat layer. The message queue and timers are real
+// (worker threads post results to it). Headless runs keep windows as records
+// with a size; interactive runs back each window with GTK (gtk_window.cpp),
+// which feeds input into the queue and presents what WM_PAINT renders.
+#include "window_internal.h"
+
+#include <ole2.h>
+#include <imm.h>
+#include <shellapi.h>
+
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstring>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+struct Timer {
+    HWND hwnd;
+    UINT_PTR id;
+    std::chrono::milliseconds interval;
+    Clock::time_point due;
+};
+
+struct State {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<MSG> queue;
+    std::vector<Timer> timers;
+    std::map<std::wstring, WNDPROC> classes;
+    std::vector<HWND> windows;
+    HWND capture = nullptr;
+    HWND foreground = nullptr;
+    HCURSOR cursor = nullptr;
+    bool quit = false;
+    int paintCount = 0;  // BeginPaint calls, all windows
+    int quitCode = 0;
+    std::map<UINT, HGLOBAL> clipboard;
+    HWND clipboardOpener = nullptr;
+    HWND clipboardOwner = nullptr;
+    std::map<std::wstring, UINT> clipboardFormats;
+    UINT nextClipboardFormat = 0xC000;
+};
+
+State& state() {
+    static State s;
+    return s;
+}
+
+// Moves due timers into the queue as WM_TIMER; returns the next deadline
+Clock::time_point fireTimers(State& s) {
+    Clock::time_point now = Clock::now(), next = Clock::time_point::max();
+    for (Timer& t : s.timers) {
+        if (t.due <= now) {
+            s.queue.push_back(MSG{t.hwnd, WM_TIMER, t.id, 0, 0, {0, 0}});
+            t.due = now + t.interval;
+        }
+        next = std::min(next, t.due);
+    }
+    return next;
+}
+
+bool takeMessage(State& s, MSG* msg, HWND hwnd, UINT min, UINT max, bool remove) {
+    for (auto it = s.queue.begin(); it != s.queue.end(); ++it) {
+        bool windowMatch = !hwnd || it->hwnd == hwnd;
+        bool rangeMatch = (min == 0 && max == 0) || (it->message >= min && it->message <= max);
+        if (windowMatch && rangeMatch) {
+            *msg = *it;
+            if (remove) s.queue.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+// As on Windows, WM_PAINT is never queued: it is synthesised for a dirty
+// window once nothing else is waiting, and repeats until BeginPaint
+bool takePaint(State& s, MSG* msg, HWND hwnd, UINT min, UINT max) {
+    bool rangeMatch = (min == 0 && max == 0) || (WM_PAINT >= min && WM_PAINT <= max);
+    if (!rangeMatch) return false;
+    for (HWND w : s.windows) {
+        if (w->dirty && !w->destroyed && (!hwnd || w == hwnd)) {
+            *msg = MSG{w, WM_PAINT, 0, 0, 0, {0, 0}};
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+namespace tinta {
+
+HeadlessOptions& headless() {
+    static HeadlessOptions options;
+    return options;
+}
+
+}  // namespace tinta
+
+namespace {
+
+// Writes `surface` as a PNG; 0 on success
+int writeCapture(cairo_surface_t* surface, const std::string& path) {
+    cairo_surface_flush(surface);
+    cairo_status_t status = cairo_surface_write_to_png(surface, path.c_str());
+    if (status != CAIRO_STATUS_SUCCESS) {
+        std::fprintf(stderr, "render-png: %s: %s\n", path.c_str(), cairo_status_to_string(status));
+        return 1;
+    }
+    return 0;
+}
+
+// --render-png: runs the app's messages (posted results, timers, layout
+// chunks, paints) until nothing has happened for settleMs, then saves the
+// main window's surface. Returns the process exit code.
+int runCapture() {
+    State& s = state();
+    const tinta::HeadlessOptions& options = tinta::headless();
+    auto start = Clock::now(), quietSince = start;
+    int paints = 0, dispatched = 0;
+    bool timedOut = false;
+    while (true) {
+        MSG msg{};
+        bool got = false, paint = false;
+        {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            fireTimers(s);
+            got = takeMessage(s, &msg, nullptr, 0, 0, true);
+            if (!got) paint = takePaint(s, &msg, nullptr, 0, 0);
+            if (s.quit) break;
+        }
+        if (got || paint) {
+            DispatchMessageW(&msg);
+            dispatched++;
+            if (paint) paints++;
+            // Timers tick forever (file watch, drafts); only their paints count
+            if (msg.message != WM_TIMER) quietSince = Clock::now();
+            continue;
+        }
+        auto now = Clock::now();
+        if (now - quietSince >= std::chrono::milliseconds(options.settleMs)) break;
+        if (now - start >= std::chrono::milliseconds(options.timeoutMs)) {
+            timedOut = true;
+            break;
+        }
+        std::unique_lock<std::mutex> lock(s.mutex);
+        s.wake.wait_for(lock, std::chrono::milliseconds(5));
+    }
+    double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    HWND main = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        for (HWND w : s.windows) {
+            if (!w->destroyed && tinta::windowSurface(w)) {
+                main = w;
+                break;
+            }
+        }
+    }
+    std::fprintf(stderr, "render-png: settled in %.0f ms (%d messages, %d loop paints, %d total)%s\n", ms, dispatched, paints, s.paintCount,
+                 timedOut ? " [timeout]" : "");
+    if (!main || s.paintCount == 0) {
+        std::fprintf(stderr, "render-png: no painted window\n");
+        return 1;
+    }
+    std::fprintf(stderr, "render-png: window \"%s\"\n", tinta::toUtf8(main->title).c_str());
+    if (options.repaints > 0) {
+        std::vector<double> frames;
+        for (int i = 0; i < options.repaints; i++) {
+            auto t0 = Clock::now();
+            InvalidateRect(main, nullptr, FALSE);
+            SendMessageW(main, WM_PAINT, 0, 0);
+            frames.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+        }
+        std::sort(frames.begin(), frames.end());
+        std::fprintf(stderr, "render-png: %d repaints, median %.2f ms, max %.2f ms\n", options.repaints,
+                     frames[frames.size() / 2], frames.back());
+    }
+    return writeCapture(tinta::windowSurface(main), options.renderPng);
+}
+
+}  // namespace
+
+namespace tinta {
+
+void postFromUi(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    state().queue.push_back(MSG{hwnd, msg, wParam, lParam, 0, {0, 0}});
+}
+
+// A window target finished a frame: show it (EndDraw)
+void presentWindow(HWND hwnd) {
+    if (gtk::active()) gtk::invalidate(hwnd);
+}
+
+}  // namespace tinta
+
+// ---- Windows ------------------------------------------------------------------------------
+namespace {
+
+// The resize border DefWindowProc reports inside the client area: Tinta's
+// frame has no non-client border on Linux
+LRESULT borderHitTest(HWND hwnd, POINT pt) {
+    RECT client;
+    GetClientRect(hwnd, &client);
+    if (!PtInRect(&client, pt)) return HTNOWHERE;
+    if (!tinta::gtk::active() || !(hwnd->style & WS_THICKFRAME) || IsZoomed(hwnd)) return HTCLIENT;
+    int border = static_cast<int>(6.0 * GetDpiForWindow(hwnd) / 96.0 + 0.5);
+    bool left = pt.x < border, right = pt.x >= client.right - border;
+    bool top = pt.y < border, bottom = pt.y >= client.bottom - border;
+    if (top && left) return HTTOPLEFT;
+    if (top && right) return HTTOPRIGHT;
+    if (bottom && left) return HTBOTTOMLEFT;
+    if (bottom && right) return HTBOTTOMRIGHT;
+    if (left) return HTLEFT;
+    if (right) return HTRIGHT;
+    if (bottom) return HTBOTTOM;
+    return HTCLIENT;  // the top edge is Tinta's own (WM_NCHITTEST)
+}
+
+LPCWSTR cursorForHit(UINT hit) {
+    switch (hit) {
+        case HTLEFT:
+        case HTRIGHT: return MAKEINTRESOURCEW(32644);  // IDC_SIZEWE
+        case HTTOP:
+        case HTBOTTOM: return MAKEINTRESOURCEW(32645);  // IDC_SIZENS
+        case HTTOPLEFT:
+        case HTBOTTOMRIGHT: return MAKEINTRESOURCEW(32642);  // IDC_SIZENWSE
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT: return MAKEINTRESOURCEW(32643);  // IDC_SIZENESW
+        default: return IDC_ARROW;
+    }
+}
+
+}  // namespace
+
+// What Windows does for messages the window procedure leaves alone
+LRESULT DefWindowProcW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (!hwnd) return 0;
+    switch (msg) {
+        case WM_NCHITTEST: {
+            POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ScreenToClient(hwnd, &pt);
+            return borderHitTest(hwnd, pt);
+        }
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, cursorForHit(LOWORD(lParam))));
+            return TRUE;
+        case WM_NCLBUTTONDOWN:
+            if (wParam == HTCAPTION) tinta::gtk::beginMove(hwnd);
+            else if (wParam >= HTLEFT && wParam <= HTBOTTOMRIGHT) tinta::gtk::beginResize(hwnd, static_cast<int>(wParam));
+            return 0;
+        case WM_NCLBUTTONDBLCLK:
+            if (wParam == HTCAPTION) tinta::gtk::toggleMaximize(hwnd);
+            return 0;
+        case WM_RBUTTONUP: {
+            POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ClientToScreen(hwnd, &pt);
+            return SendMessageW(hwnd, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(pt.x, pt.y));
+        }
+        case WM_SYSCOMMAND:
+            switch (wParam & 0xFFF0) {
+                case SC_MINIMIZE: ShowWindow(hwnd, SW_MINIMIZE); break;
+                case SC_MAXIMIZE: ShowWindow(hwnd, SW_SHOWMAXIMIZED); break;
+                case SC_RESTORE: ShowWindow(hwnd, SW_RESTORE); break;
+                case SC_CLOSE: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+                default: break;
+            }
+            return 0;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        default: return 0;
+    }
+}
+
+ATOM RegisterClassExW(const WNDCLASSEXW* wc) {
+    if (!wc || !wc->lpszClassName) return 0;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    state().classes[wc->lpszClassName] = wc->lpfnWndProc;
+    return static_cast<ATOM>(state().classes.size());
+}
+
+HWND CreateWindowExW(DWORD exStyle, LPCWSTR className, LPCWSTR windowName, DWORD style, int x, int y, int width,
+                     int height, HWND, HMENU, HINSTANCE, void*) {
+    auto* window = new HWND__();
+    if (className) window->className = className;
+    if (windowName) window->title = windowName;
+    window->style = static_cast<LONG>(style);
+    window->exStyle = static_cast<LONG>(exStyle);
+    if (x == CW_USEDEFAULT) x = 100;
+    if (y == CW_USEDEFAULT) y = 100;
+    if (width == CW_USEDEFAULT || width <= 0) width = 1000;
+    if (height == CW_USEDEFAULT || height <= 0) height = 800;
+    if (tinta::headless().width > 0) width = tinta::headless().width;
+    if (tinta::headless().height > 0) height = tinta::headless().height;
+    window->rect = {x, y, x + width, y + height};
+    window->visible = (style & WS_VISIBLE) != 0;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        auto cls = state().classes.find(window->className);
+        if (cls != state().classes.end()) window->proc = cls->second;
+        state().windows.push_back(window);
+    }
+    // Only Tinta's own windows are shown; helpers (the tab drag ghost) stay records
+    if (tinta::gtk::active() && window->className == L"TintaMono") tinta::gtk::createWindow(window);
+    return window;
+}
+
+// As on Windows, the window hears WM_DESTROY while it still exists
+BOOL DestroyWindow(HWND hwnd) {
+    if (!hwnd || hwnd->destroyed) return FALSE;
+    SendMessageW(hwnd, WM_DESTROY, 0, 0);
+    SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        hwnd->destroyed = true;
+        hwnd->visible = false;
+        state().timers.erase(std::remove_if(state().timers.begin(), state().timers.end(),
+                                            [hwnd](const Timer& t) { return t.hwnd == hwnd; }),
+                             state().timers.end());
+    }
+    tinta::gtk::destroyWindow(hwnd);
+    return TRUE;
+}
+
+// Headless windows keep their size when maximized: there is no screen
+BOOL ShowWindow(HWND hwnd, int cmd) {
+    if (!hwnd) return FALSE;
+    bool was = hwnd->visible;
+    hwnd->visible = cmd != SW_HIDE;
+    hwnd->zoomed = cmd == SW_SHOWMAXIMIZED;
+    hwnd->iconic = cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED;
+    if (cmd == SW_RESTORE) hwnd->zoomed = hwnd->iconic = false;
+    if (hwnd->visible && !was) InvalidateRect(hwnd, nullptr, FALSE);
+    tinta::gtk::showWindow(hwnd, cmd);
+    return was;
+}
+
+// Paints now if the window is dirty, as Windows does
+BOOL UpdateWindow(HWND hwnd) {
+    if (hwnd && hwnd->dirty && hwnd->visible) SendMessageW(hwnd, WM_PAINT, 0, 0);
+    return TRUE;
+}
+
+BOOL InvalidateRect(HWND hwnd, const RECT*, BOOL) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    if (hwnd) {
+        hwnd->dirty = true;
+    } else {
+        for (HWND w : state().windows) w->dirty = true;
+    }
+    state().wake.notify_all();
+    // The loop paints it (WM_PAINT once idle); EndDraw then presents
+    if (tinta::gtk::active()) tinta::gtk::wake();
+    return TRUE;
+}
+
+HDC BeginPaint(HWND hwnd, PAINTSTRUCT* paint) {
+    if (hwnd) {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        hwnd->dirty = false;
+        state().paintCount++;
+    }
+    if (paint) {
+        std::memset(paint, 0, sizeof *paint);
+        if (hwnd) GetClientRect(hwnd, &paint->rcPaint);
+    }
+    return nullptr;
+}
+
+BOOL EndPaint(HWND, const PAINTSTRUCT*) { return TRUE; }
+
+BOOL SetWindowPos(HWND hwnd, HWND, int x, int y, int cx, int cy, UINT flags) {
+    if (!hwnd) return FALSE;
+    if (hwnd->native) {  // GTK owns placement and size (WM_SIZE reports it)
+        if (flags & SWP_SHOWWINDOW) ShowWindow(hwnd, SW_SHOW);
+        return TRUE;
+    }
+    RECT& r = hwnd->rect;
+    if (!(flags & SWP_NOMOVE)) {
+        LONG w = r.right - r.left, h = r.bottom - r.top;
+        r = {x, y, x + w, y + h};
+    }
+    if (!(flags & SWP_NOSIZE)) {
+        r.right = r.left + cx;
+        r.bottom = r.top + cy;
+    }
+    if (flags & SWP_SHOWWINDOW) hwnd->visible = true;
+    return TRUE;
+}
+
+BOOL GetWindowRect(HWND hwnd, RECT* rect) {
+    if (!hwnd || !rect) return FALSE;
+    *rect = hwnd->rect;
+    return TRUE;
+}
+
+BOOL GetClientRect(HWND hwnd, RECT* rect) {
+    if (!hwnd || !rect) return FALSE;
+    *rect = {0, 0, hwnd->rect.right - hwnd->rect.left, hwnd->rect.bottom - hwnd->rect.top};
+    return TRUE;
+}
+
+BOOL SetWindowTextW(HWND hwnd, LPCWSTR text) {
+    if (!hwnd) return FALSE;
+    hwnd->title = text ? text : L"";
+    tinta::gtk::setTitle(hwnd);
+    return TRUE;
+}
+
+BOOL GetWindowPlacement(HWND hwnd, WINDOWPLACEMENT* placement) {
+    if (!hwnd || !placement) return FALSE;
+    placement->flags = 0;
+    placement->showCmd = hwnd->zoomed ? SW_SHOWMAXIMIZED : hwnd->iconic ? SW_SHOWMINIMIZED : SW_SHOWNORMAL;
+    placement->rcNormalPosition = hwnd->rect;
+    return TRUE;
+}
+
+BOOL SetWindowPlacement(HWND hwnd, const WINDOWPLACEMENT* placement) {
+    if (!hwnd || !placement) return FALSE;
+    if (!hwnd->native) hwnd->rect = placement->rcNormalPosition;
+    hwnd->zoomed = placement->showCmd == SW_SHOWMAXIMIZED;
+    return TRUE;
+}
+
+LONG GetWindowLongW(HWND hwnd, int index) {
+    if (!hwnd) return 0;
+    if (index == GWL_STYLE) return hwnd->style;
+    if (index == GWL_EXSTYLE) return hwnd->exStyle;
+    return 0;
+}
+
+LONG SetWindowLongW(HWND hwnd, int index, LONG value) {
+    if (!hwnd) return 0;
+    LONG old = GetWindowLongW(hwnd, index);
+    if (index == GWL_STYLE) hwnd->style = value;
+    else if (index == GWL_EXSTYLE) hwnd->exStyle = value;
+    return old;
+}
+
+LONG_PTR GetWindowLongPtrW(HWND hwnd, int index) {
+    if (!hwnd) return 0;
+    return index == GWLP_USERDATA ? hwnd->userData : GetWindowLongW(hwnd, index);
+}
+
+LONG_PTR SetWindowLongPtrW(HWND hwnd, int index, LONG_PTR value) {
+    if (!hwnd) return 0;
+    if (index != GWLP_USERDATA) return SetWindowLongW(hwnd, index, static_cast<LONG>(value));
+    LONG_PTR old = hwnd->userData;
+    hwnd->userData = value;
+    return old;
+}
+
+BOOL IsZoomed(HWND hwnd) { return hwnd && (hwnd->native ? tinta::gtk::isMaximized(hwnd) : hwnd->zoomed); }
+BOOL IsIconic(HWND hwnd) { return hwnd && (hwnd->native ? tinta::gtk::isMinimized(hwnd) : hwnd->iconic); }
+BOOL IsWindowVisible(HWND hwnd) { return hwnd && hwnd->visible; }
+BOOL IsWindow(HWND hwnd) { return hwnd && !hwnd->destroyed; }
+
+BOOL SetForegroundWindow(HWND hwnd) {
+    state().foreground = hwnd;
+    if (hwnd && hwnd->native) tinta::gtk::present(hwnd);
+    return TRUE;
+}
+
+HWND GetForegroundWindow() { return state().foreground; }
+HWND SetFocus(HWND hwnd) { return hwnd; }
+HWND GetFocus() { return state().foreground; }
+HWND GetAncestor(HWND hwnd, UINT) { return hwnd; }
+
+namespace {
+// The Tinta window of another (interactive) process, reached over D-Bus:
+// invisible and without a rectangle, so only WM_COPYDATA does anything
+HWND__* remoteTinta() {
+    static HWND__ window = [] {
+        HWND__ w;
+        w.className = L"TintaMono";
+        w.title = L"Tinta Mono";
+        w.rect = {0, 0, 0, 0};
+        w.remote = true;
+        return w;
+    }();
+    return &window;
+}
+}  // namespace
+
+// This process's windows, then (for the "Tinta" class) the single-instance
+// owner in another process, if one is running
+HWND FindWindowExW(HWND, HWND after, LPCWSTR className, LPCWSTR windowName) {
+    if (after && after->remote) return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        bool passed = after == nullptr;
+        for (HWND w : state().windows) {
+            if (!passed) {
+                passed = w == after;
+                continue;
+            }
+            if (w->destroyed) continue;
+            if (className && w->className != className) continue;
+            if (windowName && w->title != windowName) continue;
+            return w;
+        }
+    }
+    if (className && wcscmp(className, L"TintaMono") == 0 && !windowName && tinta::gtk::active() &&
+        tinta::gtk::remoteInstanceExists()) {
+        return remoteTinta();
+    }
+    return nullptr;
+}
+
+ATOM RegisterClassW(const WNDCLASSW* wc) {
+    if (!wc) return 0;
+    WNDCLASSEXW ex{};
+    ex.cbSize = sizeof ex;
+    ex.style = wc->style;
+    ex.lpfnWndProc = wc->lpfnWndProc;
+    ex.hInstance = wc->hInstance;
+    ex.hCursor = wc->hCursor;
+    ex.lpszClassName = wc->lpszClassName;
+    return RegisterClassExW(&ex);
+}
+
+BOOL UnregisterClassW(LPCWSTR className, HINSTANCE) {
+    if (!className) return FALSE;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    return state().classes.erase(className) ? TRUE : FALSE;
+}
+
+int GetWindowTextW(HWND hwnd, LPWSTR text, int maxCount) {
+    if (!hwnd || !text || maxCount <= 0) return 0;
+    int n = std::min(static_cast<int>(hwnd->title.size()), maxCount - 1);
+    wmemcpy(text, hwnd->title.c_str(), n);
+    text[n] = 0;
+    return n;
+}
+
+DWORD MsgWaitForMultipleObjects(DWORD count, const HANDLE* handles, BOOL, DWORD milliseconds, DWORD wakeMask) {
+    State& s = state();
+    auto deadline = Clock::now() + std::chrono::milliseconds(milliseconds == INFINITE ? 0 : milliseconds);
+    while (true) {
+        for (DWORD i = 0; i < count; i++) {
+            if (WaitForSingleObject(handles[i], 0) == WAIT_OBJECT_0) return WAIT_OBJECT_0 + i;
+        }
+        {
+            std::unique_lock<std::mutex> lock(s.mutex);
+            fireTimers(s);
+            bool posted = !s.queue.empty();
+            bool paint = (wakeMask & QS_PAINT) &&
+                         std::any_of(s.windows.begin(), s.windows.end(), [](HWND w) { return w->dirty; });
+            if (wakeMask && (posted || paint)) return WAIT_OBJECT_0 + count;
+            if (milliseconds != INFINITE && Clock::now() >= deadline) return WAIT_TIMEOUT;
+            s.wake.wait_for(lock, std::chrono::milliseconds(2));
+        }
+    }
+}
+
+int GetClassNameW(HWND hwnd, LPWSTR name, int maxCount) {
+    if (!hwnd || !name || maxCount <= 0) return 0;
+    int n = std::min(static_cast<int>(hwnd->className.size()), maxCount - 1);
+    wmemcpy(name, hwnd->className.c_str(), n);
+    name[n] = 0;
+    return n;
+}
+
+BOOL ScreenToClient(HWND hwnd, POINT* p) {
+    if (!hwnd || !p) return FALSE;
+    p->x -= hwnd->rect.left;
+    p->y -= hwnd->rect.top;
+    return TRUE;
+}
+
+BOOL ClientToScreen(HWND hwnd, POINT* p) {
+    if (!hwnd || !p) return FALSE;
+    p->x += hwnd->rect.left;
+    p->y += hwnd->rect.top;
+    return TRUE;
+}
+
+// With GTK, the last pointer position over a window (Wayland has no global
+// coordinates; client and screen coordinates coincide here)
+BOOL GetCursorPos(POINT* point) {
+    if (!point) return FALSE;
+    *point = tinta::gtk::active() ? tinta::gtk::cursorPos() : POINT{0, 0};
+    return TRUE;
+}
+
+// The newest visible window under the point (windows of this process only)
+HWND WindowFromPoint(POINT point) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto it = state().windows.rbegin(); it != state().windows.rend(); ++it) {
+        HWND w = *it;
+        if (!w->destroyed && w->visible && PtInRect(&w->rect, point)) return w;
+    }
+    return nullptr;
+}
+
+BOOL PtInRect(const RECT* r, POINT p) {
+    return r && p.x >= r->left && p.x < r->right && p.y >= r->top && p.y < r->bottom;
+}
+
+// The window losing capture hears about it (WM_CAPTURECHANGED, lParam = the
+// new capture window), as on Windows; drags cancel on it
+HWND SetCapture(HWND hwnd) {
+    HWND old;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        old = state().capture;
+        state().capture = hwnd;
+    }
+    if (old && old != hwnd) SendMessageW(old, WM_CAPTURECHANGED, 0, reinterpret_cast<LPARAM>(hwnd));
+    return old;
+}
+
+BOOL ReleaseCapture() {
+    HWND old;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        old = state().capture;
+        state().capture = nullptr;
+    }
+    if (old) SendMessageW(old, WM_CAPTURECHANGED, 0, 0);
+    return TRUE;
+}
+
+HWND GetCapture() { return state().capture; }
+
+// Cursors are their resource ids; the window layer maps them to GDK names
+HCURSOR LoadCursorW(HINSTANCE, LPCWSTR name) { return reinterpret_cast<HCURSOR>(const_cast<LPWSTR>(name)); }
+
+HCURSOR SetCursor(HCURSOR cursor) {
+    HCURSOR old = state().cursor;
+    state().cursor = cursor;
+    if (cursor != old && tinta::gtk::active()) tinta::gtk::setCursor(reinterpret_cast<LPCWSTR>(cursor));
+    return old;
+}
+
+namespace {
+
+// The app icon's PNG at `size` px: the hicolor copy installed beside the
+// binary (AppImage, Flatpak, an install prefix), or the source tree's when
+// run from a build. Premultiplied BGRA, as WIC and D2D bitmaps keep it.
+bool loadAppIcon(int size, tinta::PixelBuffer& out) {
+    std::vector<std::string> candidates;
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n > 0) {
+        exe[n] = 0;
+        std::string dir(exe);
+        dir.resize(dir.find_last_of('/'));
+        candidates.push_back(dir + "/../share/icons/hicolor/" + std::to_string(size) + "x" +
+                             std::to_string(size) + "/apps/tinta.png");
+    }
+#ifdef TINTA_SOURCE_ICON_DIR
+    candidates.push_back(std::string(TINTA_SOURCE_ICON_DIR) + "/tinta-" + std::to_string(size) + ".png");
+#endif
+    for (const std::string& path : candidates) {
+        cairo_surface_t* png = cairo_image_surface_create_from_png(path.c_str());
+        if (cairo_surface_status(png) != CAIRO_STATUS_SUCCESS) {
+            cairo_surface_destroy(png);
+            continue;
+        }
+        // Draw into ARGB32 so an opaque (RGB24) PNG gets its alpha too
+        int w = cairo_image_surface_get_width(png);
+        int h = cairo_image_surface_get_height(png);
+        cairo_surface_t* argb = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        cairo_t* cr = cairo_create(argb);
+        cairo_set_source_surface(cr, png, 0, 0);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        cairo_surface_flush(argb);
+        out.width = w;
+        out.height = h;
+        out.stride = cairo_image_surface_get_stride(argb);
+        const unsigned char* data = cairo_image_surface_get_data(argb);
+        out.pixels.assign(data, data + static_cast<size_t>(out.stride) * h);
+        cairo_surface_destroy(argb);
+        cairo_surface_destroy(png);
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+HICON LoadIconW(HINSTANCE, LPCWSTR) { return nullptr; }
+
+// Only the app icon exists here (IDI_ICON1, the caption's menu button),
+// at the smallest installed size that covers the request
+HANDLE LoadImageW(HINSTANCE, LPCWSTR name, UINT type, int cx, int cy, UINT) {
+    if (type != IMAGE_ICON || reinterpret_cast<ULONG_PTR>(name) <= 0xFFFF || std::wcscmp(name, L"IDI_ICON1") != 0) {
+        return nullptr;
+    }
+    int want = std::max({cx, cy, 1});
+    int size = 256;
+    for (int s : {16, 32, 48, 256}) {
+        if (s >= want) {
+            size = s;
+            break;
+        }
+    }
+    auto* icon = new HICON__;
+    if (!loadAppIcon(size, icon->pixels)) {
+        delete icon;
+        return nullptr;
+    }
+    return icon;
+}
+
+BOOL DestroyIcon(HICON icon) {
+    delete icon;
+    return TRUE;
+}
+BOOL TrackMouseEvent(TRACKMOUSEEVENT*) { return TRUE; }
+
+// ---- Messages and timers ---------------------------------------------------------------------
+UINT_PTR SetTimer(HWND hwnd, UINT_PTR id, UINT elapse, TIMERPROC) {
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    auto interval = std::chrono::milliseconds(std::max<UINT>(elapse, 1));
+    for (Timer& t : s.timers) {
+        if (t.hwnd == hwnd && t.id == id) {
+            t.interval = interval;
+            t.due = Clock::now() + interval;
+            s.wake.notify_all();
+            return id;
+        }
+    }
+    s.timers.push_back(Timer{hwnd, id, interval, Clock::now() + interval});
+    s.wake.notify_all();
+    return id;
+}
+
+BOOL KillTimer(HWND hwnd, UINT_PTR id) {
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    auto before = s.timers.size();
+    s.timers.erase(std::remove_if(s.timers.begin(), s.timers.end(),
+                                  [&](const Timer& t) { return t.hwnd == hwnd && t.id == id; }),
+                   s.timers.end());
+    return s.timers.size() != before;
+}
+
+BOOL PostMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.queue.push_back(MSG{hwnd, msg, wParam, lParam, 0, {0, 0}});
+    s.wake.notify_all();
+    if (tinta::gtk::active()) tinta::gtk::wake();  // any thread
+    return TRUE;
+}
+
+LRESULT SendMessageW(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (hwnd && hwnd->remote) {
+        if (msg != WM_COPYDATA || !lParam) return 0;
+        return tinta::gtk::sendRemoteCopyData(*reinterpret_cast<const COPYDATASTRUCT*>(lParam));
+    }
+    if (!hwnd || !hwnd->proc) return 0;
+    return hwnd->proc(hwnd, msg, wParam, lParam);
+}
+
+void PostQuitMessage(int code) {
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.quit = true;
+    s.quitCode = code;
+    s.wake.notify_all();
+}
+
+BOOL PeekMessageW(MSG* msg, HWND hwnd, UINT min, UINT max, UINT remove) {
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    fireTimers(s);
+    return takeMessage(s, msg, hwnd, min, max, (remove & PM_REMOVE) != 0) || takePaint(s, msg, hwnd, min, max);
+}
+
+BOOL GetMessageW(MSG* msg, HWND hwnd, UINT min, UINT max) {
+    State& s = state();
+    // A headless capture runs in place of the first wait for input
+    static bool captured = false;
+    if (!captured && !tinta::headless().renderPng.empty()) {
+        captured = true;
+        PostQuitMessage(runCapture());
+    }
+    // Interactive: GTK's main loop runs while the queue is empty, and its
+    // input handlers fill the queue
+    while (tinta::gtk::active()) {
+        int timeoutMs = -1;
+        {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            Clock::time_point next = fireTimers(s);
+            if (takeMessage(s, msg, hwnd, min, max, true)) return msg->message != WM_QUIT;
+            if (!s.quit && takePaint(s, msg, hwnd, min, max)) return TRUE;
+            if (s.quit) {
+                *msg = MSG{nullptr, WM_QUIT, static_cast<WPARAM>(s.quitCode), 0, 0, {0, 0}};
+                return FALSE;
+            }
+            if (next != Clock::time_point::max()) {
+                auto wait = std::chrono::ceil<std::chrono::milliseconds>(next - Clock::now()).count();
+                timeoutMs = static_cast<int>(std::max<long long>(0, wait));
+            }
+        }
+        tinta::gtk::waitForEvents(timeoutMs);
+    }
+    std::unique_lock<std::mutex> lock(s.mutex);
+    while (true) {
+        Clock::time_point next = fireTimers(s);
+        if (takeMessage(s, msg, hwnd, min, max, true)) return msg->message != WM_QUIT;
+        if (!s.quit && takePaint(s, msg, hwnd, min, max)) return TRUE;
+        if (s.quit) {
+            *msg = MSG{nullptr, WM_QUIT, static_cast<WPARAM>(s.quitCode), 0, 0, {0, 0}};
+            return FALSE;
+        }
+        if (next == Clock::time_point::max()) s.wake.wait(lock);
+        else s.wake.wait_until(lock, next);
+    }
+}
+
+// A key with text gets its WM_CHAR next, ahead of later input
+BOOL TranslateMessage(const MSG* msg) {
+    std::vector<wchar_t> chars;
+    if (!msg || !tinta::gtk::active() || !tinta::gtk::charForKey(*msg, chars)) return FALSE;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto it = chars.rbegin(); it != chars.rend(); ++it) {
+        state().queue.push_front(MSG{msg->hwnd, WM_CHAR, static_cast<WPARAM>(*it), msg->lParam & 0xFFFFFFFF, 0, {0, 0}});
+    }
+    return TRUE;
+}
+
+LRESULT DispatchMessageW(const MSG* msg) {
+    if (!msg || !msg->hwnd || !msg->hwnd->proc) return 0;
+    return msg->hwnd->proc(msg->hwnd, msg->message, msg->wParam, msg->lParam);
+}
+
+// ---- Metrics, monitors, DPI ---------------------------------------------------------------
+int GetSystemMetrics(int index) { return GetSystemMetricsForDpi(index, 96); }
+
+int GetSystemMetricsForDpi(int index, UINT) {
+    switch (index) {
+        case SM_CXSCREEN:
+        case SM_CXVIRTUALSCREEN: return 1920;
+        case SM_CYSCREEN:
+        case SM_CYVIRTUALSCREEN: return 1080;
+        case SM_CXDRAG:
+        case SM_CYDRAG: return 4;
+        case SM_CXSIZEFRAME:
+        case SM_CYSIZEFRAME: return 4;
+        case SM_CXPADDEDBORDER: return 4;
+        default: return 0;
+    }
+}
+
+UINT GetDpiForWindow(HWND hwnd) {
+    if (hwnd && hwnd->native) return static_cast<UINT>(96.0 * tinta::gtk::scale(hwnd) + 0.5);
+    return tinta::headless().dpi;
+}
+BOOL SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT) { return TRUE; }
+
+HMONITOR MonitorFromWindow(HWND, DWORD) { return reinterpret_cast<HMONITOR>(1); }
+HMONITOR MonitorFromRect(const RECT*, DWORD) { return reinterpret_cast<HMONITOR>(1); }
+
+BOOL GetMonitorInfoW(HMONITOR, MONITORINFO* info) {
+    if (!info) return FALSE;
+    info->rcMonitor = {0, 0, 1920, 1080};
+    info->rcWork = {0, 0, 1920, 1080};
+    info->dwFlags = 1;
+    return TRUE;
+}
+
+// ---- Menus, message boxes, DWM ------------------------------------------------------------
+HMENU GetSystemMenu(HWND, BOOL) { return nullptr; }
+HMENU CreatePopupMenu() { return nullptr; }
+BOOL AppendMenuW(HMENU, UINT, UINT_PTR, LPCWSTR) { return TRUE; }
+BOOL DestroyMenu(HMENU) { return TRUE; }
+BOOL TrackPopupMenu(HMENU, UINT, int, int, int, HWND, const RECT*) { return FALSE; }
+
+// Headless: report on stderr and take the safe answer (no, cancel)
+int MessageBoxW(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type) {
+    if (tinta::gtk::active()) return tinta::gtk::messageBox(owner, text, caption, type);
+    std::fprintf(stderr, "[%ls] %ls\n", caption ? caption : L"Tinta Mono", text ? text : L"");
+    switch (type & 0xF) {
+        case MB_YESNO: return IDNO;
+        case MB_YESNOCANCEL:
+        case MB_OKCANCEL: return IDCANCEL;
+        default: return IDOK;
+    }
+}
+
+BOOL MessageBeep(UINT) { return TRUE; }
+HRESULT DwmSetWindowAttribute(HWND, DWORD, const void*, DWORD) { return S_OK; }
+HRESULT DwmExtendFrameIntoClientArea(HWND, const void*) { return S_OK; }
+
+// ---- GDI: only the tab drag ghost and print DCs use it ----------------------------------------
+HDC GetDC(HWND) { return nullptr; }
+int ReleaseDC(HWND, HDC) { return 1; }
+HDC CreateCompatibleDC(HDC) { return nullptr; }
+BOOL DeleteDC(HDC) { return TRUE; }
+HGDIOBJ SelectObject(HDC, HGDIOBJ) { return nullptr; }
+BOOL DeleteObject(HGDIOBJ) { return TRUE; }
+HBITMAP CreateDIBSection(HDC, const BITMAPINFO*, UINT, void** bits, HANDLE, DWORD) {
+    if (bits) *bits = nullptr;
+    return nullptr;
+}
+HBRUSH CreateSolidBrush(COLORREF) { return nullptr; }
+int SetBkMode(HDC, int) { return 0; }
+COLORREF SetTextColor(HDC, COLORREF) { return 0; }
+int DrawTextW(HDC, LPCWSTR, int, RECT*, UINT) { return 0; }
+int GetDeviceCaps(HDC, int index) { return index == LOGPIXELSX || index == LOGPIXELSY ? 96 : 0; }
+HRGN CreateRectRgn(int, int, int, int) { return nullptr; }
+HRGN CreateRoundRectRgn(int, int, int, int, int, int) { return nullptr; }
+BOOL FillRgn(HDC, HRGN, HBRUSH) { return TRUE; }
+BOOL FrameRgn(HDC, HRGN, HBRUSH, int, int) { return TRUE; }
+BOOL UpdateLayeredWindow(HWND, HDC, POINT*, SIZE*, HDC, POINT*, COLORREF, BLENDFUNCTION*, DWORD) { return FALSE; }
+HFONT CreateFontW(int, int, int, int, int, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, LPCWSTR) {
+    return nullptr;
+}
+
+int MulDiv(int number, int numerator, int denominator) {
+    if (denominator == 0) return -1;
+    long long product = static_cast<long long>(number) * numerator;
+    long long half = (product < 0) != (denominator < 0) ? -denominator / 2 : denominator / 2;
+    return static_cast<int>((product + half) / denominator);
+}
+
+// ---- Clipboard: in-process formats; with GTK, text also crosses to the desktop ---------------
+namespace {
+bool g_clipboardChanged = false;  // set since OpenClipboard: CloseClipboard publishes
+}  // namespace
+
+BOOL OpenClipboard(HWND hwnd) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    state().clipboardOpener = hwnd;
+    g_clipboardChanged = false;
+    return TRUE;
+}
+
+// What this process put on the clipboard reaches the desktop: an image when
+// there is a "PNG" (Tinta's copy-diagram-as-image), else the text
+BOOL CloseClipboard() {
+    if (!tinta::gtk::active()) return TRUE;
+    std::wstring text;
+    std::string png;
+    bool publish = false;
+    {
+        std::lock_guard<std::mutex> lock(state().mutex);
+        publish = g_clipboardChanged;
+        g_clipboardChanged = false;
+        auto pngFormat = state().clipboardFormats.find(L"PNG");
+        auto image = pngFormat == state().clipboardFormats.end() ? state().clipboard.end()
+                                                                 : state().clipboard.find(pngFormat->second);
+        auto it = state().clipboard.find(CF_UNICODETEXT);
+        if (publish && image != state().clipboard.end()) {
+            if (auto* bytes = static_cast<const char*>(GlobalLock(image->second))) {
+                png.assign(bytes, GlobalSize(image->second));
+                GlobalUnlock(image->second);
+            }
+        } else if (publish && it != state().clipboard.end()) {
+            if (auto* chars = static_cast<const wchar_t*>(GlobalLock(it->second))) {
+                text.assign(chars, wcsnlen(chars, GlobalSize(it->second) / sizeof(wchar_t)));
+                GlobalUnlock(it->second);
+            }
+        } else {
+            publish = false;
+        }
+    }
+    if (publish && !png.empty()) tinta::gtk::publishClipboardImage(png);
+    else if (publish) tinta::gtk::publishClipboardText(text);
+    return TRUE;
+}
+
+namespace {
+
+// Text another application put on the clipboard, as CF_UNICODETEXT (the
+// clipboard keeps the handle, as on Windows)
+HANDLE desktopClipboardText() {
+    std::wstring text;
+    if (!tinta::gtk::readClipboardText(text)) return nullptr;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+    if (auto* to = static_cast<wchar_t*>(GlobalLock(memory))) {
+        wmemcpy(to, text.c_str(), text.size() + 1);
+        GlobalUnlock(memory);
+    }
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto& slot = state().clipboard[CF_UNICODETEXT];
+    if (slot) GlobalFree(slot);
+    slot = memory;
+    return memory;
+}
+
+// Its image, as the "PNG" format (the clipboard keeps the handle)
+HANDLE desktopClipboardPng(UINT format) {
+    std::string png;
+    if (!tinta::gtk::readClipboardImagePng(png)) return nullptr;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, png.size());
+    if (void* to = GlobalLock(memory)) {
+        std::memcpy(to, png.data(), png.size());
+        GlobalUnlock(memory);
+    }
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto& slot = state().clipboard[format];
+    if (slot) GlobalFree(slot);
+    slot = memory;
+    return memory;
+}
+
+bool desktopOwnsClipboard() { return tinta::gtk::active() && !tinta::gtk::clipboardIsLocal(); }
+
+}  // namespace
+
+// As on Windows, emptying makes the opener the owner
+BOOL EmptyClipboard() {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto& entry : state().clipboard) GlobalFree(entry.second);
+    state().clipboard.clear();
+    state().clipboardOwner = state().clipboardOpener;
+    return TRUE;
+}
+
+HWND GetClipboardOwner() {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    return state().clipboardOwner;
+}
+
+// Formats in ascending order; 0 ends the enumeration
+UINT EnumClipboardFormats(UINT format) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto it = state().clipboard.upper_bound(format);
+    return it == state().clipboard.end() ? 0 : it->first;
+}
+
+HANDLE OleDuplicateData(HANDLE source, CLIPFORMAT, UINT) {
+    SIZE_T size = GlobalSize(source);
+    HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, size);
+    void* from = GlobalLock(source);
+    void* to = GlobalLock(copy);
+    if (from && to && size) std::memcpy(to, from, size);
+    if (from) GlobalUnlock(source);
+    if (to) GlobalUnlock(copy);
+    return copy;
+}
+
+BOOL DeleteMetaFile(HMETAFILE) { return TRUE; }
+BOOL DeleteEnhMetaFile(HENHMETAFILE) { return TRUE; }
+
+namespace {
+
+// OleGetClipboard's snapshot: every format's bytes at the time of the call
+class ClipboardSnapshot final : public TintaComObject<IDataObject> {
+public:
+    using Primary = IDataObject;
+    HRESULT QueryInterface(REFIID riid, void** object) override {
+        return tinta_query<IDataObject>(this, riid, object);
+    }
+    std::vector<std::pair<UINT, std::vector<unsigned char>>> formats;
+};
+
+}  // namespace
+
+HRESULT OleInitialize(void*) { return S_OK; }
+void OleUninitialize() {}
+
+HRESULT OleGetClipboard(IDataObject** dataObject) {
+    if (!dataObject) return E_POINTER;
+    auto* snapshot = new ClipboardSnapshot();
+    std::lock_guard<std::mutex> lock(state().mutex);
+    for (auto& [format, memory] : state().clipboard) {
+        SIZE_T size = GlobalSize(memory);
+        auto* bytes = static_cast<unsigned char*>(GlobalLock(memory));
+        snapshot->formats.push_back({format, std::vector<unsigned char>(bytes, bytes + (bytes ? size : 0))});
+        if (bytes) GlobalUnlock(memory);
+    }
+    *dataObject = snapshot;
+    return S_OK;
+}
+
+HRESULT OleSetClipboard(IDataObject* dataObject) {
+    auto* snapshot = dynamic_cast<ClipboardSnapshot*>(dataObject);
+    if (dataObject && !snapshot) return E_NOTIMPL;  // only snapshots of this clipboard
+    OpenClipboard(nullptr);
+    EmptyClipboard();
+    if (snapshot) {
+        for (const auto& [format, bytes] : snapshot->formats) {
+            HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+            if (void* to = GlobalLock(memory)) {
+                if (!bytes.empty()) std::memcpy(to, bytes.data(), bytes.size());
+                GlobalUnlock(memory);
+            }
+            SetClipboardData(format, memory);
+        }
+    }
+    CloseClipboard();
+    return S_OK;
+}
+
+HRESULT OleFlushClipboard() { return S_OK; }
+
+HANDLE SetClipboardData(UINT format, HANDLE memory) {
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto& slot = state().clipboard[format];
+    if (slot && slot != memory) GlobalFree(slot);
+    slot = memory;
+    g_clipboardChanged = true;
+    return memory;
+}
+
+HANDLE GetClipboardData(UINT format) {
+    if (desktopOwnsClipboard()) {
+        if (format == CF_UNICODETEXT) return desktopClipboardText();
+        if (format == RegisterClipboardFormatW(L"PNG")) return desktopClipboardPng(format);
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto it = state().clipboard.find(format);
+    return it == state().clipboard.end() ? nullptr : it->second;
+}
+
+BOOL IsClipboardFormatAvailable(UINT format) {
+    if (desktopOwnsClipboard()) {
+        if (format == CF_UNICODETEXT) return tinta::gtk::clipboardHasText();
+        return format == RegisterClipboardFormatW(L"PNG") && tinta::gtk::clipboardHasImage();
+    }
+    std::lock_guard<std::mutex> lock(state().mutex);
+    return state().clipboard.count(format) ? TRUE : FALSE;
+}
+
+UINT RegisterClipboardFormatW(LPCWSTR name) {
+    if (!name) return 0;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    auto it = state().clipboardFormats.find(name);
+    if (it != state().clipboardFormats.end()) return it->second;
+    UINT id = state().nextClipboardFormat++;
+    state().clipboardFormats[name] = id;
+    return id;
+}
+
+// WM_DROPFILES' HDROP: the dropped paths (gtk_window.cpp makes them)
+UINT DragQueryFileW(HDROP drop, UINT index, LPWSTR file, UINT size) {
+    if (!drop) return 0;
+    if (index == 0xFFFFFFFF) return static_cast<UINT>(drop->files.size());
+    if (index >= drop->files.size()) return 0;
+    const std::wstring& path = drop->files[index];
+    if (!file) return static_cast<UINT>(path.size());
+    if (size == 0) return 0;
+    UINT n = std::min(static_cast<UINT>(path.size()), size - 1);
+    wmemcpy(file, path.c_str(), n);
+    file[n] = 0;
+    return n;
+}
+
+void DragFinish(HDROP drop) { delete drop; }
+void DragAcceptFiles(HWND, BOOL) {}
+
+// ---- IME: the window's GtkIMContext (gtk_window.cpp); composed text arrives as WM_CHAR --------
+HIMC ImmGetContext(HWND hwnd) { return reinterpret_cast<HIMC>(hwnd); }
+BOOL ImmReleaseContext(HWND, HIMC) { return TRUE; }
+
+// The caret the candidate window follows (Tinta sets it on WM_IME_STARTCOMPOSITION)
+BOOL ImmSetCompositionWindow(HIMC imc, COMPOSITIONFORM* form) {
+    if (!imc || !form) return FALSE;
+    tinta::gtk::setImeCaret(reinterpret_cast<HWND>(imc), form->ptCurrentPos);
+    return TRUE;
+}
+
+BOOL ImmSetCandidateWindow(HIMC, CANDIDATEFORM*) { return TRUE; }
+LONG ImmGetCompositionStringW(HIMC, DWORD, void*, DWORD) { return 0; }
+
+// ---- Common dialogs: GtkFileDialog (portals where available); headless runs cancel ------------
+BOOL GetOpenFileNameW(OPENFILENAMEW* ofn) { return tinta::gtk::active() && tinta::gtk::fileDialog(ofn, false); }
+BOOL GetSaveFileNameW(OPENFILENAMEW* ofn) { return tinta::gtk::active() && tinta::gtk::fileDialog(ofn, true); }
+BOOL PrintDlgW(PRINTDLGW*) { return FALSE; }
+
+// ---- Tab drags ---------------------------------------------------------------------------------
+bool tintaBeginTabDrag(HWND hwnd, const char* path, const TintaTabDragCard& card, int hotX, int hotY,
+                       UINT doneMessage) {
+    return tinta::gtk::active() && path && *path &&
+           tinta::gtk::beginTabDrag(hwnd, path, card, hotX, hotY, doneMessage);
+}
+
+bool tintaPrintPdf(HWND owner, const char* path) {
+    return tinta::gtk::active() && path && *path && tinta::gtk::printPdf(owner, path);
+}

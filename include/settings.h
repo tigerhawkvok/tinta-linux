@@ -27,6 +27,7 @@ void persistThemeChoice(const App& app);
 void persistEditorMode(const App& app);
 void persistWordCount(const App& app);
 void persistCloseKeepsDrafts(const App& app);
+void persistPasteImage(const App& app);
 // Print margins persist when picked in the preview (#257)
 void persistPrintMargin(const App& app);
 void persistSearchScopes(const App& app);

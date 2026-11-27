@@ -1,0 +1,126 @@
+Exports tinta_merman_set_text_width: render requests size labels with the
+host's line widths (Tinta measures in the faces it draws with, through
+DirectWrite or Pango) under merman's own wrapping and line-height rules,
+instead of merman's built-in width estimates.
+
+--- a/crates/merman-bindings-core/src/lib.rs
++++ b/crates/merman-bindings-core/src/lib.rs
+@@ -532,3 +532,27 @@
+         );
+     }
+ }
++
++// ---- Tinta (cmake/patches/merman-tinta-text-width.patch) ---------------------
++
++/// One line's advance width in CSS px, measured by the host in the faces it
++/// draws labels with.
++#[cfg(feature = "svg")]
++pub type TintaTextWidthFn = std::sync::Arc<dyn Fn(&str, &merman::svg::TextStyle) -> f64 + Send + Sync>;
++
++#[cfg(feature = "svg")]
++static TINTA_TEXT_WIDTH: std::sync::RwLock<Option<TintaTextWidthFn>> = std::sync::RwLock::new(None);
++
++/// Installs (or, with `None`, removes) the host's line-width function. Render
++/// requests without a host text-measurement service then size labels with it
++/// under merman's own wrapping and line-height rules
++/// (`DeterministicTextMeasurer::with_width_callback`).
++#[cfg(feature = "svg")]
++pub fn tinta_set_text_width(width: Option<TintaTextWidthFn>) {
++    *TINTA_TEXT_WIDTH.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = width;
++}
++
++#[cfg(feature = "svg")]
++pub(crate) fn tinta_text_width() -> Option<TintaTextWidthFn> {
++    TINTA_TEXT_WIDTH.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
++}
+--- a/crates/merman-bindings-core/src/render/request.rs
++++ b/crates/merman-bindings-core/src/render/request.rs
+@@ -413,6 +413,19 @@
+             let policy =
+                 TextMeasurementPolicy::host_display(identity, measurer, TextMeasurementPhase::ALL);
+             environment = environment.with_text_measurement_policy(policy);
++        } else if let Some(width) = crate::tinta_text_width() {
++            // Tinta: label widths from the faces it draws with
++            let identity = TextMeasurementProfileIdentity::new(
++                MeasurementProfileId::new("tinta.host-width").expect("static profile id"),
++                "tinta",
++            )
++            .expect("static profile identity");
++            let measurer = merman::svg::DeterministicTextMeasurer::default()
++                .with_width_callback(move |text, style| width(text, style));
++            let policy = TextMeasurementPolicy::uniform(merman::svg::TextMeasurementProfile::new(
++                identity, measurer,
++            ));
++            environment = environment.with_text_measurement_policy(policy);
+         }
+         let parse_options = if self.lenient_parsing {
+             merman::ParseOptions::lenient()
+--- a/crates/merman-ffi/src/lib.rs
++++ b/crates/merman-ffi/src/lib.rs
+@@ -6156,3 +6156,66 @@
+         drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)) });
+     }
+ }
++
++// ---- Tinta (cmake/patches/merman-tinta-text-width.patch) ---------------------
++
++/// Tinta's line-width callback. Strings are UTF-8 and not NUL-terminated;
++/// `size` is the font size in CSS px. Returns the line's advance width in CSS
++/// px, or a negative value to let merman estimate it.
++#[cfg(feature = "svg")]
++pub type TintaTextWidthCallback = unsafe extern "C" fn(
++    text: *const u8,
++    text_len: usize,
++    family: *const u8,
++    family_len: usize,
++    size: f64,
++    weight: *const u8,
++    weight_len: usize,
++    style: *const u8,
++    style_len: usize,
++    user_data: *mut std::ffi::c_void,
++) -> f64;
++
++/// Sizes every later render's labels with `callback` (null restores merman's
++/// estimates). `callback` may be called from any thread while a render runs.
++///
++/// # Safety
++/// `callback` must stay callable, and `user_data` valid for it, until it is
++/// replaced.
++#[cfg(feature = "svg")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn tinta_merman_set_text_width(
++    callback: Option<TintaTextWidthCallback>,
++    user_data: *mut std::ffi::c_void,
++) {
++    use merman::svg::TextMeasurer as _;
++    let width = callback.map(|callback| {
++        let user_data = user_data as usize;
++        let estimate = merman::svg::DeterministicTextMeasurer::default();
++        Arc::new(move |text: &str, style: &merman::svg::TextStyle| -> f64 {
++            let family = style.font_family.as_deref().unwrap_or("");
++            let weight = style.font_weight.as_deref().unwrap_or("");
++            let font_style = style.font_style.as_deref().unwrap_or("");
++            let width = unsafe {
++                callback(
++                    text.as_ptr(),
++                    text.len(),
++                    family.as_ptr(),
++                    family.len(),
++                    style.font_size,
++                    weight.as_ptr(),
++                    weight.len(),
++                    font_style.as_ptr(),
++                    font_style.len(),
++                    user_data as *mut std::ffi::c_void,
++                )
++            };
++            if width.is_finite() && width >= 0.0 {
++                width
++            } else {
++                estimate.measure_html_line_width_px(text, style)
++            }
++        }) as merman_bindings_core::TintaTextWidthFn
++    });
++    merman_bindings_core::tinta_set_text_width(width);
++}

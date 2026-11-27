@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Tinta Mono
+GenericName=Markdown Viewer
+Comment=Fast Markdown, Mermaid and PlantUML viewer and editor
+Exec=tinta %f
+Icon=tinta
+Terminal=false
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;md;mermaid;plantuml;viewer;editor;
+StartupWMClass=tinta
+StartupNotify=true

@@ -554,8 +554,54 @@ ParseResult fail(ParseResult result, size_t line, std::string message) {
 
 } // namespace
 
+std::string stripPreamble(std::string_view source) {
+    std::string out(source);
+    if (out.size() >= 3 && static_cast<unsigned char>(out[0]) == 0xEF &&
+        static_cast<unsigned char>(out[1]) == 0xBB &&
+        static_cast<unsigned char>(out[2]) == 0xBF) {
+        out.replace(0, 3, "   ");
+    }
+
+    struct Line { size_t start, end; std::string_view text; };
+    std::vector<Line> lines;
+    for (size_t start = 0; start <= out.size();) {
+        size_t end = out.find('\n', start);
+        if (end == std::string::npos) end = out.size();
+        lines.push_back({start, end, trim(std::string_view(out).substr(start, end - start))});
+        start = end + 1;
+    }
+    std::vector<bool> blank(lines.size(), false);
+
+    size_t first = 0;
+    while (first < lines.size() && lines[first].text.empty()) first++;
+    if (first < lines.size() && lines[first].text == "---") {
+        for (size_t i = first + 1; i < lines.size(); i++) {
+            if (lines[i].text != "---") continue;
+            for (size_t j = first; j <= i; j++) blank[j] = true;
+            break;
+        }
+    }
+
+    bool inDirective = false;
+    for (size_t i = 0; i < lines.size(); i++) {
+        std::string_view text = lines[i].text;
+        if (!inDirective && startsWithAt(text, 0, "%%{")) inDirective = true;
+        if (!inDirective) continue;
+        blank[i] = true;
+        if (text.size() >= 3 && text.substr(text.size() - 3) == "}%%") inDirective = false;
+    }
+
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (!blank[i]) continue;
+        for (size_t p = lines[i].start; p < lines[i].end; p++) {
+            if (out[p] != '\r') out[p] = ' ';
+        }
+    }
+    return out;
+}
+
 ParseResult parse(std::string_view source) {
-    std::string normalized(source);
+    std::string normalized = stripPreamble(source);
     if (normalized.size() >= 3 &&
         static_cast<unsigned char>(normalized[0]) == 0xEF &&
         static_cast<unsigned char>(normalized[1]) == 0xBB &&
@@ -645,6 +691,7 @@ ParseResult parse(std::string_view source) {
 
             if (!foundHeader) {
                 if (!equalsIgnoreCase(keyword, "flowchart") &&
+                    !equalsIgnoreCase(keyword, "flowchart-elk") &&
                     !equalsIgnoreCase(keyword, "graph")) {
                     return fail(std::move(result), lineNumber,
                                 "Only Mermaid flowchart and graph diagrams are supported");

@@ -1,5 +1,9 @@
 #include "frontmatter_ui.h"
+#include "fs_path.h"
 #include "input.h"
+#include "emacs_keys.h"
+#include "notices.h"
+#include "markdown_copy.h"
 #include "link_target.h"
 #include "annotations.h"
 #include "drafts.h"
@@ -14,12 +18,14 @@
 #include "search_panel.h"
 #include "d2d_init.h"
 #include "settings.h"
+#include "table_format.h"
 #include "render.h"
 #include "overlays.h"
 #include "sidepanels.h"
 #include "signals.h"
 #include "tableedit.h"
 #include "pandoc.h"
+#include "plantuml_app.h"
 #include "print.h"
 #include "export.h"
 #include "i18n.h"
@@ -42,8 +48,9 @@ static HCURSOR cursorIBeam = LoadCursor(nullptr, IDC_IBEAM);
 static HCURSOR cursorSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
 
 static const App::TaskRect* taskRectAt(const App& app);
+static const App::FoldRect* admonitionFoldAt(const App& app);
 static void startPageInvoke(App& app, HWND hwnd, int id);
-static bool tableCopyButtonAt(const App& app, int mouseX, int mouseY);
+static int tableCopyButtonAt(const App& app, int mouseX, int mouseY);
 static bool diagramPngButtonAt(const App& app, int mouseX, int mouseY);
 static bool tableFitButtonAt(const App& app, int mouseX, int mouseY);
 static bool diagramFitButtonAt(const App& app, int mouseX, int mouseY);
@@ -249,7 +256,7 @@ void handleSelectScrollTimer(App& app, HWND hwnd) {
 // Loads a document into the viewer and resets per-document state.
 // Shared by the folder browser's item clicks, path input, and new-file flow.
 bool openDocumentInViewer(App& app, const std::wstring& fullPath) {
-    std::ifstream file(fullPath);
+    std::ifstream file{fsPath(fullPath)};
     if (!file) return false;
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -297,11 +304,13 @@ bool openDocumentInViewer(App& app, const std::wstring& fullPath) {
             updateTextFormats(app);
         }
     }
-    app.focusMermaidOnNextLayout = isMermaidDocumentPath(fullPath);
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(fullPath) ||
+                                   isPlantUmlDocumentPath(fullPath);
     app.contentHeight = 0;
     app.verticalScrollbarVisible = false;
     app.scrollbarContentHeight = 0.0f;
     app.docText.clear();
+    app.docSourceSpans.clear();
     std::wstring().swap(app.docTextLower);
     app.searchMatches.clear();
     clearSelection(app);  // offsets belong to the old docText
@@ -554,6 +563,9 @@ static void themeEditorAdoptBase(App& app, int baseIndex) {
     const D2DTheme& bt = themeAt(baseIndex);
     app.themeEditorTheme = bt;
     app.themeEditorFont = bt.fontFamily;
+    app.themeEditorHeadingFont =
+        (bt.headingFontFamily && bt.headingFontFamily[0]) ? bt.headingFontFamily : L"";
+    app.themeEditorCodeFont = bt.codeFontFamily ? bt.codeFontFamily : L"";
     for (int i = 0; i < 6; i++) {
         app.themeEditorHex[i] = colorToHexW(*themeEditorSlot(app, i));
     }
@@ -571,8 +583,8 @@ static void openThemesIniFile() {
     if (slash == std::wstring::npos) return;
     p = p.substr(0, slash + 1) + L"themes.ini";
     if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::ofstream f(p);
-        f << "; Custom themes: [theme] sections, RRGGBB colors.\n";
+        std::ofstream f{fsPath(p)};
+        f << themesIniTemplate();
     }
     ShellExecuteW(nullptr, L"open", configFilePathForShell(p).c_str(),
                   nullptr, nullptr, SW_SHOWNORMAL);
@@ -588,6 +600,7 @@ static void openThemeEditor(App& app, bool editCurrent) {
     app.themeEditorFontScroll = 0.0f;
     app.themeEditorColorScroll = 0.0f;
     app.themeEditorHeadingsOpen = false;
+    app.themeEditorFontRole = 0;
     app.showSettings = false;
     app.showThemeEditor = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
@@ -656,8 +669,8 @@ static void settingsAction(App& app, HWND hwnd, int action) {
     // language pick base)
     if (action >= SET_KEYS_PICK_BASE) {
         int pick = action - SET_KEYS_PICK_BASE;
-        const char* ids[] = {"windows", "vim", "custom"};
-        if (pick >= 0 && pick < 3) {
+        const char* ids[] = {"windows", "vim", "emacs", "custom"};
+        if (pick >= 0 && pick < 4) {
             Settings s;
             s.keyOverrides = app.keyOverrides;  // session [Keys] for custom
             s.keyProfile = ids[pick];
@@ -718,6 +731,35 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             app.closeKeepsDrafts = !app.closeKeepsDrafts;
             persistCloseKeepsDrafts(app);
             break;
+        case SET_TOGGLE_UPDATES:
+            // Saved with the other settings at exit
+            app.updateCheckEnabled = !app.updateCheckEnabled;
+            break;
+        case SET_CHECK_UPDATES:
+            if (!app.updateCheckRunning) PostMessageW(hwnd, WM_APP_UPDATE_CHECK_NOW, 0, 0);
+            break;
+        case SET_PASTE_ASK:
+        case SET_PASTE_ASSETS:
+        case SET_PASTE_INLINE:
+        case SET_PASTE_OFF: {
+            static const char* modes[] = {"ask", "assets", "inline", "off"};
+            app.pasteImageMode = modes[action - SET_PASTE_ASK];
+            persistPasteImage(app);
+            break;
+        }
+        case SET_MAKE_DEFAULT:
+            if (registerFileAssociation()) {
+                openDefaultAppsSettings();
+                signalHintKey(app, SIGI_CHECK, "settings.set_default.done");
+            } else {
+                signalPushKey(app, SIG_WARN, SIGI_WARNING, "settings.set_default.failed");
+            }
+            break;
+        case SET_OPEN_LICENSES:
+            // The third-party notices open as a document tab
+            closeSettings(app, hwnd);
+            openThirdPartyNotices(app, hwnd);
+            return;
         case SET_TOGGLE_HEADRULES:
             app.headingRules = !app.headingRules;
             // Layout shifts (the rule adds height), so a repaint alone
@@ -736,6 +778,28 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (runOpenFileDialog(ofn)) {
                 pandocSetUserPath(app, path);
+            }
+            break;
+        }
+        case SET_LOCATE_PLANTUML: {
+            // The picker accepts a plantuml.exe or a plantuml.jar; a jar
+            // resolves java.exe from PATH (no second java setting).
+            wchar_t path[MAX_PATH]{};
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter =
+                L"PlantUML or Java (*.exe;*.jar)\0*.exe;*.jar\0"
+                L"Executables (*.exe)\0*.exe\0"
+                L"Java archives (*.jar)\0*.jar\0\0";
+            ofn.lpstrFile = path;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            // Through the shared helper: the dialog must not move the
+            // working directory (#253), where a java.exe beside the jar
+            // would then be found before PATH
+            if (runOpenFileDialog(ofn)) {
+                plantumlSetUserPath(app, path);
             }
             break;
         }
@@ -860,15 +924,24 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         return;
     }
 
-    // Edit mode: the wheel scrolls the editor from either pane — the preview
-    // follows through the scroll-anchor sync, so the panes cannot drift
-    // apart and both sides always respond (#77)
+    // Edit mode: linked scrolling. The wheel scrolls the pane under the
+    // pointer and the other follows through the scroll anchors, so the
+    // panes cannot drift apart (#77) and the preview moves by its own
+    // pixels, not by editor lines
     if (app.editMode && !app.editorReadingPreview) {
         float sepX = app.editorShowPreview
             ? app.width * app.editorSplitRatio
             : static_cast<float>(app.width);
         if (ctrl && app.mouseX < sepX) {
             applyZoomDelta(app, delta);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
+        if (!ctrl && app.editorShowPreview && app.mouseX >= sepX && !app.scrollAnchors.empty()) {
+            float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
+            app.scrollY = std::clamp(app.scrollY - delta * dpi(app, 60.0f), 0.0f, maxScroll);
+            app.targetScrollY = app.scrollY;
+            editorPreviewTakesLead(app);
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
         }
@@ -979,6 +1052,7 @@ static bool moveDocumentScrollbarDrag(App& app, HWND hwnd) {
                 const float deltaY = (float)app.mouseY - app.scrollbarDragStartY;
                 app.scrollY = std::clamp(app.scrollbarDragStartScroll + deltaY / trackHeight * maxScroll, 0.0f, maxScroll);
                 app.targetScrollY = app.scrollY;
+                editorPreviewTakesLead(app);  // linked scrolling: the source follows
             }
         }
     } else {
@@ -1554,7 +1628,7 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
                 annotationCopyButtonHit(app, (float)app.mouseX,
                                         (float)app.mouseY))) {
         SetCursor(cursorHand);
-    } else if (taskRectAt(app) != nullptr) {
+    } else if (taskRectAt(app) != nullptr || admonitionFoldAt(app) != nullptr) {
         SetCursor(cursorHand);
     } else if (app.hoveredCodeBlock >= 0) {
         // Show hand cursor only when over the copy button area
@@ -1611,7 +1685,7 @@ static void invokeContextMenuAction(App& app, HWND hwnd, int item) {
     switch (item) {
         case CTX_COPY:
             if (app.hasSelection && app.selAnchor != app.selFocus) {
-                std::wstring selected = selectionTextForRange(
+                std::wstring selected = copyTextForRange(
                     app, std::min(app.selAnchor, app.selFocus),
                     std::max(app.selAnchor, app.selFocus));
                 if (selected.empty()) break;
@@ -1725,7 +1799,8 @@ void handleContextMenu(App& app, HWND hwnd, LPARAM lParam) {
     // App panels own both mouse buttons in either reading or editing mode.
     if (app.showSettings || app.showHelp || app.showThemeChooser ||
         app.showThemeEditor || app.showShortcutEditor || app.showPrintPreview ||
-        app.confirmExitPending || app.createRefPending || app.showLightbox) return;
+        app.confirmExitPending || app.createRefPending || app.pasteImagePending ||
+        app.showLightbox) return;
     closeContextMenu(app);
     POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     bool fromKeyboard = pt.x == -1 && pt.y == -1;
@@ -1837,6 +1912,19 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         }
         return;
     }
+    // The paste-image card belongs to this document's editor: a press
+    // anywhere else (the tab strip included) cancels it and does nothing
+    // more, so no tab switch or menu leaves it pending over another
+    // document. Its own buttons act on the release.
+    if (app.pasteImagePending) {
+        const D2D1_RECT_F& card = app.promptChipRect;
+        float px = (float)GET_X_LPARAM(lParam), py = (float)GET_Y_LPARAM(lParam);
+        if (px < card.left || px > card.right || py < card.top || py > card.bottom) {
+            editorPasteImage(app, hwnd, kPasteCancel);
+            app.swallowNextMouseUp = true;
+        }
+        return;
+    }
     if (appMenuButtonAt(app, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam))) {
         if (appMenuAvailable(app)) {
             app.appMenuPressed = true;
@@ -1922,7 +2010,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     if (app.editMode && app.confirmExitPending) return;
     // Create-missing-reference dialog: buttons act on the release; the
     // press must not start a document selection underneath it
-    if (app.createRefPending) return;
+    if (app.createRefPending || app.pasteImagePending) return;
 
     // Print preview: controls act on the release
     if (app.showPrintPreview) return;
@@ -2168,6 +2256,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             clickPos = std::max(0.0f, std::min(clickPos, trackHeight));
             app.scrollY = (clickPos / trackHeight) * maxScroll;
             app.targetScrollY = app.scrollY;
+            editorPreviewTakesLead(app);  // linked scrolling: the source follows
             app.scrollbarDragStartScroll = app.scrollY;
             app.scrollbarDragStartY = (float)app.mouseY;
         }
@@ -2294,7 +2383,7 @@ static bool openWikiLink(App& app, const std::string& target) {
     namespace fs = std::filesystem;
     std::error_code ec;
     std::wstring wideTarget = toWide(target);
-    fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
+    fs::path dir = fsPath(toWide(app.currentFile)).parent_path();
 
     auto tryOpen = [&](const fs::path& p) {
         return fs::exists(p, ec) && !fs::is_directory(p, ec) &&
@@ -2339,7 +2428,7 @@ static void offerCreateFileRef(App& app, const std::string& url) {
     if (qmd::fileRefIsExternal(path)) {
         auto wide = toWide(path);
         signalPushKey(app, SIG_WARN, SIGI_FILE, "toast.file_missing",
-                      std::filesystem::path(wide).filename().wstring(), wide);
+                      fsPath(wide).filename().wstring(), wide);
         return;
     }
     app.createRefPath = std::move(path);
@@ -2367,7 +2456,7 @@ static bool openFileRefTarget(App& app, HWND hwnd, const std::string& url) {
                 ? "toast.file_missing" : error == ERROR_NO_ASSOCIATION
                 ? "toast.file_no_app" : "toast.file_open_failed";
             signalPushKey(app, SIG_ERROR, SIGI_FILE, message,
-                          std::filesystem::path(wide).filename().wstring(), wide);
+                          fsPath(wide).filename().wstring(), wide);
         }
         return false;
     }
@@ -2466,7 +2555,7 @@ static void startPageInvoke(App& app, HWND hwnd, int id) {
 static void createRefAction(App& app, HWND hwnd, int action) {
     app.createRefPending = false;
     if (action == 1 && !app.createRefPath.empty()) {
-        std::filesystem::path target(toWide(app.createRefPath));
+        std::filesystem::path target = fsPath(toWide(app.createRefPath));
         std::error_code ec;
         if (target.has_parent_path()) {
             std::filesystem::create_directories(target.parent_path(), ec);
@@ -2537,6 +2626,20 @@ void navigateForward(App& app, HWND hwnd) {
     }
 }
 
+// A foldable admonition's title bar under the mouse, or nullptr (viewer)
+static const App::FoldRect* admonitionFoldAt(const App& app) {
+    if (app.editMode) return nullptr;
+    float docX = (app.mouseX - documentViewportX(app)) + app.scrollX;
+    float docY = app.mouseY + app.scrollY;
+    for (const auto& fold : app.admonitionFoldRects) {
+        if (docX >= fold.rect.left && docX <= fold.rect.right && docY >= fold.rect.top &&
+            docY <= fold.rect.bottom) {
+            return &fold;
+        }
+    }
+    return nullptr;
+}
+
 // Task checkbox under the mouse, or nullptr (viewer mode only)
 static const App::TaskRect* taskRectAt(const App& app) {
     if (app.editMode) return nullptr;
@@ -2558,7 +2661,7 @@ static const App::TaskRect* taskRectAt(const App& app) {
 static void toggleTaskOnDisk(App& app, HWND hwnd, size_t markOffset, bool wasChecked) {
     if (app.currentFile.empty()) return;
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream in(widePath, std::ios::binary);
+    std::ifstream in(fsPath(widePath), std::ios::binary);
     if (!in) return;
     std::string disk((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
@@ -2578,7 +2681,7 @@ static void toggleTaskOnDisk(App& app, HWND hwnd, size_t markOffset, bool wasChe
     }
     disk[diskPos] = checked ? ' ' : 'x';
 
-    std::ofstream out(widePath, std::ios::binary | std::ios::trunc);
+    std::ofstream out(fsPath(widePath), std::ios::binary | std::ios::trunc);
     if (!out) return;
     out.write(disk.data(), (std::streamsize)disk.size());
     out.close();
@@ -2631,25 +2734,21 @@ static bool diagramPngButtonAt(const App& app, int mouseX, int mouseY) {
            docY >= btnY && docY <= btnY + btnH;
 }
 
-// True when (mouseX, mouseY) is on the hovered table's copy-as-TSV button
-static bool tableCopyButtonAt(const App& app, int mouseX, int mouseY) {
+// The hovered table's copy button under (mouseX, mouseY): 1 Markdown,
+// 2 CSV, 0 none
+static int tableCopyButtonAt(const App& app, int mouseX, int mouseY) {
     if (app.hoveredTable < 0 ||
         app.hoveredTable >= (int)app.tableRects.size()) {
-        return false;
+        return 0;
     }
-    const auto& tb = app.tableRects[app.hoveredTable];
-    float previewOffsetX = documentViewportX(app);
-    float docX = (mouseX - previewOffsetX) + app.scrollX;
+    float docX = (mouseX - documentViewportX(app)) + app.scrollX;
     float docY = mouseY + app.scrollY;
-    float btnW = dpi(app, 88.0f);
-    float btnH = dpi(app, 26.0f);
-    float btnPad = 8.0f * app.contentScale * app.zoomFactor;
-    float rightEdge =
-        std::min(tb.bounds.right, app.scrollX + documentViewportWidth(app));
-    float btnX = rightEdge - btnW - btnPad;
-    float btnY = tb.bounds.top + btnPad;
-    return docX >= btnX && docX <= btnX + btnW &&
-           docY >= btnY && docY <= btnY + btnH;
+    D2D1_RECT_F md, csv, fit;
+    tableButtonRects(app, app.tableRects[app.hoveredTable], md, csv, fit);
+    auto in = [&](const D2D1_RECT_F& r) {
+        return docX >= r.left && docX <= r.right && docY >= r.top && docY <= r.bottom;
+    };
+    return in(md) ? 1 : in(csv) ? 2 : 0;
 }
 
 // True when (mouseX, mouseY) is on the hovered diagram's fit-to-width
@@ -2688,20 +2787,11 @@ static bool tableFitButtonAt(const App& app, int mouseX, int mouseY) {
     }
     const auto& tb = app.tableRects[app.hoveredTable];
     if (!tb.fitCandidate) return false;
-    float previewOffsetX = documentViewportX(app);
-    float docX = (mouseX - previewOffsetX) + app.scrollX;
+    float docX = (mouseX - documentViewportX(app)) + app.scrollX;
     float docY = mouseY + app.scrollY;
-    float btnW = dpi(app, 88.0f);
-    float btnH = dpi(app, 26.0f);
-    float btnPad = 8.0f * app.contentScale * app.zoomFactor;
-    float rightEdge =
-        std::min(tb.bounds.right, app.scrollX + documentViewportWidth(app));
-    float btnX = rightEdge - btnW - btnPad;
-    float fitW = dpi(app, 44.0f);
-    float fitX = btnX - fitW - dpi(app, 6.0f);
-    float btnY = tb.bounds.top + btnPad;
-    return docX >= fitX && docX <= fitX + fitW &&
-           docY >= btnY && docY <= btnY + btnH;
+    D2D1_RECT_F md, csv, fit;
+    tableButtonRects(app, tb, md, csv, fit);
+    return docX >= fit.left && docX <= fit.right && docY >= fit.top && docY <= fit.bottom;
 }
 
 // Flip a table/diagram between natural size and fit-to-width and relayout
@@ -2767,6 +2857,29 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             if (GetCapture() == hwnd) ReleaseCapture();
             if (!app.lightboxDragMoved) closeLightbox(app);
             InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return;
+    }
+
+    // Paste-image card: its buttons and box act; a release on the card's
+    // blank space keeps it, one off it (a press that slid away) cancels
+    if (app.pasteImagePending) {
+        float mx = (float)GET_X_LPARAM(lParam);
+        float my = (float)GET_Y_LPARAM(lParam);
+        for (const auto& hit : app.pasteImageHits) {
+            if (mx >= hit.first.left && mx <= hit.first.right && my >= hit.first.top && my <= hit.first.bottom) {
+                if (hit.second == 9) {
+                    app.pasteImageRemember = !app.pasteImageRemember;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else {
+                    editorPasteImage(app, hwnd, hit.second);
+                }
+                return;
+            }
+        }
+        const D2D1_RECT_F& card = app.promptChipRect;
+        if (mx < card.left || mx > card.right || my < card.top || my > card.bottom) {
+            editorPasteImage(app, hwnd, kPasteCancel);
         }
         return;
     }
@@ -2842,8 +2955,30 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             if (action >= TE_FONT_BASE) {
                 int idx = action - TE_FONT_BASE;
                 if (idx >= 0 && idx < (int)app.systemFontFamilies.size()) {
-                    app.themeEditorFont = app.systemFontFamilies[idx];
+                    std::wstring& face = app.themeEditorFontRole == 1 ? app.themeEditorHeadingFont
+                                       : app.themeEditorFontRole == 2 ? app.themeEditorCodeFont
+                                       : app.themeEditorFont;
+                    face = app.systemFontFamilies[idx];
                 }
+            } else if (action == TE_FONT_SAME) {
+                app.themeEditorHeadingFont.clear();
+            } else if (action >= TE_FONT_TEXT && action <= TE_FONT_CODE) {
+                // Switch the list to another face and scroll to its choice
+                app.themeEditorFontRole = action - TE_FONT_TEXT;
+                const std::wstring& face = app.themeEditorFontRole == 1 ? app.themeEditorHeadingFont
+                                         : app.themeEditorFontRole == 2 ? app.themeEditorCodeFont
+                                         : app.themeEditorFont;
+                int lead = app.themeEditorFontRole == 1 ? 1 : 0;
+                int row = 0;
+                for (size_t i = 0; !face.empty() && i < app.systemFontFamilies.size(); i++) {
+                    if (_wcsicmp(app.systemFontFamilies[i].c_str(), face.c_str()) == 0) {
+                        row = (int)i + lead;
+                        break;
+                    }
+                }
+                float rowH = dpi(app, 26.0f);
+                float listH = app.themeEditorFontListRect.bottom - app.themeEditorFontListRect.top;
+                app.themeEditorFontScroll = std::max(0.0f, row * rowH - (listH - rowH) / 2);
             } else if (action >= TE_FIELD_BG && action <= TE_FIELD_HIGHLIGHT_TEXT) {
                 app.themeEditorField = action - TE_FIELD_BG;
             } else if (action == TE_FIELD_NAME) {
@@ -2865,14 +3000,10 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             } else if (action == TE_SAVE) {
                 std::wstring name = app.themeEditorName.empty()
                     ? L"My theme" : app.themeEditorName;
-                const D2DTheme& base = themeAt(app.themeEditorBase);
-                // Carry the base theme's heading face so deriving from a
-                // theme with headingfont= (Abyss included) keeps its look
-                std::wstring baseHeading =
-                    (base.headingFontFamily && base.headingFontFamily[0])
-                        ? base.headingFontFamily : L"";
-                int idx = saveCustomTheme(app.themeEditorTheme, name,
-                    app.themeEditorFont, base.codeFontFamily, baseHeading);
+                // The heading and code faces start from the base theme's,
+                // so deriving from Abyss keeps its pinned heading face
+                int idx = saveCustomTheme(app.themeEditorTheme, name, app.themeEditorFont,
+                    app.themeEditorCodeFont, app.themeEditorHeadingFont);
                 if (idx >= 0) {
                     // Preview format cache must grow for the chooser
                     for (auto& pf : app.themePreviewFormats) {
@@ -3261,9 +3392,11 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         // Releasing anywhere else on a code block must NOT consume the
         // mouse-up: a drag selection ending on the block would never
         // finalize, stay "selecting", and follow the next mouse move
-        copyToClipboard(hwnd, app.codeBlocks[app.hoveredCodeBlock].codeText);
-        {
-            // The Copied pill keeps its code-block anchor (t13)
+        if (copyToClipboard(
+                hwnd, codeCopyText(app.codeBlocks[app.hoveredCodeBlock].codeText))) {
+            // The Copied pill keeps its code-block anchor (t13). An empty
+            // block, or a clipboard held by another program, copies
+            // nothing and claims nothing.
             D2D1_RECT_F anchor = app.codeBlocks[app.hoveredCodeBlock].bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "codeblock.copied"), L"", L"", SIGA_NONE,
@@ -3277,11 +3410,25 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                        app.codeBlocks[app.hoveredCodeBlock].fitKey);
         app.selecting = false;
     } else if (diagramPngButtonAt(app, app.mouseX, app.mouseY)) {
-        // Diagram image button: 2x raster to the clipboard
-        if (copyDiagramImage(
-                app, hwnd,
-                toUtf8(app.codeBlocks[app.hoveredCodeBlock].codeText))) {
-            D2D1_RECT_F anchor = app.codeBlocks[app.hoveredCodeBlock].bounds;
+        // Diagram image button: 2x raster to the clipboard. A rendered
+        // PlantUML diagram already has a cached PNG - copy that instead of
+        // rebuilding mermaid prims; success shows the same toast as
+        // mermaid, a miss or failure stays silent.
+        const App::CodeBlockInfo& block =
+            app.codeBlocks[app.hoveredCodeBlock];
+        if (block.isPlantuml) {
+            auto hit = app.plantumlQueue
+                           ? app.plantumlQueue->lookup(block.plantumlKey)
+                           : nullptr;
+            if (hit && hit->ok &&
+                copyPlantumlImageToClipboard(app, hit->filePath)) {
+                D2D1_RECT_F anchor = block.bounds;
+                signalPush(app, SIG_SUCCESS, SIGI_CHECK,
+                           tr(app, "diagram.copied"), L"", L"", SIGA_NONE,
+                           SIGC_NONE, true, &anchor);
+            }
+        } else if (copyDiagramImage(app, hwnd, toUtf8(block.codeText))) {
+            D2D1_RECT_F anchor = block.bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "diagram.copied"), L"", L"", SIGA_NONE,
                        SIGC_NONE, true, &anchor);
@@ -3293,10 +3440,14 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         toggleFitBlock(app, hwnd,
                        app.tableRects[app.hoveredTable].fitKey);
         app.selecting = false;
-    } else if (tableCopyButtonAt(app, app.mouseX, app.mouseY)) {
-        // Table copy button: cells joined by tabs paste into a
-        // spreadsheet as a grid
-        copyToClipboard(hwnd, app.tableRects[app.hoveredTable].tsv);
+    } else if (int which = tableCopyButtonAt(app, app.mouseX, app.mouseY)) {
+        // Markdown: the table as written. CSV: every field quoted.
+        const auto& table = app.tableRects[app.hoveredTable];
+        std::wstring payload = table.csv;
+        if (which == 1 && app.root && app.root->source) {
+            payload = toWide(tableMarkdownAt(app.root->source->mapped, table.sourceOffset));
+        }
+        copyToClipboard(hwnd, payload);
         {
             D2D1_RECT_F anchor = app.tableRects[app.hoveredTable].bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
@@ -3334,6 +3485,13 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                 // Click on a task checkbox: flip the mark in the file
                 toggleTaskOnDisk(app, hwnd, task->markOffset, task->checked);
                 app.hasSelection = false;
+            } else if (const App::FoldRect* fold = admonitionFoldAt(app)) {
+                // Click on a foldable admonition's title bar: fold or unfold
+                const std::string key = fold->key;
+                if (!app.admonitionFoldToggled.erase(key)) app.admonitionFoldToggled.insert(key);
+                app.hasSelection = false;
+                app.layoutDirty = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
             } else if (!app.hoveredLink.empty()) {
                 // It was just a click on a link
                 if (app.hoveredLink.rfind("wiki:", 0) == 0) {
@@ -3424,6 +3582,8 @@ static void toggleZenMode(App& app, HWND hwnd) {
 bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     // Typing, scrolling and clicking all put the tab hover card away
     tabHoverCardDismiss(app, hwnd);
+    // The Emacs profile's chords and C-x prefix come first
+    if (emacsKeyDown(app, hwnd, wParam)) return true;
     // Ctrl+Alt+Up/Down add editor carets (#251) before the AltGr guard
     if (editorAltArrowKey(app, hwnd, wParam)) return true;
     if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return false;
@@ -3468,6 +3628,25 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             createRefAction(app, hwnd, 2);
         }
         return false;
+    }
+
+    // Pasting an image: A(ssets), I(nline), S(ave as), R(emember), Enter
+    // takes the first choice, Esc cancels; nothing types
+    if (app.pasteImagePending) {
+        bool hasFolder = !app.currentFile.empty();
+        switch (wParam) {
+            case VK_ESCAPE: editorPasteImage(app, hwnd, kPasteCancel); break;
+            case VK_RETURN: editorPasteImage(app, hwnd, hasFolder ? kPasteAssets : kPasteInline); break;
+            case 'A': if (hasFolder) editorPasteImage(app, hwnd, kPasteAssets); break;
+            case 'I': editorPasteImage(app, hwnd, kPasteInline); break;
+            case 'S': editorPasteImage(app, hwnd, kPasteSaveAs); break;
+            case 'R':
+                app.pasteImageRemember = !app.pasteImageRemember;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                break;
+        }
+        app.swallowCharsUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+        return true;
     }
 
     // Print preview captures the whole keyboard while open
@@ -3697,7 +3876,7 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         if (tableEditKeyDown(app, hwnd, wParam)) return false;
         if (ctrl && wParam == 'C' && app.hasSelection &&
             app.selAnchor != app.selFocus) {
-            std::wstring selected = selectionTextForRange(
+            std::wstring selected = copyTextForRange(
                 app, std::min(app.selAnchor, app.selFocus),
                 std::max(app.selAnchor, app.selFocus));
             if (selected.empty()) return false;
@@ -3808,10 +3987,11 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 break;
             }
             case 'C': {
-                // Copy - copy selected text or all text if select all was used
+                // Copy returns Markdown: the selection's, or (nothing
+                // selected) the whole document as written
                 bool copied = false;
                 if (app.hasSelection && app.selAnchor != app.selFocus) {
-                    std::wstring selected = selectionTextForRange(
+                    std::wstring selected = copyTextForRange(
                         app, std::min(app.selAnchor, app.selFocus),
                         std::max(app.selAnchor, app.selFocus));
                     if (!selected.empty()) {
@@ -3820,9 +4000,8 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                     }
                     app.hasSelection = false;
                 } else if (app.root) {
-                    // If no selection, copy all
-                    std::wstring allText;
-                    extractText(app.root, allText);
+                    std::wstring allText = documentMarkdown(app);
+                    if (allText.empty()) extractText(app.root, allText);
                     copyToClipboard(hwnd, allText);
                     copied = true;
                 }
@@ -4298,7 +4477,7 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
     } else if (app.linkPeekUrl.rfind("wiki:", 0) == 0 &&
                !app.currentFile.empty()) {
         std::wstring t = toWide(app.linkPeekUrl.substr(5));
-        fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
+        fs::path dir = fsPath(toWide(app.currentFile)).parent_path();
         if (fs::exists(dir / t, ec)) {
             target = dir / t;
         } else if (fs::exists(dir / (t + L".md"), ec)) {
@@ -4413,7 +4592,7 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
         if (CompareFileTime(&ft, &app.lastFileWriteTime) != 0) {
             app.lastFileWriteTime = ft;
             // Reload file
-            std::ifstream file(widePath);
+            std::ifstream file{fsPath(widePath)};
             if (file) {
                 std::stringstream buffer;
                 buffer << file.rdbuf();

@@ -1,0 +1,29 @@
+Load only the font files an embedder names in MERMAN_RASTER_FONT_FILES
+(joined like PATH) instead of scanning every system font for the
+raster. Tinta passes the faces a diagram can use, resolved through
+DirectWrite: the scan cost 2.9 s on a managed Windows laptop.
+
+--- a/crates/merman-export/src/lib.rs	2026-10-15 16:41:47.657439668 -0700
++++ b/crates/merman-export/src/lib.rs	2026-10-15 16:41:47.657695306 -0700
+@@ -2884,7 +2884,20 @@
+     static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+     Arc::clone(FONTDB.get_or_init(|| {
+         let mut fontdb = usvg::fontdb::Database::new();
+-        fontdb.load_system_fonts();
++        // An embedder may name the font files to load, joined like PATH
++        // (Tinta). Scanning every system font opens each file, which took
++        // seconds on a managed Windows machine. None of them loadable: scan
++        match std::env::var_os("MERMAN_RASTER_FONT_FILES") {
++            Some(files) if !files.is_empty() => {
++                for path in std::env::split_paths(&files) {
++                    let _ = fontdb.load_font_file(&path);
++                }
++            }
++            _ => {}
++        }
++        if fontdb.is_empty() {
++            fontdb.load_system_fonts();
++        }
+         configure_fontdb_generic_families(&mut fontdb);
+         Arc::new(fontdb)
+     }))

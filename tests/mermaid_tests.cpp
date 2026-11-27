@@ -373,6 +373,55 @@ void testExtBuilders() {
     }
 }
 
+// A leading YAML frontmatter block and %%{ }%% directives (which may span
+// lines) precede the diagram keyword in Mermaid's own docs; neither may push
+// the fence back to plain code
+void testPreamble() {
+    using mermaidext::Kind;
+    using mermaidext::detectKind;
+
+    const char* titled = "---\ntitle: Order flow\n---\nflowchart LR\n  A --> B\n";
+    check(detectKind(titled) == Kind::Flowchart, "frontmatter title before flowchart");
+    auto flow = mermaid::parse(titled);
+    check(flow.success && flow.diagram.nodes.size() == 2,
+          "flowchart after frontmatter parses");
+
+    const char* configured =
+        "---\nconfig:\n  theme: forest\n  sequence:\n    mirrorActors: false\n---\n"
+        "sequenceDiagram\n  Alice->>Bob: hi\n";
+    check(detectKind(configured) == Kind::Sequence, "nested frontmatter config before sequence");
+    check(mermaidext::build(Kind::Sequence, configured, fakeMeasure, 1.0f).ok,
+          "sequence after frontmatter builds");
+
+    const char* directive =
+        "%%{\n  init: {\n    \"theme\": \"base\"\n  }\n}%%\npie title Pets\n  \"Dogs\" : 3\n";
+    check(detectKind(directive) == Kind::Pie, "multi-line init directive before pie");
+    check(mermaidext::build(Kind::Pie, directive, fakeMeasure, 1.0f).ok,
+          "pie after multi-line directive builds");
+
+    const char* both = "---\ntitle: States\n---\n%%{init: {\"theme\": \"dark\"}}%%\n"
+                       "stateDiagram-v2\n  [*] --> Idle\n";
+    check(detectKind(both) == Kind::State, "frontmatter then directive before state");
+    check(mermaidext::build(Kind::State, both, fakeMeasure, 1.0f).ok,
+          "state after frontmatter and directive builds");
+
+    auto bad = mermaid::parse("---\ntitle: T\n---\nflowchart LR\n  A -->\n");
+    check(!bad.success && bad.errorLine == 5,
+          "errors after frontmatter keep source line numbers");
+
+    check(detectKind("---\ntitle: never closed\nflowchart LR\nA-->B\n") == Kind::None,
+          "unclosed frontmatter is not skipped");
+
+    std::string stripped = mermaid::stripPreamble(titled);
+    check(std::count(stripped.begin(), stripped.end(), '\n') == 5,
+          "stripping keeps the line count");
+
+    check(detectKind("flowchart-elk TD\n  A --> B\n") == Kind::Flowchart,
+          "flowchart-elk detected");
+    auto elk = mermaid::parse("flowchart-elk TD\n  A --> B\n");
+    check(elk.success && elk.diagram.nodes.size() == 2, "flowchart-elk parses");
+}
+
 void testExtFallbacks() {
     auto sequence = mermaidext::build(
         mermaidext::Kind::Sequence,
@@ -403,6 +452,7 @@ int main(int argc, char** argv) {
     testLayoutExposesRanks();
     testDetectKind();
     testExtBuilders();
+    testPreamble();
     testExtFallbacks();
     testFiles(argc, argv);
 

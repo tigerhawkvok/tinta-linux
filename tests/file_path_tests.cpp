@@ -76,8 +76,12 @@ void launchFolderRelease() {
     wchar_t original[MAX_PATH];
     GetCurrentDirectoryW(MAX_PATH, original);
     check(SetCurrentDirectoryW(folder.c_str()) != FALSE, "the run starts inside a document folder");
+#ifdef _WIN32
+    // Only Windows refuses to rename a folder some process works in; on Linux
+    // the probe would rename it for real
     check(!MoveFileW(folder.c_str(), renamed.c_str()),
           "a working directory holds its folder (the probe is sound)");
+#endif
     parkWorkingDirectory();
     check(launchDirectory() == folder, "the launch folder is remembered after leaving it");
     check(MoveFileW(folder.c_str(), renamed.c_str()) != FALSE,
@@ -213,17 +217,30 @@ int main(int argc, char** argv) {
     app.tabs[0].path = "C:\\old-name.md";  // live path is authoritative after Save As
     app.tabs[1].path = "C:\\Tinta tests\\inactive document.md";
 
+    std::wstring relativeExpected =
+        (std::filesystem::current_path() / L"tests" / L"fixtures" / L"copy-file-path.md").wstring();
+    std::vector<std::pair<std::string, std::wstring>> cases{
+        {"tests\\..\\tests\\fixtures\\copy-file-path.md", relativeExpected}};
+#ifdef _WIN32
     std::string longPath = "C:\\Tinta tests";
     for (int i = 0; i < 20; ++i) longPath += "\\long folder name";
     longPath += "\\document.md";
-    std::wstring relativeExpected =
-        (std::filesystem::current_path() / L"tests" / L"fixtures" / L"copy-file-path.md").wstring();
-    for (const auto& item : {
-            std::pair<std::string, std::wstring>{"tests\\..\\tests\\fixtures\\copy-file-path.md", relativeExpected},
+    cases.insert(cases.end(), {
             {"C:/Tinta tests/new name.md", L"C:\\Tinta tests\\new name.md"},
             {u8"C:\\Tinta tests\\\u017divot \u6f22\u5b57.md", L"C:\\Tinta tests\\\u017divot \u6f22\u5b57.md"},
             {"\\\\server\\share\\folder name\\document.md", L"\\\\server\\share\\folder name\\document.md"},
-            {longPath, toWide(longPath)}, {"\\\\?\\"+longPath, L"\\\\?\\"+toWide(longPath)}}) {
+            {longPath, toWide(longPath)}, {"\\\\?\\"+longPath, L"\\\\?\\"+toWide(longPath)}});
+#else
+    std::string longPath = "/tmp/Tinta tests";
+    for (int i = 0; i < 20; ++i) longPath += "/long folder name";
+    longPath += "/document.md";
+    cases.insert(cases.end(), {
+            {"/tmp/Tinta tests/new name.md", L"/tmp/Tinta tests/new name.md"},
+            {u8"/tmp/Tinta tests/\u017divot \u6f22\u5b57.md", L"/tmp/Tinta tests/\u017divot \u6f22\u5b57.md"},
+            {"/tmp/Tinta tests/./sub/../document.md", L"/tmp/Tinta tests/document.md"},
+            {longPath, toWide(longPath)}});
+#endif
+    for (const auto& item : cases) {
         app.currentFile = item.first;
         check(absoluteFilePath(item.first) == item.second, "full paths resolve without quoting or truncation");
         if (!testClipboard) continue;

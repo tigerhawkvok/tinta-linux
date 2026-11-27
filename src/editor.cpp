@@ -1,4 +1,6 @@
+#include "emacs_keys.h"
 #include "frontmatter_ui.h"
+#include "fs_path.h"
 #include "editor.h"
 #include "document.h"
 #include "drafts.h"
@@ -17,6 +19,7 @@
 #include "input.h"
 
 #include "export.h"
+#include "table_format.h"
 
 #include <filesystem>
 #include <fstream>
@@ -308,15 +311,162 @@ static size_t editorLineFromRow(const App& app, size_t row) {
     return lo;
 }
 
-// Top visible logical line for the current editor scroll position
-size_t editorTopVisibleLine(App& app) {
+double editorTopByteOffset(App& app) {
+    const auto& lines = app.editorLineByteOffsets;
+    if (lines.empty()) return 0.0;
     float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
-    size_t row = (size_t)std::max(0.0f, app.editorScrollY / lineHeight);
+    double row = std::max(0.0, (double)app.editorScrollY / lineHeight);
+    size_t line = 0;
+    double frac = 0.0;
     if (editorWrapOn(app)) {
         ensureEditorRowMetrics(app);
-        return editorLineFromRow(app, row);
+        line = editorLineFromRow(app, (size_t)row);
+        if (line + 1 < app.editorRowStarts.size()) {
+            double rows = (double)(app.editorRowStarts[line + 1] - app.editorRowStarts[line]);
+            if (rows > 0) frac = (row - (double)app.editorRowStarts[line]) / rows;
+        }
+    } else {
+        line = (size_t)row;
+        frac = row - (double)line;
     }
-    return row;
+    if (line >= lines.size()) return (double)lines.back();
+    double start = (double)lines[line];
+    double next = line + 1 < lines.size() ? (double)lines[line + 1] : start;
+    return start + std::clamp(frac, 0.0, 1.0) * (next - start);
+}
+
+void editorFollowPreview(App& app) {
+    const auto& anchors = app.scrollAnchors;
+    const auto& lines = app.editorLineByteOffsets;
+    if (anchors.empty() || lines.empty()) return;
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
+    float previewMax = std::max(0.0f, app.contentHeight - (float)app.height);
+    if (app.scrollY <= 0.5f) {
+        app.editorScrollY = 0.0f;
+        return;
+    }
+    if (app.scrollY >= previewMax - 0.5f) {  // the ends meet
+        app.editorScrollY = editorMax;
+        return;
+    }
+    // The preview's top edge as a source byte offset, between the anchors
+    // around it (the inverse of the editor-led sync in main_d2d.cpp)
+    float y = app.scrollY + documentContentTop(app);
+    size_t lo = 0, hi = anchors.size();
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (anchors[mid].renderedY <= y) lo = mid;
+        else hi = mid;
+    }
+    double offset = (double)anchors[lo].sourceOffset;
+    if (lo + 1 < anchors.size() && anchors[lo + 1].renderedY > anchors[lo].renderedY) {
+        double t = std::clamp((double)(y - anchors[lo].renderedY) /
+                                  (double)(anchors[lo + 1].renderedY - anchors[lo].renderedY), 0.0, 1.0);
+        offset += t * ((double)anchors[lo + 1].sourceOffset - (double)anchors[lo].sourceOffset);
+    } else if (app.contentHeight > anchors[lo].renderedY && lines.back() > anchors[lo].sourceOffset) {
+        double t = std::clamp((double)(y - anchors[lo].renderedY) /
+                                  (double)(app.contentHeight - anchors[lo].renderedY), 0.0, 1.0);
+        offset += t * ((double)lines.back() - (double)anchors[lo].sourceOffset);
+    }
+    // ...as a line and how far into it, then as an editor row
+    size_t line = (size_t)(std::upper_bound(lines.begin(), lines.end(), (size_t)offset) - lines.begin());
+    line = line ? line - 1 : 0;
+    double start = (double)lines[line];
+    double next = line + 1 < lines.size() ? (double)lines[line + 1] : start + 1.0;
+    double frac = std::clamp((offset - start) / std::max(1.0, next - start), 0.0, 1.0);
+    double row = (double)line + frac;
+    if (editorWrapOn(app)) {
+        ensureEditorRowMetrics(app);
+        if (line + 1 < app.editorRowStarts.size()) {
+            row = (double)app.editorRowStarts[line] +
+                  frac * (double)(app.editorRowStarts[line + 1] - app.editorRowStarts[line]);
+        }
+    }
+    app.editorScrollY = std::clamp((float)(row * lineHeight), 0.0f, editorMax);
+}
+
+void editorPreviewTakesLead(App& app) {
+    if (!app.editMode || !editorPreviewVisible(app) || app.editorReadingPreview) return;
+    app.previewLeads = true;
+    editorFollowPreview(app);
+    app.previewLedEditorScroll = app.editorScrollY;
+}
+
+// Linked scrolling, once a frame before the split editor paints
+void editorSyncPreviewScroll(App& app) {
+    // Linked scrolling between the source and the preview, through the
+    // source-offset anchors: the pane last scrolled leads. An editor that
+    // moved on its own (keys, caret, its wheel or scrollbar) takes the
+    // lead back from the preview.
+    if (editorPreviewVisible(app) && !app.editorReadingPreview && app.previewLeads &&
+        std::fabs(app.editorScrollY - app.previewLedEditorScroll) > 0.5f) {
+        app.previewLeads = false;
+    }
+    if (editorPreviewVisible(app) && !app.editorReadingPreview && app.previewLeads &&
+        !app.scrollAnchors.empty() && !app.editorLineByteOffsets.empty()) {
+        editorFollowPreview(app);
+        app.previewLedEditorScroll = app.editorScrollY;
+    } else if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
+        !app.editorLineByteOffsets.empty()) {
+        // The editor's top edge as a source offset, within its line: the
+        // preview moves smoothly, not a whole line (or a wrapped
+        // paragraph, or a diagram) at a time
+        double topByteOffset = editorTopByteOffset(app);
+
+        // Binary search for the anchor just before this byte offset
+        size_t lo = 0, hi = app.scrollAnchors.size();
+        while (lo + 1 < hi) {
+            size_t mid = (lo + hi) / 2;
+            if ((double)app.scrollAnchors[mid].sourceOffset <= topByteOffset) lo = mid;
+            else hi = mid;
+        }
+
+        // Interpolate between anchor[lo] and anchor[lo+1]
+        float targetY;
+        if (lo + 1 < app.scrollAnchors.size() &&
+            app.scrollAnchors[lo + 1].sourceOffset > app.scrollAnchors[lo].sourceOffset) {
+            float t = (float)((topByteOffset - (double)app.scrollAnchors[lo].sourceOffset) /
+                      (double)(app.scrollAnchors[lo + 1].sourceOffset - app.scrollAnchors[lo].sourceOffset));
+            t = std::max(0.0f, std::min(t, 1.0f));
+            targetY = app.scrollAnchors[lo].renderedY +
+                       t * (app.scrollAnchors[lo + 1].renderedY - app.scrollAnchors[lo].renderedY);
+        } else {
+            // Last anchor or single anchor — use ratio for remaining content
+            targetY = app.scrollAnchors[lo].renderedY;
+            if (app.contentHeight > app.scrollAnchors[lo].renderedY) {
+                size_t lastOffset = app.scrollAnchors[lo].sourceOffset;
+                size_t totalBytes = app.editorLineByteOffsets.back();
+                if (totalBytes > lastOffset) {
+                    float t = (float)((topByteOffset - (double)lastOffset) / (double)(totalBytes - lastOffset));
+                    t = std::max(0.0f, std::min(t, 1.0f));
+                    targetY += t * (app.contentHeight - app.scrollAnchors[lo].renderedY);
+                }
+            }
+        }
+
+        // The docked pane runs to the window's bottom edge (#245), so the
+        // preview scrolls exactly as far as the reader does
+        float previewMaxScroll =
+            std::max(0.0f, app.contentHeight - (float)app.height);
+        // renderedY includes the page's top padding below the strip;
+        // subtract it so an editor at its top means a page at its top, and
+        // snap the last half-line so the page top is always reachable
+        // (t11 feedback)
+        float alignY = targetY - documentContentTop(app);
+        float synced = std::max(0.0f, std::min(alignY, previewMaxScroll));
+        if (app.editorScrollY <= 0.5f) synced = 0.0f;
+        float editorMax = std::max(0.0f, app.editorContentHeight - (float)app.height);
+        if (app.editorScrollY >= editorMax - 1.0f) {
+            // The editor has bottomed out, but rendered content is taller
+            // than its source (images, diagrams): let the preview overshoot
+            // to reach its tail (#85). Scrolling the editor up re-syncs.
+            app.scrollY = std::min(std::max(app.scrollY, synced), previewMaxScroll);
+        } else {
+            app.scrollY = synced;
+        }
+        app.targetScrollY = app.scrollY;
+    }
 }
 
 // Up/Down in wrap mode moves by VISUAL row, staying near the same x —
@@ -1028,25 +1178,29 @@ static float editorBottomClearance(const App& app, float lineHeight) {
     return std::max(lineHeight, readPillClearance(app));
 }
 
+// Top of the row holding a text position, in the source's scroll
+// coordinates: with word wrap a logical line spans several rows (#260)
+static float editorPosRowY(App& app, size_t pos, bool upstream) {
+    size_t line = getLineFromPos(app, pos);
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    float padding = dpi(app, 8.0f);
+    if (!editorWrapOn(app)) return padding + line * lineHeight;
+    ensureEditorRowMetrics(app);
+    IDWriteTextLayout* layout = createEditorLineLayout(
+        app, app.editorLineStarts[line], getLineLength(app, line));
+    float cx = 0, cy = 0;
+    editorCaretXY(layout, pos - app.editorLineStarts[line], cx, cy, upstream);
+    if (layout) layout->Release();
+    size_t rowStart = (line < app.editorRowStarts.size()) ? app.editorRowStarts[line] : line;
+    return padding + rowStart * lineHeight + cy;
+}
+
 static void editorEnsureCursorVisible(App& app) {
     if (app.editorLineStarts.empty()) return;
     size_t line = getLineFromPos(app, app.editorCursorPos);
     float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
-    float padding = dpi(app, 8.0f);
-    float cursorY;
-    if (editorWrapOn(app)) {
-        ensureEditorRowMetrics(app);
-        IDWriteTextLayout* layout = createEditorLineLayout(
-            app, app.editorLineStarts[line], getLineLength(app, line));
-        float cx = 0, cy = 0;
-        editorCaretXY(layout, app.editorCursorPos - app.editorLineStarts[line], cx, cy,
-            app.editorCaretUpstreamPos == app.editorCursorPos);
-        if (layout) layout->Release();
-        size_t rowStart = (line < app.editorRowStarts.size()) ? app.editorRowStarts[line] : line;
-        cursorY = padding + rowStart * lineHeight + cy;
-    } else {
-        cursorY = padding + line * lineHeight;
-    }
+    float cursorY = editorPosRowY(app, app.editorCursorPos,
+                                  app.editorCaretUpstreamPos == app.editorCursorPos);
 
     float viewportH = (float)app.height - chromeTopHeight(app);
     float bottomClearance = editorBottomClearance(app, lineHeight);
@@ -1192,19 +1346,19 @@ void scrollEditorToMatch(App& app) {
     app.editorCaretUpstreamPos = std::wstring::npos;
     app.editorDesiredCol = -1;
 
-    // Find the line containing the match
-    size_t line = getLineFromPos(app, match.startPos);
+    // Center the match's row below the strip. With word wrap that row is
+    // counted in wrapped rows, not lines, or a match deep in a long line
+    // stays below the window (#260).
+    if (app.editorLineStarts.empty()) return;
     float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
-    float padding = 8.0f;
-    float matchY = padding + line * lineHeight;
-
-    // Center match in viewport
-    app.editorScrollY = matchY - app.height / 2.0f;
-    app.editorScrollY = std::max(0.0f, app.editorScrollY);
+    float matchY = editorPosRowY(app, match.startPos, false);
+    float viewportH = (float)app.height - chromeTopHeight(app);
+    app.editorScrollY = matchY + lineHeight * 0.5f - viewportH * 0.5f;
     float maxScroll = std::max(0.0f, app.editorContentHeight - app.height);
-    if (maxScroll > 0) {
-        app.editorScrollY = std::min(app.editorScrollY, maxScroll);
-    }
+    app.editorScrollY = std::max(0.0f, std::min(app.editorScrollY, maxScroll));
+    // Without wrap a match far into a long line also needs the source to
+    // scroll sideways; the caret now sits on it
+    editorEnsureCursorVisible(app);
 }
 
 // --- Debounced reparse ---
@@ -1214,7 +1368,8 @@ void scrollEditorToMatch(App& app) {
 // Counts what a reader sees: the parsed Markdown's prose, link text and
 // inline code. Plain-text and diagram documents count as they stand.
 static TextCounts editorCountSource(App& app, const std::wstring& source) {
-    if (isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile)) {
+    if (isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile) ||
+        isPlantUmlDocumentPath(app.currentFile)) {
         return countPlainText(source);
     }
     auto result = parseDocument(app.parser, toUtf8(source), app.currentFile);
@@ -1227,7 +1382,7 @@ static TextCounts editorCountSource(App& app, const std::wstring& source) {
 // buffer when the preview pane is hidden
 static void editorRefreshDocCounts(App& app, const ElementPtr& parsed) {
     if (parsed && !isPlainTextDocumentPath(app.currentFile) &&
-        !isMermaidDocumentPath(app.currentFile)) {
+        !isMermaidDocumentPath(app.currentFile) && !isPlantUmlDocumentPath(app.currentFile)) {
         std::wstring visible;
         appendCountableText(parsed, visible);
         app.editorDocCounts = countPlainText(visible);
@@ -1241,13 +1396,7 @@ static void editorRefreshDocCounts(App& app, const ElementPtr& parsed) {
 static void scheduleReparse(App& app) {
     if (!app.editorDirty) {
         app.editorDirty = true;
-        // Update window title with dirty marker
-        std::wstring wpath = toWide(app.currentFile);
-        size_t lastSep = wpath.find_last_of(L"\\/");
-        std::wstring fname = (lastSep != std::wstring::npos) ? wpath.substr(lastSep + 1) : wpath;
-        if (fname.empty()) fname = tr(app, "title.untitled");  // quick note
-        std::wstring title = L"Tinta - * " + fname;
-        SetWindowTextW(app.hwnd, title.c_str());
+        updateWindowTitle(app);  // the unsaved-edits marker
     }
     // No preview pane and no word count — nothing to keep in sync until
     // one of them is shown again
@@ -1270,7 +1419,9 @@ void editorReparse(App& app, bool force) {
     KillTimer(app.hwnd, TIMER_EDITOR_REPARSE);
     if (!app.editMode) return;
     std::string utf8 = toUtf8(app.editorText);
-    if (!isPlainTextDocumentPath(app.currentFile) && !isMermaidDocumentPath(app.currentFile)) {
+    if (!isPlainTextDocumentPath(app.currentFile) &&
+        !isMermaidDocumentPath(app.currentFile) &&
+        !isPlantUmlDocumentPath(app.currentFile)) {
         auto metadata = fm::parse(utf8);
         if (metadata.present) observeFrontmatter(app, metadata.properties);
     }
@@ -1437,7 +1588,8 @@ static void enterEditModeWithContent(App& app, const std::string& content,
     updateBlinkTimer(app);
 
     // Force layout at new width
-    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile) ||
+                                   isPlantUmlDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
@@ -1497,7 +1649,7 @@ void enterEditMode(App& app) {
 
     // Load raw file content
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream file(widePath, std::ios::binary);
+    std::ifstream file(fsPath(widePath), std::ios::binary);
     if (!file) return;
 
     std::stringstream buf;
@@ -1509,7 +1661,7 @@ void enterQuickNoteMode(App& app) {
     app.currentFile.clear();
     app.startPageEmbeddedOpen = false;  // the note replaces any Learn doc
     enterEditModeWithContent(app, std::string());
-    updateWindowTitle(app);  // "Tinta - Untitled" until the first save
+    updateWindowTitle(app);  // "Untitled - Tinta Mono" until the first save
 }
 
 // Draft recovery: a crash leftover reopens as a dirty edit tab, pointed
@@ -1585,7 +1737,7 @@ void exitEditMode(App& app) {
     // note has no file — reset the viewer to an empty document instead of
     // leaving the discarded text rendered.
     std::wstring widePath = toWide(app.currentFile);
-    std::ifstream file(widePath);
+    std::ifstream file{fsPath(widePath)};
     if (app.currentFile.empty()) {
         auto result = parseDocument(app.parser, std::string(), app.currentFile);
         if (result.success) {
@@ -1595,7 +1747,7 @@ void exitEditMode(App& app) {
         // The empty viewer is the start page now; the tab label follows
         if (!app.tabs.empty() && app.activeTab >= 0 &&
             app.activeTab < (int)app.tabs.size()) {
-            app.tabs[app.activeTab].title = L"Tinta";
+            app.tabs[app.activeTab].title = L"Tinta Mono";
         }
     } else if (file) {
         std::stringstream buf;
@@ -1610,7 +1762,8 @@ void exitEditMode(App& app) {
     // Update window title (remove dirty marker)
     updateWindowTitle(app);
 
-    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile) ||
+                                   isPlantUmlDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
@@ -1736,6 +1889,7 @@ static bool promptSaveAsPath(App& app, HWND hwnd) {
     ofn.hwndOwner = hwnd;
     ofn.lpstrFilter = L"Markdown (*.md)\0*.md;*.markdown\0"
                       L"Mermaid (*.mmd)\0*.mmd\0"
+                      L"PlantUML (*.puml;*.plantuml)\0*.puml;*.plantuml\0"
                       L"All files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
@@ -1764,9 +1918,9 @@ void openFileDialog(App& app, HWND hwnd) {
     ofn.hwndOwner = hwnd;
     ofn.lpstrFilter = L"Documents (*.md;*.mmd;*.txt;*.json;*.yaml;...)\0"
                       L"*.md;*.markdown;*.mmd;*.txt;*.json;*.yaml;*.yml;*.toml;"
-                      L"*.ini;*.csv;*.log\0"
+                      L"*.ini;*.csv;*.log;*.puml;*.plantuml\0"
                       L"Markdown / Mermaid (*.md;*.markdown;*.mmd)\0"
-                      L"*.md;*.markdown;*.mmd\0"
+                      L"*.md;*.markdown;*.mmd;*.puml;*.plantuml\0"
                       L"All files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
@@ -1801,7 +1955,7 @@ void renderQuickNoteEmptyState(App& app) {
     if (paneW < dpi(app, 180.0f)) return;  // pane too narrow to bother
 
     const wchar_t* label = tr(app, "empty.open_button");
-    const wchar_t* chip = L"Ctrl+O";
+    const wchar_t* chip = profileChord(app, L"Ctrl+O");
 
     IDWriteTextLayout* labelLayout = nullptr;
     IDWriteTextLayout* chipLayout = nullptr;
@@ -1920,7 +2074,9 @@ void saveEditorFile(App& app, HWND hwnd) {
     }
 
     std::string utf8 = toUtf8(app.editorText);
-    if (!isPlainTextDocumentPath(app.currentFile) && !isMermaidDocumentPath(app.currentFile))
+    if (!isPlainTextDocumentPath(app.currentFile) &&
+        !isMermaidDocumentPath(app.currentFile) &&
+        !isPlantUmlDocumentPath(app.currentFile))
         utf8 = fm::stamp(utf8, app.frontmatter, firstSeen, fm::utcNow());
     const std::wstring savedText = fromUtf8(utf8);
 
@@ -1928,7 +2084,7 @@ void saveEditorFile(App& app, HWND hwnd) {
     std::wstring widePath = toWide(app.currentFile);
     bool useCRLF = false;
     {
-        std::ifstream check(widePath, std::ios::binary);
+        std::ifstream check(fsPath(widePath), std::ios::binary);
         if (check) {
             char buf[4096];
             check.read(buf, sizeof(buf));
@@ -1954,7 +2110,7 @@ void saveEditorFile(App& app, HWND hwnd) {
         utf8 = std::move(crlf);
     }
 
-    std::ofstream out(widePath, std::ios::binary);
+    std::ofstream out(fsPath(widePath), std::ios::binary);
     if (out) {
         out.write(utf8.data(), utf8.size());
         out.close();
@@ -2589,40 +2745,11 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                     return;
                 }
                 std::wstring paste = editorGetClipboard(hwnd);
-                // A bitmap without text (a screenshot) saves as PNG beside
-                // the document and pastes as its markdown link
-                if (paste.empty() && !app.currentFile.empty() &&
-                    IsClipboardFormatAvailable(CF_BITMAP)) {
-                    namespace fs = std::filesystem;
-                    fs::path doc(toWide(app.currentFile));
-                    std::wstring stem = doc.stem().wstring();
-                    std::wstring name;
-                    fs::path target;
-                    for (int i = 1; i < 100; i++) {
-                        wchar_t suffix[24];
-                        swprintf_s(suffix, _countof(suffix),
-                                   L"-img-%02d.png", i);
-                        std::wstring candidate = stem + suffix;
-                        fs::path p = doc.parent_path() / candidate;
-                        std::error_code ec;
-                        if (!fs::exists(p, ec)) {
-                            name = candidate;
-                            target = p;
-                            break;
-                        }
-                    }
-                    if (!name.empty() &&
-                        clipboardImageToPngFile(app, hwnd,
-                                                target.wstring())) {
-                        std::wstring linkName = name;
-                        size_t sp = 0;  // spaces break the link target
-                        while ((sp = linkName.find(L' ', sp)) !=
-                               std::wstring::npos) {
-                            linkName.replace(sp, 1, L"%20");
-                            sp += 3;
-                        }
-                        paste = L"![image](" + linkName + L")";
-                    }
+                // An image without text (a screenshot): the user's choice
+                // of where it goes, or the remembered one
+                if (paste.empty() && clipboardHasImage()) {
+                    editorPasteImageRequest(app, hwnd);
+                    return;
                 }
                 if (!paste.empty()) {
                     if (app.editorHasSelection) editorDeleteSelection(app);
@@ -2728,7 +2855,7 @@ bool editorAltArrowKey(App& app, HWND hwnd, WPARAM wParam) {
     if (wParam != VK_UP && wParam != VK_DOWN) return false;
     if (!(GetKeyState(VK_MENU) & 0x8000) || (GetKeyState(VK_SHIFT) & 0x8000)) return false;
     if (!sourceEditorHasFocus(app) || app.confirmExitPending || app.createRefPending ||
-        app.editCtxOpen || app.showSettings || app.showHelp || app.showThemeChooser ||
+        app.pasteImagePending || app.editCtxOpen || app.showSettings || app.showHelp || app.showThemeChooser ||
         app.showThemeEditor || app.showShortcutEditor || app.showPrintPreview ||
         app.showContextMenu || app.showTabMenu || app.showTabSwitcher) {
         return false;
@@ -3057,9 +3184,22 @@ void editorInsertDiagramTemplate(App& app, HWND hwnd, int kind) {
         L"```mermaid\npie title Split\n    \"A\" : 60\n    \"B\" : 40\n```\n",
         // 6 empty block
         L"```mermaid\n\n```\n",
+        // 7 PlantUML sequence
+        L"```plantuml\n@startuml\nparticipant Editor\n"
+        L"participant Preview\nEditor -> Preview : render()\n"
+        L"Preview --> Editor : rendered\n@enduml\n```\n",
+        // 8 PlantUML class
+        L"```plantuml\n@startuml\nclass Document {\n"
+        L"    +title: String\n    +render()\n}\n"
+        L"Document <|-- Note\n@enduml\n```\n",
+        // 9 PlantUML activity
+        L"```plantuml\n@startuml\nstart\nif (Edited?) then (yes)\n"
+        L"    :Save file;\nelse (no)\n    :Keep editing;\n"
+        L"endif\nstop\n@enduml\n```\n",
     };
-    if (kind < 0 || kind > 6) return;
-    editorInsertSnippet(app, hwnd, kTemplates[kind], 11);
+    if (kind < 0 || kind > 9) return;
+    // PlantUML fences are one char wider: caret lands inside the body
+    editorInsertSnippet(app, hwnd, kTemplates[kind], kind >= 7 ? 12 : 11);
 }
 
 void editorInsertSnippetPublic(App& app, HWND hwnd,
@@ -4148,4 +4288,298 @@ void renderEditor(App& app, float editorWidth) {
     }
 
     app.renderTarget->PopAxisAlignedClip();
+}
+
+// ---- Emacs profile (emacs_keys.cpp dispatches) -------------------------------
+
+// After an Emacs edit: line starts, reparse, caret on screen, repaint
+static void editorEmacsEdited(App& app, HWND hwnd) {
+    app.editorDesiredCol = -1;
+    app.editorCaretUpstreamPos = std::wstring::npos;
+    rebuildLineStarts(app);
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// C-k, M-d, M-DEL. The clipboard is the kill ring's one slot: a kill made
+// where the previous one left the caret, with nothing typed since, adds to
+// it, as consecutive kills do in Emacs. C-k at a line's end takes the break.
+void editorEmacsKill(App& app, HWND hwnd, EmacsKill kind) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = false;
+    size_t pos = app.editorCursorPos, from = pos, to = pos;
+    if (kind == EmacsKill::Line) {
+        size_t end = getLineEnd(app, getLineFromPos(app, pos));
+        to = end > pos ? end : (pos < app.editorText.size() ? editorNextCharEnd(app, pos) : pos);
+    } else if (kind == EmacsKill::WordForward) {
+        to = editorWordRight(app, pos);
+    } else {
+        from = editorWordLeft(app, pos);
+    }
+    if (from == to) return;
+    std::wstring killed = app.editorText.substr(from, to - from);
+    std::wstring clip = killed;
+    if (app.emacsKillAt == pos && app.emacsKillSize == app.editorText.size()) {
+        std::wstring previous = editorGetClipboard(hwnd);
+        clip = kind == EmacsKill::WordBackward ? killed + previous : previous + killed;
+    }
+    editorCopyToClipboard(hwnd, clip);
+    pushUndo(app, App::EditAction::Delete, from, killed, pos, from);
+    app.editorText.erase(from, to - from);
+    app.editorCursorPos = from;
+    app.emacsKillAt = from;
+    app.emacsKillSize = app.editorText.size();
+    editorEmacsEdited(app, hwnd);
+}
+
+// C-SPC: the mark at the caret. Motions then extend a selection from it,
+// until a kill, a copy or C-g drops it, or the selection leaves it.
+void editorEmacsSetMark(App& app) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = true;
+    app.emacsMarkPos = app.editorCursorPos;
+}
+
+bool editorEmacsMarkActive(App& app) {
+    if (!app.emacsMark) return false;
+    bool anchored = app.editorHasSelection ? app.editorSelStart == app.emacsMarkPos
+                                           : app.editorCursorPos == app.emacsMarkPos;
+    if (!anchored || !app.editorExtraCarets.empty()) app.emacsMark = false;
+    return app.emacsMark;
+}
+
+// C-x C-x: the caret and the mark trade places; the region stays
+void editorEmacsExchangePointAndMark(App& app, HWND hwnd) {
+    if (!editorEmacsMarkActive(app) || !app.editorHasSelection) return;
+    size_t point = app.editorCursorPos;
+    app.editorCursorPos = app.editorSelStart;
+    app.editorSelStart = point;
+    app.editorSelEnd = app.editorCursorPos;
+    app.emacsMarkPos = point;
+    app.editorDesiredCol = -1;
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// C-t: swap the characters either side of the caret and step past them;
+// at a line's end, the last two. One undo step.
+void editorEmacsTranspose(App& app, HWND hwnd) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = false;
+    size_t line = getLineFromPos(app, app.editorCursorPos);
+    size_t lineStart = app.editorLineStarts[line];
+    size_t lineEnd = getLineEnd(app, line);
+    size_t pos = app.editorCursorPos;
+    if (pos == lineEnd && pos > lineStart) pos = editorPrevCharStart(app, pos);
+    if (pos <= lineStart || pos >= lineEnd) return;
+    size_t a = editorPrevCharStart(app, pos), b = editorNextCharEnd(app, pos);
+    std::wstring removed = app.editorText.substr(a, b - a);
+    std::wstring swapped = app.editorText.substr(pos, b - pos) + app.editorText.substr(a, pos - a);
+    pushReplaceUndo(app, a, removed, swapped, app.editorCursorPos, b);
+    app.editorText.replace(a, b - a, swapped);
+    app.editorCursorPos = b;
+    editorEmacsEdited(app, hwnd);
+}
+
+// C-o: a line break after the caret, which stays where it is
+void editorEmacsOpenLine(App& app, HWND hwnd) {
+    editorClearExtraCarets(app);
+    app.editorHasSelection = false;
+    app.emacsMark = false;
+    size_t pos = app.editorCursorPos;
+    app.editorText.insert(pos, L"\n");
+    pushUndo(app, App::EditAction::Insert, pos, L"\n", pos, pos);
+    editorEmacsEdited(app, hwnd);
+}
+
+void editorEmacsQuit(App& app, HWND hwnd) {
+    app.emacsMark = false;
+    app.editorHasSelection = false;
+    editorClearExtraCarets(app);
+    if (app.editCtxOpen) closeEditCtxMenu(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// ---- Pasting an image ---------------------------------------------------------
+
+static std::string pasteBase64(const std::string& data) {
+    static const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((data.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < data.size(); i += 3) {
+        unsigned n = (unsigned char)data[i] << 16;
+        if (i + 1 < data.size()) n |= (unsigned char)data[i + 1] << 8;
+        if (i + 2 < data.size()) n |= (unsigned char)data[i + 2];
+        out += alphabet[(n >> 18) & 63];
+        out += alphabet[(n >> 12) & 63];
+        out += i + 1 < data.size() ? alphabet[(n >> 6) & 63] : '=';
+        out += i + 2 < data.size() ? alphabet[n & 63] : '=';
+    }
+    return out;
+}
+
+// A path as a Markdown link destination: forward slashes, inside <...>
+// when it holds a space or a parenthesis (CommonMark allows them there,
+// and the reader takes the path as written, where %20 would not resolve)
+static std::wstring pasteLinkTarget(const std::wstring& path) {
+    std::wstring out;
+    bool bracket = false;
+    for (wchar_t c : path) {
+        if (c == L'\\') {
+            out += L'/';
+            continue;
+        }
+        if (c == L' ' || c == L'(' || c == L')' || c == L'<' || c == L'>') bracket = true;
+        if (c == L'<' || c == L'>') out += L'\\';
+        out += c;
+    }
+    return bracket ? L"<" + out + L">" : out;
+}
+
+std::wstring editorPasteImageAssetPath(const App& app) {
+    if (app.currentFile.empty()) return L"";
+    namespace fs = std::filesystem;
+    fs::path doc = fsPath(toWide(app.currentFile));
+    std::wstring stem = doc.stem().wstring();
+    fs::path dir = doc.parent_path() / fsPath(stem + L".assets");
+    for (int i = 1; i < 1000; i++) {
+        wchar_t suffix[24];
+        swprintf_s(suffix, _countof(suffix), L"-img-%02d.png", i);
+        fs::path candidate = dir / fsPath(stem + suffix);
+        std::error_code ec;
+        if (!fs::exists(candidate, ec)) return candidate.wstring();
+    }
+    return L"";
+}
+
+void editorPasteImageRequest(App& app, HWND hwnd) {
+    const std::string& mode = app.pasteImageMode;
+    if (mode == "off") {
+        signalHintKey(app, SIGI_INFO, "paste.off");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    if (mode == "inline") {
+        editorPasteImage(app, hwnd, kPasteInline);
+        return;
+    }
+    // "assets" needs the document's folder: an unsaved note asks instead
+    if (mode == "assets" && !app.currentFile.empty()) {
+        editorPasteImage(app, hwnd, kPasteAssets);
+        return;
+    }
+    app.pasteImagePending = true;
+    app.pasteImageRemember = false;
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void editorPasteImage(App& app, HWND hwnd, int choice) {
+    namespace fs = std::filesystem;
+    bool remember = app.pasteImageRemember;
+    app.pasteImagePending = false;
+    app.pasteImageRemember = false;
+    InvalidateRect(hwnd, nullptr, FALSE);
+    if (choice == kPasteCancel) return;
+    if (choice == kPasteAssets && app.currentFile.empty()) return;
+    // "Remember" makes this the setting (Settings > Editor > Pasted images)
+    if (remember && (choice == kPasteAssets || choice == kPasteInline)) {
+        app.pasteImageMode = choice == kPasteAssets ? "assets" : "inline";
+        persistPasteImage(app);
+    }
+    std::string png;
+    if (!clipboardImagePng(app, hwnd, png)) {
+        signalPushKey(app, SIG_WARN, SIGI_WARNING, "paste.none");
+        return;
+    }
+    std::wstring target;
+    if (choice == kPasteInline) {
+        target = L"data:image/png;base64," + toWide(pasteBase64(png));
+    } else {
+        std::wstring path = editorPasteImageAssetPath(app);
+        if (choice == kPasteSaveAs) {
+            // Proposed: the assets folder's next name, in that folder (or
+            // the document's, until the folder exists)
+            wchar_t file[MAX_PATH] = L"image.png";
+            std::wstring folder;
+            if (!path.empty()) {
+                fs::path proposed = fsPath(path);
+                wcsncpy_s(file, proposed.filename().wstring().c_str(), _TRUNCATE);
+                std::error_code ec;
+                folder = fs::is_directory(proposed.parent_path(), ec)
+                             ? proposed.parent_path().wstring()
+                             : proposed.parent_path().parent_path().wstring();
+            }
+            OPENFILENAMEW ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"PNG image (*.png)\0*.png\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrInitialDir = folder.empty() ? nullptr : folder.c_str();
+            ofn.lpstrDefExt = L"png";
+            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+            if (!runSaveFileDialog(ofn)) return;
+            path = file;
+        }
+        if (path.empty()) return;
+        std::error_code ec;
+        fs::create_directories(fsPath(path).parent_path(), ec);
+        {
+            std::ofstream out(fsPath(path), std::ios::binary | std::ios::trunc);
+            out.write(png.data(), (std::streamsize)png.size());
+            if (!out) {
+                signalPushKey(app, SIG_ERROR, SIGI_WARNING, "paste.write_failed", fsPath(path).filename().wstring());
+                return;
+            }
+        }
+        // Relative to the document where it can be (the document and its
+        // images move together), else the absolute path
+        if (!app.currentFile.empty()) {
+            fs::path docDir = fsPath(toWide(app.currentFile)).parent_path();
+            fs::path relative = fsPath(path).lexically_relative(docDir);
+            if (!relative.empty() && relative.native().rfind(fsPath(L"..").native(), 0) != 0) {
+                target = pasteLinkTarget(relative.wstring());
+            }
+        }
+        if (target.empty()) target = pasteLinkTarget(path);
+        signalHintKey(app, SIGI_FILE, "paste.saved");
+    }
+    std::wstring link = L"![image](" + target + L")";
+    if (app.editorHasSelection) editorDeleteSelection(app);
+    size_t before = app.editorCursorPos;
+    app.editorText.insert(before, link);
+    app.editorCursorPos += link.size();
+    pushUndo(app, App::EditAction::Insert, before, link, before, app.editorCursorPos);
+    rebuildLineStarts(app);
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// ---- Aligning tables ------------------------------------------------------------
+
+void editorAlignTables(App& app, HWND hwnd) {
+    std::vector<std::pair<size_t, size_t>> spans;
+    size_t start = 0, end = 0;
+    if (tableSpanAt(app.editorText, app.editorCursorPos, start, end)) {
+        spans.push_back({start, end});
+    } else {
+        spans = tableSpans(app.editorText);
+    }
+    int aligned = 0;
+    // Last first, so the earlier spans keep their offsets
+    for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
+        std::wstring before = app.editorText.substr(it->first, it->second - it->first);
+        std::wstring after = alignMarkdownTable(before);
+        if (after == before) continue;
+        editorReplaceRangeExternal(app, it->first, it->second, after);
+        aligned++;
+    }
+    signalHintKey(app, SIGI_CHECK, spans.empty() ? "ectx.aligned_none" : "ectx.aligned");
+    (void)aligned;
+    InvalidateRect(hwnd, nullptr, FALSE);
 }

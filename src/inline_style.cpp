@@ -1,7 +1,9 @@
 #include "inline_style.h"
+#include "fs_path.h"
 #include "link_target.h"
 
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 
 namespace {
@@ -49,13 +51,13 @@ bool isLocalFileRefUrl(const std::string& url) {
 bool resolveFileRef(App& app, const std::string& raw, std::string& absOut) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path path(refToWide(raw));
+    fs::path path = fsPath(refToWide(raw));
     if (path.is_relative()) {
         if (app.currentFile.empty()) {
             absOut = raw;
             return false;  // unsaved buffer: nothing to resolve against
         }
-        path = fs::path(refToWide(app.currentFile)).parent_path() / path;
+        path = fsPath(refToWide(app.currentFile)).parent_path() / path;
     }
     path = path.lexically_normal();
     absOut = refToUtf8(path.wstring());
@@ -69,6 +71,15 @@ bool resolveFileRef(App& app, const std::string& raw, std::string& absOut) {
 }  // namespace
 
 IDWriteTextFormat* emphasisFormat(App& app, IDWriteTextFormat* base, bool bold, bool italic) {
+    // A heading is bold already; its emphasis keeps the heading's size
+    // rather than dropping to the body faces (and, inside it, inline code
+    // keeps the heading's baseline, #259)
+    for (int i = 0; i < 6; i++) {
+        if (base && (base == app.headingFormats[i] || base == app.headingItalicFormats[i])) {
+            if (italic && app.headingItalicFormats[i]) return app.headingItalicFormats[i];
+            return app.headingFormats[i] ? app.headingFormats[i] : base;
+        }
+    }
     IDWriteTextFormat* fmt = nullptr;
     if (bold && italic) fmt = app.boldItalicFormat ? app.boldItalicFormat : app.boldFormat;
     else if (bold) fmt = app.boldFormat;
@@ -76,12 +87,42 @@ IDWriteTextFormat* emphasisFormat(App& app, IDWriteTextFormat* base, bool bold, 
     return fmt ? fmt : base;
 }
 
-IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic) {
+// The small face for ^sup^/~sub~ and <sup>/<sub>: a heading's own, in
+// proportion to its size, or the body's
+static IDWriteTextFormat* scriptFormat(App& app, IDWriteTextFormat* around) {
+    for (int i = 0; i < 6; i++) {
+        if (around && (around == app.headingFormats[i] || around == app.headingItalicFormats[i]) &&
+            app.headingScriptFormats[i]) {
+            return app.headingScriptFormats[i];
+        }
+    }
+    return app.supSubFormat;
+}
+
+IDWriteTextFormat* inlineCodeFormat(App& app, bool bold, bool italic, IDWriteTextFormat* around) {
     IDWriteTextFormat* fmt = nullptr;
     if (bold && italic) fmt = app.codeBoldItalicFormat;
     else if (bold) fmt = app.codeBoldFormat;
     else if (italic) fmt = app.codeItalicFormat;
-    return fmt ? fmt : app.codeFormat;
+    if (!fmt) fmt = app.codeFormat;
+    // Code keeps its proportion to the text around it, as body code (14 px)
+    // to body text (16 px): a heading's `code` grows with the heading (#1)
+    if (!fmt || !around || !app.textFormat || !app.dwriteFactory) return fmt;
+    const float size = fmt->GetFontSize() * around->GetFontSize() / app.textFormat->GetFontSize();
+    if (std::fabs(size - fmt->GetFontSize()) < 0.25f) return fmt;
+    const long long key = (std::llround(size * 100.0f) << 2) | (bold ? 2 : 0) | (italic ? 1 : 0);
+    auto found = app.scaledCodeFormats.find(key);
+    if (found != app.scaledCodeFormats.end()) return found->second;
+    IDWriteTextFormat* scaled = nullptr;
+    const wchar_t* family = app.theme.codeFontFamily;
+    if (FAILED(app.dwriteFactory->CreateTextFormat(family, fontCollectionFor(app, family), fmt->GetFontWeight(),
+                                                   fmt->GetFontStyle(), DWRITE_FONT_STRETCH_NORMAL, size, L"en-us",
+                                                   &scaled)) || !scaled) {
+        return fmt;
+    }
+    scaled->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    app.scaledCodeFormats[key] = scaled;
+    return scaled;
 }
 
 void flattenInline(App& app, const std::vector<ElementPtr>& elements,
@@ -112,6 +153,12 @@ void flattenInline(App& app, const std::vector<ElementPtr>& elements,
                 st.hasStrike = true;
                 break;
 
+            case ElementType::Underline:
+                st.hasUnderline = true;
+                st.underlineFormat = st.format;
+                st.underlineYOffset = st.drawYOffset;
+                break;
+
             case ElementType::Anchor:
                 // Zero-width target the layout pins to its line (#255),
                 // then any text it wraps flows on as usual
@@ -127,9 +174,10 @@ void flattenInline(App& app, const std::vector<ElementPtr>& elements,
 
             case ElementType::Superscript:
             case ElementType::Subscript:
-                // Small text; NEAR alignment already sits sup at the top of the line
-                if (app.supSubFormat) {
-                    st.format = app.supSubFormat;
+                // Small text, a heading's in proportion to it (#263); NEAR
+                // alignment already sits sup at the top of the line
+                if (IDWriteTextFormat* face = scriptFormat(app, st.format)) {
+                    st.format = face;
                     st.fixedSize = true;
                 }
                 if (elem->type == ElementType::Subscript) st.drawYOffset = lineHeight * 0.38f;

@@ -19,6 +19,11 @@ void renderHelpOverlay(App& app);
 // Full-frame print preview; render() short-circuits to this while it is open
 void renderPrintPreview(App& app);
 
+// Pasting an image: where it goes (assets folder, inline, save as), with
+// a "remember" box; hits in app.pasteImageHits (PasteImageChoice, 9 =
+// the box)
+void renderPasteImagePrompt(App& app);
+
 // Settings overlay (Ctrl+,). Render stores (rect, action) pairs in
 // app.settingsHits; handleMouseUp resolves them against these ids.
 enum SettingsAction {
@@ -28,7 +33,10 @@ enum SettingsAction {
     SET_TOGGLE_OPENTABS, SET_TOGGLE_HEADRULES,
     SET_TOGGLE_WRAP, SET_TOGGLE_PREVIEW, SET_TOGGLE_ASSISTS,
     SET_TOGGLE_WORDCOUNT, SET_TOGGLE_CLOSE_DRAFTS,
+    SET_TOGGLE_UPDATES, SET_CHECK_UPDATES, SET_OPEN_LICENSES, SET_MAKE_DEFAULT,
+    SET_PASTE_ASK, SET_PASTE_ASSETS, SET_PASTE_INLINE, SET_PASTE_OFF,
     SET_LOCATE_PANDOC,
+    SET_LOCATE_PLANTUML,
     SET_SLIDER_READING, SET_SLIDER_ZEN,
     SET_OPEN_THEMES, SET_NEW_THEME, SET_EDIT_THEME,
     SET_OPEN_INI, SET_OPEN_THEMES_INI,
@@ -86,6 +94,8 @@ enum ThemeEditorAction {
     TE_FIELD_NAME,
     TE_BASE_PREV, TE_BASE_NEXT,
     TE_DARK, TE_SAVE, TE_CANCEL, TE_OPEN_INI, TE_HEADINGS,
+    TE_FONT_TEXT, TE_FONT_HEADING, TE_FONT_CODE,  // which face the font list sets
+    TE_FONT_SAME,                                 // headings follow the text face
     TE_FONT_BASE = 100,
 };
 void renderThemeEditor(App& app);

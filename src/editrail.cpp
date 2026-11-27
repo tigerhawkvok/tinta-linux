@@ -3,6 +3,7 @@
 // Line numbers live in the editor's own slim gutter beside it, and the
 // thread seam (also here) ties source blocks to their render.
 
+#include "emacs_keys.h"
 #include "editrail.h"
 #include "d2d_init.h"
 #include "overlays.h"
@@ -37,9 +38,10 @@ static IDWriteTextLayout* railLayout(App& app, const std::wstring& text,
                                      const wchar_t* family = L"Segoe UI",
                                      DWRITE_FONT_STYLE style =
                                          DWRITE_FONT_STYLE_NORMAL) {
+    if (!family) family = app.uiCodeFont;
     IDWriteTextFormat* fmt = nullptr;
     app.dwriteFactory->CreateTextFormat(
-        family, nullptr, weight, style, DWRITE_FONT_STRETCH_NORMAL,
+        family, fontCollectionFor(app, family), weight, style, DWRITE_FONT_STRETCH_NORMAL,
         dpi(app, sizeDip), L"en-us", &fmt);
     if (!fmt) return nullptr;
     fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -98,7 +100,7 @@ static const RailBtn kTextBtns[] = {
     {3, L"S", 13.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
      L"Segoe UI", true, "rail.strike", L""},
     {4, L"</>", 10.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-     L"Consolas", false, "rail.code", L""},
+     nullptr, false, "rail.code", L""},  // nullptr: the code font
     {5, L"\U0001F517", 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.link", L"Ctrl+K"},
 };
@@ -282,8 +284,8 @@ void renderEditRail(App& app) {
         IDWriteTextLayout* ll =
             railLayout(app, label, 12.0f, DWRITE_FONT_WEIGHT_NORMAL);
         IDWriteTextLayout* kl =
-            hovBtn->tipKeys[0]
-                ? railLayout(app, hovBtn->tipKeys, 10.5f,
+            profileChord(app, hovBtn->tipKeys)[0]
+                ? railLayout(app, profileChord(app, hovBtn->tipKeys), 10.5f,
                              DWRITE_FONT_WEIGHT_NORMAL)
                 : nullptr;
         if (ll) {
@@ -374,7 +376,8 @@ struct ECtxItem {
 static const ECtxItem kECtx[] = {
     {100, L"", "ectx.cut", L"Ctrl+X", true, false, false},
     {101, L"", "ectx.copy", L"Ctrl+C", true, false, false},
-    {102, L"", "ectx.paste", L"Ctrl+V", false, false, true},
+    {102, L"", "ectx.paste", L"Ctrl+V", false, false, false},
+    {103, L"\u2261", "ectx.align_tables", L"", false, false, true},
     {0, L"", "ectx.insert", L"", false, false, false},
     {110, L"\u229E", "ectx.table", L"\u25B8", false, true, false},
     {111, L"\u25C8", "ectx.diagram", L"\u25B8", false, true, false},
@@ -397,6 +400,9 @@ static const EDiagItem kEDiag[] = {
     {L"\u25A4", "ectx.d.gantt", L"gantt"},
     {L"\u25D4", "ectx.d.pie", L"pie"},
     {L"\u270E", "ectx.d.empty", L"```mermaid"},
+    {L"\u21C5", "ectx.d.puml_seq", L"puml seq"},
+    {L"\u25A3", "ectx.d.puml_class", L"puml class"},
+    {L"\u21AA", "ectx.d.puml_act", L"puml activity"},
 };
 
 void openEditCtxMenu(App& app, HWND hwnd, float x, float y) {
@@ -538,7 +544,7 @@ void renderEditCtxMenu(App& app) {
         if (it.icon[0]) {
             railGlyph(app, it.icon, it.id == 113 ? 9.5f : 12.0f,
                       DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                      it.id == 113 ? L"Consolas" : L"Segoe UI",
+                      it.id == 113 ? app.uiCodeFont : L"Segoe UI",
                       D2D1::RectF(r.left + dpi(app, 6.0f), r.top,
                                   r.left + dpi(app, 28.0f), r.bottom),
                       railA(accent, alpha));
@@ -554,10 +560,11 @@ void renderEditCtxMenu(App& app) {
                              : railA(text, 0.92f * alpha));
             ll->Release();
         }
-        if (it.hint[0]) {
-            IDWriteTextLayout* hl = railLayout(app, it.hint, 11.0f,
+        const wchar_t* itemHint = profileChord(app, it.hint);
+        if (itemHint[0]) {
+            IDWriteTextLayout* hl = railLayout(app, itemHint, 11.0f,
                                                DWRITE_FONT_WEIGHT_NORMAL,
-                                               L"Consolas");
+                                               app.uiCodeFont);
             if (hl) {
                 DWRITE_TEXT_METRICS m{};
                 hl->GetMetrics(&m);
@@ -587,7 +594,7 @@ void renderEditCtxMenu(App& app) {
     if (app.editCtxSub == 2) {
         float sw = dpi(app, 240.0f);
         float srowH = dpi(app, 34.0f);
-        float sh = dpi(app, 30.0f) + 7 * (srowH + dpi(app, 2.0f)) +
+        float sh = dpi(app, 30.0f) + 10 * (srowH + dpi(app, 2.0f)) +
                    dpi(app, 8.0f);
         float sx = std::min(mx + w + dpi(app, 4.0f),
                             (float)app.width - sw - dpi(app, 8.0f));
@@ -611,7 +618,7 @@ void renderEditCtxMenu(App& app) {
             hl->Release();
         }
         float ry = sy + dpi(app, 30.0f);
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 10; i++) {
             D2D1_RECT_F r = D2D1::RectF(sx + dpi(app, 4.0f), ry,
                                         sx + sw - dpi(app, 4.0f),
                                         ry + srowH);
@@ -641,7 +648,7 @@ void renderEditCtxMenu(App& app) {
             }
             IDWriteTextLayout* hint = railLayout(app, kEDiag[i].hint, 10.5f,
                                                  DWRITE_FONT_WEIGHT_NORMAL,
-                                                 L"Consolas");
+                                                 app.uiCodeFont);
             if (hint) {
                 DWRITE_TEXT_METRICS m{};
                 hint->GetMetrics(&m);
@@ -706,7 +713,7 @@ void renderEditCtxMenu(App& app) {
             IDWriteTextLayout* hint = railLayout(app, pandocFormatExt(i),
                                                  10.5f,
                                                  DWRITE_FONT_WEIGHT_NORMAL,
-                                                 L"Consolas");
+                                                 app.uiCodeFont);
             if (hint) {
                 DWRITE_TEXT_METRICS m{};
                 hint->GetMetrics(&m);
@@ -804,6 +811,7 @@ bool editCtxMouseDown(App& app, HWND hwnd, int x, int y) {
             case 100: editorClipboardCut(app, hwnd); break;
             case 101: editorClipboardCopy(app, hwnd); break;
             case 102: editorClipboardPaste(app, hwnd); break;
+            case 103: editorAlignTables(app, hwnd); break;
             case 110: app.editCtxSub = 1; InvalidateRect(hwnd, nullptr, FALSE); return true;
             case 111: app.editCtxSub = 2; InvalidateRect(hwnd, nullptr, FALSE); return true;
             case 112: editRailInvoke(app, hwnd, 22); break;

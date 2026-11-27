@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "fs_path.h"
 #include "document.h"
 #include "i18n.h"
 
@@ -23,14 +24,14 @@ static int settingsLanguageIndex(const Settings& settings) {
 std::wstring getSettingsPath() {
     std::wstring dir = tintaConfigDir();
     if (dir.empty()) return L"";
-    return dir + L"\\settings.ini";
+    return joinPath(dir, L"settings.ini");
 }
 
 void saveSettings(const Settings& settings) {
     std::wstring path = getSettingsPath();
     if (path.empty()) return;
 
-    std::ofstream file(path);
+    std::ofstream file{fsPath(path)};
     if (!file) return;
 
     file << "[Settings]\n";
@@ -48,9 +49,13 @@ void saveSettings(const Settings& settings) {
     file << "editorAssists=" << (settings.editorAssists ? 1 : 0) << "\n";
     file << "showWordCount=" << (settings.showWordCount ? 1 : 0) << "\n";
     file << "closeKeepsDrafts=" << (settings.closeKeepsDrafts ? 1 : 0) << "\n";
+    file << "pasteImage=" << settings.pasteImage << "\n";
     file << "printMarginMm=" << settings.printMarginMm << "\n";
     if (!settings.pandocPath.empty()) {
         file << "pandocPath=" << settings.pandocPath << "\n";
+    }
+    if (!settings.plantumlPath.empty()) {
+        file << "plantumlPath=" << settings.plantumlPath << "\n";
     }
     file << "followSystemTheme=" << (settings.followSystemTheme ? 1 : 0) << "\n";
     file << "lightThemeIndex=" << settings.lightThemeIndex << "\n";
@@ -174,6 +179,12 @@ void persistCloseKeepsDrafts(const App& app) {
     saveSettings(settings);
 }
 
+void persistPasteImage(const App& app) {
+    Settings settings = loadSettings();
+    settings.pasteImage = app.pasteImageMode;
+    saveSettings(settings);
+}
+
 void persistPrintMargin(const App& app) {
     Settings settings = loadSettings();
     settings.printMarginMm = app.printMarginMm;
@@ -259,7 +270,7 @@ Settings loadSettings() {
     std::wstring path = getSettingsPath();
     if (path.empty()) return settings;
 
-    std::ifstream file(path);
+    std::ifstream file{fsPath(path)};
     if (!file) return settings;
 
     bool sawKeyProfile = false, sawFrontmatterRules = false;
@@ -379,6 +390,10 @@ Settings loadSettings() {
             settings.showWordCount = (value == "1");
         } else if (key == "closeKeepsDrafts") {
             settings.closeKeepsDrafts = (value == "1");
+        } else if (key == "pasteImage") {
+            if (value == "ask" || value == "assets" || value == "inline" || value == "off") {
+                settings.pasteImage = value;
+            }
         } else if (key == "printMarginMm") {
             // Any margin from 5 to 50 mm; the preview offers three (#257)
             try {
@@ -389,6 +404,8 @@ Settings loadSettings() {
             } catch (const std::exception&) { /* Keep the default for a malformed margin. */ }
         } else if (key == "pandocPath") {
             settings.pandocPath = value;
+        } else if (key == "plantumlPath") {
+            settings.plantumlPath = value;
         } else if (key == "sessionActive") {
             int idx = std::stoi(value);
             if (idx >= 0) settings.sessionActive = idx;
@@ -471,7 +488,7 @@ static bool hasRegisteredFileAssociation(std::wstring_view extension) {
     HKEY hKey;
     LONG result = RegOpenKeyExW(
         HKEY_CURRENT_USER,
-        L"Software\\Tinta\\Capabilities\\FileAssociations",
+        L"Software\\TintaMono\\Capabilities\\FileAssociations",
         0, KEY_READ, &hKey);
     if (result != ERROR_SUCCESS) return false;
 
@@ -484,28 +501,36 @@ static bool hasRegisteredFileAssociation(std::wstring_view extension) {
     RegCloseKey(hKey);
     return result == ERROR_SUCCESS &&
         type == REG_SZ &&
-        wcscmp(value, L"Tinta.MarkdownFile") == 0;
+        wcscmp(value, L"TintaMono.MarkdownFile") == 0;
 }
 
 bool registerFileAssociation() {
+#ifndef _WIN32
+    // Linux: a desktop entry, icons, the .mmd MIME type and the defaults in
+    // mimeapps.list instead of these registry keys
+    return tintaRegisterDesktopApp();
+#else
     // Get the path to the current executable
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 
     HKEY hKey;
     LONG result;
-    const wchar_t* progId = L"Tinta.MarkdownFile";
+    const wchar_t* progId = L"TintaMono.MarkdownFile";
+    // The class the associations below name: its own keys, never upstream
+    // Tinta's Tinta.MarkdownFile, whose open command must stay upstream's
+    const std::wstring classKey = std::wstring(L"Software\\Classes\\") + progId;
 
     // Create ProgID entry in Classes
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, classKey.c_str(), 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
-    const wchar_t* desc = L"Tinta Document";
+    const wchar_t* desc = L"Tinta Mono Document";
     RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)desc, (DWORD)((wcslen(desc) + 1) * sizeof(wchar_t)));
     RegCloseKey(hKey);
 
     // Create DefaultIcon entry
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile\\DefaultIcon", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, (classKey + L"\\DefaultIcon").c_str(), 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
     std::wstring iconPath = exePath;
@@ -514,7 +539,7 @@ bool registerFileAssociation() {
     RegCloseKey(hKey);
 
     // Create shell\open\command entry
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile\\shell\\open\\command", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, (classKey + L"\\shell\\open\\command").c_str(), 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
     std::wstring command = L"\"";
@@ -524,17 +549,17 @@ bool registerFileAssociation() {
     RegCloseKey(hKey);
 
     // Register app capabilities (required for Windows 10/11)
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Tinta\\Capabilities", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TintaMono\\Capabilities", 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
-    const wchar_t* appName = L"Tinta";
+    const wchar_t* appName = L"Tinta Mono";  // shown in Settings > Default apps
     const wchar_t* appDesc = L"A fast, lightweight Markdown and Mermaid reader";
     RegSetValueExW(hKey, L"ApplicationName", 0, REG_SZ, (BYTE*)appName, (DWORD)((wcslen(appName) + 1) * sizeof(wchar_t)));
     RegSetValueExW(hKey, L"ApplicationDescription", 0, REG_SZ, (BYTE*)appDesc, (DWORD)((wcslen(appDesc) + 1) * sizeof(wchar_t)));
     RegCloseKey(hKey);
 
     // Register file associations in capabilities
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Tinta\\Capabilities\\FileAssociations", 0, nullptr,
+    result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TintaMono\\Capabilities\\FileAssociations", 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
     for (std::wstring_view extension : DOCUMENT_FILE_EXTENSIONS) {
@@ -552,8 +577,8 @@ bool registerFileAssociation() {
     result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
-    const wchar_t* capPath = L"Software\\Tinta\\Capabilities";
-    RegSetValueExW(hKey, L"Tinta", 0, REG_SZ, (BYTE*)capPath, (DWORD)((wcslen(capPath) + 1) * sizeof(wchar_t)));
+    const wchar_t* capPath = L"Software\\TintaMono\\Capabilities";
+    RegSetValueExW(hKey, L"Tinta Mono", 0, REG_SZ, (BYTE*)capPath, (DWORD)((wcslen(capPath) + 1) * sizeof(wchar_t)));
     RegCloseKey(hKey);
 
     for (std::wstring_view extension : DOCUMENT_FILE_EXTENSIONS) {
@@ -573,14 +598,23 @@ bool registerFileAssociation() {
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 
     return true;
+#endif
 }
 
+// Linux: registering already made Tinta the default; nothing to open
 void openDefaultAppsSettings() {
+#ifdef _WIN32
     ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps", nullptr, nullptr, SW_SHOWNORMAL);
+#endif
 }
 
 void askAndRegisterFileAssociation(Settings& settings) {
     int lang = settingsLanguageIndex(settings);
+#ifndef _WIN32
+    // Flatpak: installing exported the desktop entry and the file types, and
+    // registering from inside the sandbox would only write into the sandbox
+    if (GetFileAttributesW(L"/.flatpak-info") != INVALID_FILE_ATTRIBUTES) return;
+#endif
     if (isRunningPackaged()) {
         // Store installs: the package manifest already registers the file
         // types, so only the "make default" choice is missing. Ask once per
@@ -605,11 +639,13 @@ void askAndRegisterFileAssociation(Settings& settings) {
     }
     if (settings.hasAskedFileAssociation) {
         if (hasRegisteredFileAssociation(L".md") &&
-            !hasRegisteredFileAssociation(L".mmd") &&
+            (!hasRegisteredFileAssociation(L".mmd") ||
+             !hasRegisteredFileAssociation(L".puml") ||
+             !hasRegisteredFileAssociation(L".plantuml")) &&
             !registerFileAssociation()) {
             MessageBoxW(
                 nullptr,
-                tr(lang, "fileassoc.add_mmd_failed_body"),
+                tr(lang, "fileassoc.add_new_failed_body"),
                 tr(lang, "fileassoc.title"),
                 MB_OK | MB_ICONWARNING);
         }
@@ -618,7 +654,7 @@ void askAndRegisterFileAssociation(Settings& settings) {
 
     int result = MessageBoxW(
         nullptr,
-        tr(lang, "fileassoc.ask_body"),
+        tr(lang, TINTA_FILEASSOC_ASK_BODY),
         tr(lang, "fileassoc.title"),
         MB_YESNO | MB_ICONQUESTION
     );
@@ -626,8 +662,8 @@ void askAndRegisterFileAssociation(Settings& settings) {
     if (result == IDYES) {
         if (registerFileAssociation()) {
             MessageBoxW(nullptr,
-                       tr(lang, "fileassoc.done_body"),
-                       tr(lang, "fileassoc.done_title"),
+                       tr(lang, TINTA_FILEASSOC_DONE_BODY),
+                       tr(lang, TINTA_FILEASSOC_DONE_TITLE),
                        MB_OK | MB_ICONINFORMATION);
             openDefaultAppsSettings();
         } else {

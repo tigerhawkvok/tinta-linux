@@ -77,7 +77,7 @@ int main() {
                 for (size_t i = 0; i < entries.size(); ++i)
                     if (entries[i].action == CTX_COPY_PATH)
                         check(i+1 < entries.size() && entries[i+1].action == CTX_REVEAL,
-                              "Copy file path is immediately beside Reveal in Explorer");
+                              "Copy file path is immediately beside Show in folder");
             }
             std::set<int> actions;
             for (int row = 0; row < (int)entries.size(); row++) {

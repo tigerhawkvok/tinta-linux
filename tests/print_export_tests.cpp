@@ -193,6 +193,10 @@ void wordFonts(App& app, const std::filesystem::path& dir) {
     std::string docx = read(dir / L"theme-fonts.docx");
     check(docx.find("<w:rPrDefault><w:rPr>" + rFonts(L"SimSun", bodyHan)) != std::string::npos,
           "Word sets body CJK in the theme's CJK face");
+    // Word in Chinese reads CJK from the Normal style, not the defaults
+    check(docx.find("w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:rPr>" + rFonts(L"SimSun", bodyHan)) !=
+              std::string::npos,
+          "the Normal style names the body faces too");
     const std::string code = rFonts(L"Courier New", codeHan);
     const size_t first = docx.find(code);
     check(first != std::string::npos && docx.find(code, first + 1) != std::string::npos,
@@ -207,7 +211,9 @@ void wordFonts(App& app, const std::filesystem::path& dir) {
     check(latinHan != L"Georgia" && !latinHan.empty(), "a Latin body face falls back for CJK");
     check(exportDocxFile(app, (dir / L"latin-fonts.docx").wstring()), "the Latin-face export succeeds");
     docx = read(dir / L"latin-fonts.docx");
-    check(docx.find("<w:rPrDefault><w:rPr>" + rFonts(L"Georgia", latinHan)) != std::string::npos,
+    check(docx.find("<w:rPrDefault><w:rPr>" + rFonts(L"Georgia", latinHan)) != std::string::npos &&
+              docx.find("w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:rPr>" + rFonts(L"Georgia", latinHan)) !=
+                  std::string::npos,
           "a Latin body face names the CJK face the screen falls back to");
     check(docx.find("<w:outlineLvl w:val=\"0\"/></w:pPr><w:rPr>" + rFonts(L"Cambria", headingHan)) !=
               std::string::npos,

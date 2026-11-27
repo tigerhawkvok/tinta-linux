@@ -1,20 +1,11 @@
 <div align="center">
   <img src="resources/tinta.ico" width="80">
-  <h1>Tinta</h1>
-  <p><em>Markdown, distilled.</em></p>
-  <p>A fast, lightweight Markdown and Mermaid viewer for Windows</p>
+  <h1>Tinta Mono</h1>
+  <p><em>Markdown, distilled. On Windows and Linux, tuned for people who write code.</em></p>
+  <p>A fast, native Markdown and Mermaid viewer and editor</p>
 
-  <p>
-    <a href="https://apps.microsoft.com/detail/9MZ5MZ3L9RKF">
-      <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get Tinta from the Microsoft Store">
-    </a>
-  </p>
-
-  <a href="https://github.com/oipoistar/tinta/releases/latest">
-    <img src="https://img.shields.io/github/v/release/oipoistar/tinta?label=Portable&style=for-the-badge&color=1a1a2e" alt="Portable download">
-  </a>
-  <a href="https://tinta.cc">
-    <img src="https://img.shields.io/badge/website-tinta.cc-8b4513?style=for-the-badge" alt="Website">
+  <a href="https://github.com/tigerhawkvok/tinta-linux/releases/latest">
+    <img src="https://img.shields.io/github/v/release/tigerhawkvok/tinta-linux?label=Download&style=for-the-badge&color=1a1a2e" alt="Download">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License">
@@ -23,33 +14,53 @@
 
 <br>
 
-Tinta is a **fast, lightweight Markdown and Mermaid viewer for Windows**, built with Direct2D and DirectWrite for hardware-accelerated rendering. A single native executable of about 2.5 MB that opens instantly — no Electron, no web engine, no installer.
+**Tinta Mono** is a fast, native Markdown and Mermaid viewer and editor for **Windows and
+Linux**. It opens instantly: no Electron and no web engine, just Direct2D/DirectWrite on Windows
+and GTK 4, Cairo and Pango on Linux.
 
-<p align="center">
-  <img src="https://tinta.cc/img/screenshots/paper.png" width="49%" alt="Tinta markdown viewer on Windows — Paper light theme">
-  <img src="https://tinta.cc/img/screenshots/midnight.png" width="49%" alt="Tinta markdown viewer on Windows — Midnight dark theme">
-</p>
+## Lineage
+
+Tinta Mono is a hard fork of **[Tinta](https://github.com/oipoistar/tinta)** by
+[oipoistar](https://github.com/oipoistar), the Windows Markdown viewer at
+[tinta.cc](https://tinta.cc). Everything that makes Tinta fast and pleasant comes from there: the
+Direct2D renderer, the tabs and unified editor, annotations, the exports, and the themes. If you
+only need Windows, upstream Tinta is signed and in the
+[Microsoft Store](https://apps.microsoft.com/detail/9MZ5MZ3L9RKF).
+
+The fork adds:
+
+- **Linux**:
+  - a compatibility layer that runs the same code on GTK 4, Cairo and Pango, natively on Wayland
+    and X11;
+  - an AppImage and a Flatpak;
+  - single instance, tabs that tear off and move between windows, and printing through the system
+    dialog.
+- **Mermaid through [merman](https://github.com/Latias94/merman)**:
+  - the Rust port of Mermaid draws every diagram family Mermaid's docs show, math labels included;
+  - labels are sized in the face that draws them;
+  - search reaches the diagram's source.
+- **Programmer-friendly choices**:
+  - Monaspace Argon as the default code face, bundled on both platforms;
+  - Windows, Vim and Emacs keyboard profiles;
+  - copying from the reader gives you the Markdown behind the selection;
+  - pasted screenshots go to an assets folder or inline.
+
+The name keeps "Tinta" for where it comes from, and "Mono" for the monospace and code-minded
+defaults. Settings stay where Tinta keeps them (`%APPDATA%\Tinta`, or `~/.config/Tinta` on Linux),
+so moving between the two keeps your setup.
 
 ## Install
 
-The recommended way is the [Microsoft Store](https://apps.microsoft.com/detail/9MZ5MZ3L9RKF): the build is signed by the Store, trusted by Windows out of the box (no security prompts, works with Smart App Control), and updates automatically. The same signed build installs from the command line:
+Download from [the latest release](https://github.com/tigerhawkvok/tinta-linux/releases/latest):
 
-```pwsh
-winget install "Tinta Markdown Viewer" -s msstore
-```
+| File | Platform |
+|---|---|
+| `tinta-mono-<version>-windows-x64.exe` | Windows 10/11, x64: a portable single exe. Put a `settings.ini` beside it to keep settings there. It is unsigned, so SmartScreen asks once ("More info", then "Run anyway"). |
+| `Tinta-Mono-<version>-x86_64.AppImage` | Linux x86_64 (glibc 2.38 or newer): `chmod +x` and run; `--register` adds the desktop entry and file types. |
 
-### Portable and other options
+The Flatpak builds from this tree with `packaging/flatpak/build-flatpak.sh`.
 
-Prefer a single file? Grab [the latest release](https://github.com/oipoistar/tinta/releases/latest): a portable `tinta.exe`, no installation required. Because a freshly released exe is not yet code-signed, Windows may show a SmartScreen prompt on first run ("More info", then "Run anyway") until the new version builds up download reputation.
-
-[Scoop](https://scoop.sh) users can install from the bucket:
-
-```pwsh
-scoop bucket add tinta https://github.com/oipoistar/scoop-bucket
-scoop install tinta
-```
-
-## Why Tinta?
+## Why native?
 
 Most markdown apps ship an entire browser to render text. Tinta uses the GPU-accelerated text stack already built into Windows:
 
@@ -79,8 +90,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **Image lightbox** - Click any inline image to view it full size: wheel zooms, drag pans, Esc closes
 - **Copy tables as TSV** - Hover a table for a copy button that pastes into Excel or Sheets as a real grid
 - **Copy diagrams as images** - Hover a diagram for an Image button that puts a crisp 2x PNG on the clipboard
-- **Paste screenshots** - Ctrl+V a bitmap in edit mode and it saves as a PNG beside the document with the link inserted
-- **Pin on top** - A pushpin in the title bar keeps the window above every other app
+- **Paste screenshots** - Ctrl+V an image in edit mode and choose where it goes: the document's assets folder, inline in the Markdown, or anywhere with Save as. Tick Remember, or set it under Settings > Editor, to skip the question
 - **Rich tables** - Tables with bold, italic, code, and clickable links in cells
 - **Tabs** - Win11 Notepad-style tabs in the title bar: files opened from Explorer join the window as tabs, Ctrl+Tab cycles, Ctrl+W or Ctrl+F4 closes (Ctrl+F4 also while editing, where Ctrl+W is word wrap), middle-click closes, Ctrl+T opens the file browser into a new tab, unsaved buffers show a dot, resting the pointer on a tab shows its full name, its folder and what its dot means, and dragging reorders tabs. Right-click a tab for close operations (close, close all but this, close all to the left/right) plus copy path and reveal in Explorer. Pulling a tab out of the strip floats it as a card: drop it on open space for a new window (which keeps the tab row), or onto another Tinta window to move it there — and dropping a single-file window onto a tab strip merges it back. Single-file windows stay tabless; turn the Explorer behavior off with the "Open files in tabs" setting
 - **Folder browser** - Press B to browse and open Markdown or Mermaid files (Ctrl+click a file to open it in a new tab)
@@ -114,7 +124,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 | `ESC` | Close overlay / Quit |
 | `T` | Open theme chooser |
 | `S` | Toggle stats overlay |
-| `Ctrl+C` | Copy selected text (or all if none selected) |
+| `Ctrl+C` | Copy the selection as Markdown — its emphasis, code, links, list markers and table header come along (or the whole document as written, if nothing is selected) |
 | `Ctrl+A` | Select all text |
 | `Ctrl+Scroll` | Zoom in/out |
 | `Arrow keys` / `J/K` | Scroll |
@@ -141,7 +151,14 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 
 **Shortcut profiles** (Settings → Keyboard shortcuts): pick **Windows**
 (`E` edits, `F1` opens help, `F` searches — the default), **Vim** (`/`
-searches, `:` edits, `?` helps), or **Custom**. The Edit button opens a
+searches, `:` edits, `?` helps), **Emacs**, or **Custom**. Emacs adds its
+chords in the reader and the source editor: `C-n`/`C-p`/`C-f`/`C-b`,
+`C-a`/`C-e`, `M-f`/`M-b`, `C-v`/`M-v`, `M-<`/`M->`, `C-s`/`C-r`, the mark
+(`C-SPC`) with `C-w`/`M-w`/`C-y`, `C-k`/`M-d` (consecutive kills append),
+`C-/`, `C-t`, `C-o`, `M-%`, `C-g`, and `C-x` with `C-f`, `C-s`, `C-w`,
+`C-q` (edit/read), `C-c`, `k`, `b`, `h`, `u` and `C-x`. The clipboard is the
+kill ring; chords Emacs leaves undefined keep their Windows meaning, and
+Help (`C-h`) lists them all. The Edit button opens a
 shortcut editor: click an action, press its new key. Raw `:` and `?`
 always work regardless of profile.
 
@@ -177,7 +194,7 @@ from the command line. The print preview offers 12.7, 19.05 and 25.4 mm page
 margins; `printMarginMm=` takes any value from 5 to 50 for printing and PDF.
 
 The interface language is available in Settings → General. It follows the
-Windows display language by default, or can be changed explicitly. Transient
+system display language by default, or can be changed explicitly. Transient
 notifications and native error dialogs use the same language. Additional
 translations can be added through `languages.ini`; the app remains a native,
 single-file Windows viewer with no web runtime.
@@ -194,6 +211,24 @@ cmake --build . --config Release
 ```
 
 The executable will be at `build/Release/tinta.exe`.
+
+### Both release downloads, from Linux
+
+```bash
+packaging/build-release.sh 4.0.11
+```
+
+This builds, for the version given:
+- the portable Windows exe, cross-compiled with clang-cl;
+- the Linux AppImage.
+
+It then checks both. Each must carry the version, and each must export a
+Mermaid document to HTML headless; the exe runs under Wine when Wine is
+installed. The results land in `build/release-4.0.11/` with `SHA256SUMS`
+and a `BUILD-INFO.txt` naming the commit and any uncommitted changes. The
+version applies to that build only; `CMakeLists.txt` is not edited. Nothing
+is committed, tagged or published. The script's header lists the
+first-run requirements.
 
 ## Usage
 
@@ -214,23 +249,23 @@ tinta.exe -s document.md
 tinta.exe /register
 ```
 
-Or simply drag and drop a `.md` or `.mmd` file onto the window.
+Or simply drag and drop a `.md`, `.mmd` or `.puml` file onto the window (`.plantuml` works too).
 
 To copy a document's full path, right-click the document or its tab (the filename
 in the title bar when only one file is open) and choose
-**Copy file path**, beside **Reveal in Explorer**. The tab menu copies the clicked
+**Copy file path**, beside **Show in folder**. The tab menu copies the clicked
 tab's path, even if another tab is active. Untitled notes have no path until saved.
 
 ## File Association
 
-On first launch, Tinta will ask if you want to set it as the default viewer for Markdown and Mermaid files. If you choose "No", you won't be asked again.
+On first launch, Tinta will ask if you want to set it as the default viewer for Markdown, Mermaid and PlantUML files. If you choose "No", you won't be asked again.
 
 To register Tinta as the default viewer later, run:
 ```bash
 tinta.exe /register
 ```
 
-This registers `.md`, `.markdown`, and `.mmd` so you can select Tinta as their default app in Windows Settings.
+This registers `.md`, `.markdown`, `.mmd`, `.puml` and `.plantuml` so you can select Tinta as their default app in Windows Settings.
 
 ## Mermaid Support
 
@@ -252,6 +287,18 @@ Tinta natively renders twenty-two Mermaid diagram families in `.mmd` files and f
 - **Pie charts**, **git graphs**, **gantt charts** (including the numeric `dateFormat X` axis), **mindmaps**, **timelines**, **user journeys**, **quadrant charts**, and **XY charts** (`xychart-beta`)
 
 Diagrams follow the active theme, print through Ctrl+P, export as SVG in HTML and as crisp images in DOCX, and their text is selectable and searchable like any other content. Anything a native renderer does not cover yet (composite states, zenuml) falls back to readable source code.
+
+## PlantUML Support
+
+PlantUML diagrams render through the real PlantUML tool. Tinta never bundles PlantUML, never downloads anything, and makes no network calls - you point it at a tool you already have: either a native `plantuml.exe`, or a `plantuml.jar` run through the `java` found on your PATH. PlantUML runs in its sandbox security profile, so a diagram in a document you open cannot read files from your disk or fetch anything from the network.
+
+- **Configuration** - the Settings dialog has a **PlantUML diagrams** row. Press **Browse** and pick the exe or the jar; the row then shows the exact command Tinta resolved (for a jar, the `java` executable plus the jar path). A `plantuml.exe` on PATH is auto-detected without touching any setting. The choice persists as `plantumlPath` in `settings.ini`.
+- **What renders** - fenced `plantuml`, `puml` and `pu` blocks inside Markdown, and standalone `.puml` or `.plantuml` files, which open straight as a diagram and join the open/save dialogs, drag-and-drop and file-association registration.
+- **Diagram families** - every family the real tool draws from an `@startuml` block: sequence, use case, class, activity, component, state, object, deployment, timing, gantt and the rest. Detection is anchored on `@startuml` (named blocks such as `@startuml Flow` and `@startuml(Flow)` included); non-UML PlantUML start tags such as `@startjson`, `@startyaml` or `@startmindmap` are not detected and fall back to readable source.
+- **Where it works** - the preview, print and PDF export, HTML export (the SVG PlantUML produced is inlined), DOCX export (a PNG is embedded), and the copy-diagram-as-image button (a 2x PNG). The editor's diagram-template picker offers three PlantUML starters: sequence, class and activity.
+- **Fallback** - no tool configured, no `@startuml` anchor, or a failed or timed-out render leaves readable source code on the page - never a broken image.
+
+PlantUML ships several license flavors, and some of them (the `plantuml-mit` jar, for example) omit a few non-UML extras such as ditaa while still generating every UML diagram; Tinta works with any flavor. Setup and troubleshooting: [PlantUML support](docs/plantuml-support.md).
 
 ## Themes
 

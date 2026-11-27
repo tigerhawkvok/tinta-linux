@@ -1,6 +1,7 @@
 #include "d2d_init.h"
 #include "drafts.h"
 #include "editor.h"
+#include "i18n.h"
 #include "input.h"
 #include "render.h"
 #include "settings.h"
@@ -309,6 +310,11 @@ void wordCount(App& app) {
     editorReparse(app, true);
     check(app.editorDocCounts.words == 3 && app.editorDocCounts.characters == 19,
           "plain-text documents count as they stand");
+    app.currentFile = "diagram.puml";
+    setText(app, L"@startuml\nAlice -> Bob: hi\n@enduml", 0);
+    editorReparse(app, true);
+    check(app.editorDocCounts.words > 0 && app.editorDocCounts.characters > 0,
+          "a PlantUML source counts as it stands");
     app.currentFile = saved;
     app.showWordCount = false;
     app.renderTarget->BeginDraw();
@@ -392,6 +398,31 @@ void draftRecovery() {
         app->hwnd = nullptr;
     }
 }
+
+std::wstring windowText(HWND hwnd) {
+    wchar_t text[512] = {};
+    GetWindowTextW(hwnd, text, 512);
+    return text;
+}
+
+// #2: the document first and the app last, as Windows titles read, in the
+// window itself and through the unsaved-edits marker
+void windowTitles(App& app) {
+    const std::wstring name = std::filesystem::path(TINTA_MULTICURSOR_FIXTURE).filename().wstring();
+    app.editorDirty = false;
+    updateWindowTitle(app);
+    check(windowText(app.hwnd) == name + L" - Tinta Mono", "the title names the document, then Tinta Mono");
+    editorMarkDirtyAndReparse(app);
+    check(windowText(app.hwnd) == L"* " + name + L" - Tinta Mono", "an edit marks the title before the name");
+    const std::string file = app.currentFile;
+    app.currentFile.clear();
+    check(windowTitle(app) == std::wstring(L"* ") + tr(app, "title.untitled") + L" - Tinta Mono",
+          "a quick note is untitled until the first save");
+    app.editMode = false;
+    check(windowTitle(app) == L"Tinta Mono", "with no document the title is the app's name");
+    app.editMode = true;
+    app.currentFile = file;
+}
 }  // namespace
 
 int runEditorFeatureTests() {
@@ -421,6 +452,7 @@ int runEditorFeatureTests() {
         caretClipboardText(app);
     }
     wordCount(app);
+    windowTitles(app);
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;
     state.reset();

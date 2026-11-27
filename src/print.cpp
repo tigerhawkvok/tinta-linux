@@ -1,8 +1,10 @@
 #include "print.h"
+#include "fs_path.h"
 #include "render.h"
 #include "d2d_init.h"
 #include "document.h"
 #include "editor.h"
+#include "export.h"
 #include "settings.h"
 #include "utils.h"
 
@@ -184,9 +186,12 @@ void leavePrintLayout(App& app, const SavedView& saved) {
     if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
+}  // namespace
+
 // Page break positions in document Y. Breaks avoid slicing text lines,
-// images, and diagram shapes by pulling the cut above any straddling atom;
-// an atom taller than most of a page is sliced rather than looping.
+// images, diagram shapes and table rows by pulling the cut above any
+// straddling atom; an atom taller than most of a page is sliced rather than
+// looping.
 std::vector<float> computePageBreaks(const App& app, float pageContentH) {
     std::vector<float> breaks;
     float docEnd = app.contentHeight;
@@ -203,6 +208,9 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
             for (const auto& line : app.lineBuckets) consider(line.top, line.bottom);
             for (const auto& bmp : app.layoutBitmaps) consider(bmp.destRect.top, bmp.destRect.bottom);
             for (const auto& shape : app.layoutShapes) consider(shape.rect.top, shape.rect.bottom);
+            // A row's padding lies outside its text lines: without this the
+            // cut could leave the row's empty top slice on the page above
+            for (const auto& row : app.tableRowBands) consider(row.top, row.bottom);
             // Shrink bands page-break as a unit: a scaled diagram split
             // across pages would render discontinuously
             for (const auto& band : app.printShrinkBands) consider(band.top, band.bottom);
@@ -224,6 +232,8 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
     return breaks;  // implicit final page runs to docEnd
 }
 
+namespace {
+
 // Replays the cached layout for the document Y range [yStart, yEnd) into
 // the given device context, translated so yStart lands at offsetY. A
 // print-path sibling of render()'s document pass — selection, search, and
@@ -237,6 +247,14 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
     };
     float dx = offsetX;
     float dy = offsetY - yStart;
+
+    // Clip to this page's slice: a block that runs on past the break (a
+    // table's column rules, a quote's bar) must not draw into the margin.
+    // The edge lets a rule lying on the break draw whole on both pages, so
+    // a table split between rows is closed above and opened below.
+    const float edge = 1.5f;
+    dc->PushAxisAlignedClip(D2D1::RectF(-1.0e5f, offsetY - edge, 1.0e5f, offsetY + (yEnd - yStart) + edge),
+                            D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Oversized blocks draw scaled about their band's top-left; the band
     // transform composes with whatever transform the caller set (the
@@ -272,7 +290,7 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
     for (const auto& line : app.layoutLines) {
         float top = std::min(line.p1.y, line.p2.y);
         float bottom = std::max(line.p1.y, line.p2.y);
-        if (!inRange(top, bottom)) continue;
+        if (bottom < yStart || top > yEnd) continue;  // a rule on the break: both pages
         bool banded = applyBand(top, bottom);
         brush->SetColor(line.color);
         dc->DrawLine(D2D1::Point2F(line.p1.x + dx, line.p1.y + dy),
@@ -426,6 +444,7 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
                            run.layout, brush);
         resetBand(banded);
     }
+    dc->PopAxisAlignedClip();
 }
 
 struct PageGeometry {
@@ -533,8 +552,20 @@ int renderPages(App& app, const PageGeometry& geo, EmitFn emitPage) {
 
     SavedView saved{};
     enterPrintLayout(app, saved);
+    // Print/PDF run synchronously and have no message pump: the async
+    // PlantUML queue can never deliver here, so the print layout is the
+    // single place allowed to render a missing diagram inline, bounded by
+    // one shared millisecond budget. The print preview and the link peek
+    // share layoutAtPrintWidth but stay async (they run with a pump); the
+    // reflow timer refreshes an open preview when a render lands.
+    app.plantumlPrintLayout = true;
+    app.plantumlPrintBudgetMsLeft = 30000;
     layoutAtPrintWidth(app, geo.contentW);
-
+    // Cleared right after the layout: the post-print relayout at screen
+    // width is interactive again (message pump available), so it schedules
+    // through the async queue instead of blocking the UI thread.
+    app.plantumlPrintLayout = false;
+    app.plantumlPrintBudgetMsLeft = 0;
     std::vector<float> breaks = computePageBreaks(app, geo.contentH);
     breaks.push_back(app.contentHeight + 1.0f);  // final page sentinel
 
@@ -580,6 +611,21 @@ int renderPages(App& app, const PageGeometry& geo, EmitFn emitPage) {
 } // namespace
 
 bool printDocument(App& app) {
+#ifndef _WIN32
+    // Linux: the system print dialog prints the PDF Tinta exports (at the
+    // preview's paper size), so print and PDF come out of the same pages
+    wchar_t tempDir[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tempDir);
+    static int jobs = 0;
+    std::wstring path = std::wstring(tempDir) + L"tinta-print-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                        std::to_wstring(++jobs) + L".pdf";
+    if (!exportPdfFile(app, path)) return false;
+    if (!tintaPrintPdf(app.hwnd, toUtf8(path).c_str())) {
+        DeleteFileW(path.c_str());
+        return false;
+    }
+    return true;
+#endif
     // Standard printer picker; PD_RETURNDC so the paper size can be read
     PRINTDLGW pd{};
     pd.lStructSize = sizeof(pd);
@@ -639,7 +685,7 @@ bool printDocument(App& app) {
                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
         return false;
     }
-    std::wstring jobName = L"Tinta - " + toWide(app.currentFile);
+    std::wstring jobName = L"Tinta Mono - " + toWide(app.currentFile);
     IPrintDocumentPackageTarget* target = nullptr;
     HRESULT hr = factory->CreateDocumentPackageTargetForPrintJob(
         printerName.c_str(), jobName.c_str(), nullptr, nullptr, &target);
@@ -744,6 +790,12 @@ void printPreviewSetFormat(App& app, int paper, bool landscape) {
     if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
+void printPreviewRefresh(App& app) {
+    if (!app.showPrintPreview) return;
+    refreshPreviewLayout(app);
+    if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
 void printPreviewSetMargin(App& app, float mm) {
     mm = std::max(5.0f, std::min(mm, 50.0f));
     if (std::fabs(mm - app.printMarginMm) < 0.005f) return;
@@ -834,7 +886,7 @@ int printDebugPages(App& app, const std::wstring& outDir) {
         IWICBitmapEncoder* encoder = nullptr;
         IWICStream* stream = nullptr;
         IWICBitmapFrameEncode* frame = nullptr;
-        std::wstring path = outDir + L"\\page-" + std::to_wstring(index + 1) + L".png";
+        std::wstring path = joinPath(outDir, L"page-" + std::to_wstring(index + 1) + L".png");
         if (app.wicFactory &&
             SUCCEEDED(app.wicFactory->CreateStream(&stream)) &&
             SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&
@@ -899,7 +951,7 @@ bool exportPdfFile(App& app, const std::wstring& path) {
         fileStream->Release();
         return false;
     }
-    std::wstring jobName = L"Tinta - " + toWide(app.currentFile);
+    std::wstring jobName = L"Tinta Mono - " + toWide(app.currentFile);
     IPrintDocumentPackageTarget* target = nullptr;
     HRESULT hr = factory->CreateDocumentPackageTargetForPrintJob(
         L"Microsoft Print to PDF", jobName.c_str(), fileStream, nullptr,
@@ -940,7 +992,7 @@ bool exportPdfFile(App& app, const std::wstring& path) {
 ID2D1Bitmap* renderPeekBitmap(App& app, const std::wstring& path,
                               float widthDips, float& heightDips) {
     if (!app.deviceContext || !app.root) return nullptr;
-    std::ifstream file(path);
+    std::ifstream file{fsPath(path)};
     if (!file) return nullptr;
     std::stringstream buffer;
     buffer << file.rdbuf();

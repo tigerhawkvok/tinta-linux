@@ -1,7 +1,7 @@
 # Copy file path: $E = mc^2$
 
 Regression fixture for [#203](https://github.com/oipoistar/tinta/issues/203).
-Right-click the document and choose **Copy file path**, beside **Reveal in Explorer**.
+Right-click the document and choose **Copy file path**, beside **Show in folder**.
 Paste into an untitled note to verify that the clipboard contains this document's
 absolute path, including its extension, spaces and any Unicode characters.
 

@@ -43,8 +43,12 @@ inline constexpr KeyProfileDef KEY_PROFILES[] = {
                  {VK_F11}, {'K'}, {'J'}, {'E'}, {VK_F1}, {'A'}}},
     {"vim", {{'/', true}, {'B'}, {VK_TAB}, {'T'}, {'S'}, {'Q'}, {'N'},
              {VK_F11}, {'K'}, {'J'}, {':', true}, {'?', true}, {'A'}}},
+    // Emacs keeps Tinta's single keys; its chords (C-s, C-x C-f, M-w...)
+    // are emacs_keys.cpp, in the viewer and the source editor
+    {"emacs", {{'F'}, {'B'}, {VK_TAB}, {'T'}, {'S'}, {'Q'}, {'N'},
+               {VK_F11}, {'K'}, {'J'}, {'E'}, {VK_F1}, {'A'}}},
 };
-inline constexpr int KEY_PROFILE_COUNT = 2;
+inline constexpr int KEY_PROFILE_COUNT = 3;
 
 int keyProfileIndexById(const std::string& id);
 KeyBinding parseKeyName(const std::string& value);

@@ -8,7 +8,7 @@ bool canResize(const App& app) {
         !app.showShortcutEditor && !app.showThemeChooser && !app.showHelp &&
         !app.showPrintPreview && !app.showLightbox && !app.showContextMenu &&
         !app.showTabMenu && !app.showTabSwitcher && !app.confirmExitPending &&
-        !app.createRefPending && !app.annotEditorOpen && !app.showSearch &&
+        !app.createRefPending && !app.pasteImagePending && !app.annotEditorOpen && !app.showSearch &&
         !app.signalTrayOpen;
 }
 }

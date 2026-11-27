@@ -56,7 +56,7 @@ bool rowActs(SearchPanelRowKind kind) {
 }
 
 bool matchPlaced(const App::SearchMatch& m) {
-    return m.textRectIndex != kNoTextRect &&
+    return (m.textRectIndex != kNoTextRect || m.codeBlock >= 0) &&
            m.highlightRect.bottom > m.highlightRect.top;
 }
 
@@ -710,8 +710,12 @@ void renderSearchPanel(App& app) {
                 if (row.index < 0 || row.index >= (int)app.searchMatches.size()) break;
                 const App::SearchMatch& m = app.searchMatches[row.index];
                 size_t start = 0;
-                std::wstring snippet = snippetAround(app.docText, m.startPos, m.length, start);
-                drawSnippet(app, snippet, start, m.length,
+                bool inDiagram = m.codeBlock >= 0 && m.codeBlock < (int)app.codeBlocks.size();
+                std::wstring snippet =
+                    inDiagram ? snippetAround(app.codeBlocks[m.codeBlock].codeText, m.codeOffset,
+                                              m.codeLength, start)
+                              : snippetAround(app.docText, m.startPos, m.length, start);
+                drawSnippet(app, snippet, start, inDiagram ? m.codeLength : m.length,
                             D2D1::RectF(left + dpi(app, 12.0f), r.top, right, r.bottom),
                             anim);
                 break;

@@ -1,3 +1,5 @@
+*.*~
+
 # Build
 build/
 out/
@@ -31,3 +33,9 @@ CLAUDE.md
 
 # Website (separate repo)
 web/
+__pycache__/
+
+
+# Irrelevant port notes
+docs/linux-port
+docs/linux-port/*
